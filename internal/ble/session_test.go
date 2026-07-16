@@ -3,6 +3,7 @@ package ble
 import (
 	"encoding/hex"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/keithah/openwrt-wattline/internal/state"
@@ -15,6 +16,12 @@ type fakeTransport struct {
 	subs       map[string]func([]byte)
 	failWrites map[string]error // uuid -> error to return on write
 	disc       chan struct{}
+	closeOnce  sync.Once
+}
+
+func (f *fakeTransport) Close() error {
+	f.closeOnce.Do(func() { close(f.disc) })
+	return nil
 }
 
 func newFake() *fakeTransport {

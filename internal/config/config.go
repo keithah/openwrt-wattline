@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -213,9 +214,45 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// saveMu serializes the read-modify-write cycles of SavePairing (pairing
+// goroutine) and SaveRules (HTTP handlers) so concurrent saves can't clobber
+// each other's changes through a stale read.
+var saveMu sync.Mutex
+
+// SavePairing records the paired device in the main section, preserving the
+// rest of the file. An empty pin keeps the currently configured PIN.
+func SavePairing(path, mac, pin string) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	doc, err := ParseUCI(string(raw))
+	if err != nil {
+		return err
+	}
+	main := doc.Find("wattline", "main")
+	if main == nil {
+		main = newSection("wattline", "main")
+		doc.Sections = append(doc.Sections, main)
+	}
+	main.Options["device_mac"] = mac
+	if pin != "" {
+		main.Options["pin"] = pin
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(doc.Serialize()), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // SaveRules rewrites the config file, replacing all rule sections while
 // preserving every non-rule section verbatim.
 func (c *Config) SaveRules(path string) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err

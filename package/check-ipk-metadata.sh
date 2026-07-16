@@ -6,16 +6,20 @@ if [ "$#" -eq 0 ]; then
 	exit 2
 fi
 
+# GNU tar for consistent -tv listing format (owner shown as "0/0"). The
+# Makefile passes its own TAR so build and check always use the same binary.
+TAR="${TAR:-$(command -v gtar || command -v gnutar || echo tar)}"
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 failed=0
 for ipk in "$@"; do
 	rm -rf "$tmp"/*
-	tar -xzf "$ipk" -C "$tmp" ./control.tar.gz ./data.tar.gz
+	"$TAR" -xzf "$ipk" -C "$tmp" ./control.tar.gz ./data.tar.gz
 	for archive in control.tar.gz data.tar.gz; do
 		listing="$tmp/$archive.list"
-		tar --numeric-owner -tvzf "$tmp/$archive" > "$listing"
+		"$TAR" --numeric-owner -tvzf "$tmp/$archive" > "$listing"
 
 		if awk '$2 != "0/0" { print; bad = 1 } END { exit !bad }' "$listing"; then
 			echo "$ipk: $archive contains non-root ownership" >&2

@@ -4,15 +4,18 @@
 # An OpenWrt .ipk is a GZIPPED TAR (not an ar/.deb archive) wrapping
 # ./debian-binary + ./control.tar.gz + ./data.tar.gz. The router's opkg
 # (verified on GL-X3000, opkg 2021-06-13) segfaults on the ar/.deb form.
-VERSION := 1.0.0
+VERSION := 1.1.0
 ARCH := aarch64_cortex-a53
+# GNU tar required for --owner/--group/--mode normalization (macOS: brew
+# install gnu-tar); BSD tar lacks --mode and emits pax headers opkg rejects.
+TAR := $(shell command -v gtar || command -v gnutar || echo tar)
 OUT := out
 BIN := $(OUT)/wattlined-bin
 
 .PHONY: all clean bin ipk-wattlined ipk-bt ipk-luci ipk-glapp feed
 
 all: ipk-wattlined ipk-bt ipk-luci ipk-glapp
-	./check-ipk-metadata.sh $(OUT)/*.ipk
+	TAR="$(TAR)" ./check-ipk-metadata.sh $(OUT)/*.ipk
 
 # feed: build all ipks + an opkg index (Packages/Packages.gz) so a router can
 # `opkg update && opkg upgrade` from a hosted feed instead of manual reinstall.
@@ -39,13 +42,13 @@ define make_ipk
 	# --format ustar: OpenWrt's opkg tar parser rejects pax extended headers
 	#   (typeflag 'x'/0x78), which macOS BSD tar emits by default.
 	# COPYFILE_DISABLE: keep BSD tar from injecting AppleDouble (._*) entries.
-	COPYFILE_DISABLE=1 tar --format ustar --owner=0 --group=0 --numeric-owner \
+	COPYFILE_DISABLE=1 $(TAR) --format ustar --owner=0 --group=0 --numeric-owner \
 		--mode='u+rwX,go+rX,go-w' --exclude=CONTROL -czf $(OUT)/data.tar.gz -C $(OUT)/stage-$(1) .
-	COPYFILE_DISABLE=1 tar --format ustar --owner=0 --group=0 --numeric-owner \
+	COPYFILE_DISABLE=1 $(TAR) --format ustar --owner=0 --group=0 --numeric-owner \
 		--mode='u+rwX,go+rX,go-w' -czf $(OUT)/control.tar.gz -C $(OUT)/stage-$(1)/CONTROL .
 	echo "2.0" > $(OUT)/debian-binary
 	# Outer wrapper is a gzipped ustar tar (OpenWrt ipk format), NOT ar.
-	( cd $(OUT) && COPYFILE_DISABLE=1 tar --format ustar -czf $(1)_$(VERSION)_$(3).ipk \
+	( cd $(OUT) && COPYFILE_DISABLE=1 $(TAR) --format ustar -czf $(1)_$(VERSION)_$(3).ipk \
 		./debian-binary ./control.tar.gz ./data.tar.gz )
 	rm -f $(OUT)/data.tar.gz $(OUT)/control.tar.gz $(OUT)/debian-binary
 endef

@@ -31,7 +31,8 @@
   return {
     name: 'wattline',
     data: function () {
-      return { token: '', port: '8377', tel: null, dev: null, err: '', loaded: false };
+      return { token: '', port: '8377', tel: null, dev: null, err: '', loaded: false,
+        pairing: null, pin: '020555', selMac: '', ptick: 0, uiErr: '' };
     },
     created: function () {
       var self = this;
@@ -53,13 +54,39 @@
         this.get('/telemetry').then(function (t) {
           self.tel = t; self.err = ''; self.loaded = true;
           if (t.connected && !self.dev) self.get('/status').then(function (s) { self.dev = s.device || null; }).catch(function () {});
+          if (!t.connected) {
+            var pp = self.pairing;
+            var pbusy = pp && (pp.stage === 'scanning' || pp.stage === 'pairing');
+            self.ptick++;
+            if (!pp || pbusy || self.ptick % 5 === 0) {
+              self.get('/pairing/status').then(function (p) { self.pairing = p; }).catch(function () { self.pairing = null; });
+            }
+          }
         }).catch(function () { self.err = 'Daemon unreachable — is wattlined running?'; self.loaded = true; });
       },
-      act: function (a) { var self = this;
-        fetch(this.base() + '/device/action', {
+      post: function (path, body) {
+        return fetch(this.base() + path, {
           method: 'POST', headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: a })
-        }).then(function () { setTimeout(function () { self.tick(); }, 800); }).catch(function () {});
+          body: body ? JSON.stringify(body) : undefined
+        }).then(function (r) {
+          if (!r.ok) return r.text().then(function (t) { throw new Error((t || '').trim() || ('HTTP ' + r.status)); });
+          return r;
+        });
+      },
+      pscan: function () { var self = this;
+        this.uiErr = '';
+        this.post('/pairing/scan').then(function () { self.ptick = 0; self.tick(); })
+          .catch(function (e) { self.uiErr = e.message; });
+      },
+      ppair: function () { var self = this;
+        if (!this.selMac) return;
+        this.uiErr = '';
+        this.post('/pairing/pair', { mac: this.selMac, pin: this.pin }).then(function () { self.ptick = 0; self.tick(); })
+          .catch(function (e) { self.uiErr = e.message; });
+      },
+      act: function (a) { var self = this;
+        this.post('/device/action', { action: a })
+          .then(function () { setTimeout(function () { self.tick(); }, 800); }).catch(function () {});
       }
     },
     render: function (h) {
@@ -94,10 +121,63 @@
 
       if (!self.loaded) return wrap([sub('Loading…')]);
       if (self.err) return wrap([card([el('div', { color: GREY, textAlign: 'center', padding: '30px 0' }, self.err)])]);
-      if (!conn) return wrap([card([el('div', { textAlign: 'center', padding: '26px 10px', color: GREY }, [
-        el('div', { fontSize: '15px', color: '#3c4043', marginBottom: '6px' }, 'No power bank connected'),
-        'Plug the USB BLE dongle into the router and power on the Link-Power. It will connect automatically.'
-      ])])]);
+      if (!conn) {
+        var p = self.pairing || { stage: 'idle', devices: [] };
+        var busy = p.stage === 'scanning' || p.stage === 'pairing';
+        var btn = function (label, onclick, primary, disabled) {
+          return h('button', { style: {
+            padding: '8px 18px', borderRadius: '8px', fontSize: '14px', cursor: disabled ? 'default' : 'pointer',
+            border: primary ? 'none' : '1px solid #d0d4d9', opacity: disabled ? '.5' : '1',
+            background: primary ? GREEN : '#fff', color: primary ? '#fff' : '#3c4043'
+          }, attrs: { disabled: !!disabled }, on: { click: onclick } }, label);
+        };
+        var rows = (p.devices || []).map(function (d) {
+          var selected = self.selMac === d.mac;
+          return h('div', { key: d.mac, style: {
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px',
+            borderRadius: '10px', cursor: 'pointer', marginTop: '6px',
+            border: selected ? '2px solid ' + GREEN : '1px solid #e4e7eb'
+          }, on: { click: function () { self.selMac = d.mac; } } }, [
+            el('div', {}, [ h('b', { style: { fontSize: '14px' } }, d.name || '(unnamed)'),
+              el('div', { color: GREY, fontSize: '12px' }, d.mac + (d.paired ? ' · previously paired' : '')) ]),
+            el('div', { color: GREY, fontSize: '12px' }, d.rssi ? d.rssi + ' dBm' : '')
+          ]);
+        });
+        var pairBits = [
+          cardhead('Pair your Link-Power'),
+          sub('Power on the Link-Power, keep it near the router, then scan. Make sure no phone or laptop app is connected to it.'),
+          el('div', { marginTop: '12px' }, [ btn(p.stage === 'scanning' ? 'Scanning…' : 'Scan for devices', function () { self.pscan(); }, false, busy) ])
+        ];
+        if (rows.length) pairBits.push(el('div', { marginTop: '6px' }, rows));
+        if (self.selMac) {
+          pairBits.push(el('div', { display: 'flex', alignItems: 'center', marginTop: '12px' }, [
+            el('div', { marginRight: '10px' }, [ sub('PIN'),
+              h('input', { style: { width: '90px', padding: '7px 9px', fontSize: '14px', border: '1px solid #d0d4d9',
+                borderRadius: '8px', marginTop: '2px' },
+                attrs: { maxlength: 6, inputmode: 'numeric' },
+                domProps: { value: self.pin },
+                on: { input: function (e) {
+                  var v = e.target.value.replace(/[^0-9]/g, '').slice(0, 6);
+                  e.target.value = v; self.pin = v;
+                } } }) ]),
+            el('div', { flex: '1' }, ''),
+            btn(p.stage === 'pairing' ? 'Pairing…' : 'Pair', function () { self.ppair(); }, true, busy)
+          ]));
+          pairBits.push(el('div', { color: GREY, fontSize: '12px', marginTop: '6px' },
+            'Default PIN is 020555 (see the manual). If the device shows a PIN on its screen, enter that instead.'));
+        }
+        if (self.uiErr) pairBits.push(el('div', { color: RED, fontSize: '13px', marginTop: '10px' }, self.uiErr));
+        if (p.stage === 'pairing') pairBits.push(el('div', { color: ORANGE, fontSize: '13px', marginTop: '10px' }, 'Pairing and verifying the connection… this usually takes under a minute.'));
+        if (p.stage === 'paired') pairBits.push(el('div', { color: GREEN, fontSize: '13px', marginTop: '10px' }, 'Paired. Connecting…'));
+        if (p.stage === 'error') pairBits.push(el('div', { color: RED, fontSize: '13px', marginTop: '10px' }, 'Pairing failed: ' + (p.error || 'unknown error')));
+        return wrap([
+          card([el('div', { textAlign: 'center', padding: '10px 10px 14px', color: GREY }, [
+            el('div', { fontSize: '15px', color: '#3c4043', marginBottom: '6px' }, 'No power bank connected'),
+            'Plug the USB BLE dongle into the router and power on the Link-Power. Already-paired devices connect automatically.'
+          ])]),
+          card(pairBits)
+        ]);
+      }
 
       var t = self.tel, b = t.battery || {}, dc = t.dc || {}, c = t.typec || {};
       var bColor = flow(b.status);

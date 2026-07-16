@@ -28,6 +28,12 @@ func (nopDev) Restart() error           { return nil }
 func (nopDev) Shutdown() error          { return nil }
 
 func testServer(t *testing.T) (http.Handler, *state.Store, *[]config.Rule) {
+	return testServerWith(t, nil)
+}
+
+// testServerWith builds the standard test server, letting a test adjust Deps
+// (e.g. attach a Pairing manager) before the handler is constructed.
+func testServerWith(t *testing.T, mutate func(*Deps)) (http.Handler, *state.Store, *[]config.Rule) {
 	store := state.NewStore()
 	store.SetBattery(proto.Battery{Level: 77})
 	eng, _ := rules.NewEngine(nil)
@@ -40,6 +46,9 @@ func testServer(t *testing.T) (http.Handler, *state.Store, *[]config.Rule) {
 		Connected: func() bool { return true },
 		LoadRules: func() []config.Rule { return *saved },
 		SaveRules: func(rs []config.Rule) error { *saved = rs; return eng.SetRules(rs) },
+	}
+	if mutate != nil {
+		mutate(&d)
 	}
 	return NewServer(d), store, saved
 }

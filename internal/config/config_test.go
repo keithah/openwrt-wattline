@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -125,5 +126,46 @@ func TestSaveRulesRoundTrip(t *testing.T) {
 	}
 	if cfg2.PIN != "020555" { // main section preserved
 		t.Fatal("main section lost")
+	}
+}
+
+func TestSavePairingUpdatesMACAndPIN(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/wattline"
+	src := `config wattline 'main'
+	option device_mac ''
+	option pin '020555'
+	option token 'tok'
+
+config rule 'keepme'
+	option enabled '1'
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePairing(path, "DC:04:5A:EB:72:2B", "111222"); err != nil {
+		t.Fatalf("SavePairing: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DeviceMAC != "DC:04:5A:EB:72:2B" || cfg.PIN != "111222" {
+		t.Fatalf("got mac=%q pin=%q", cfg.DeviceMAC, cfg.PIN)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "config rule 'keepme'") {
+		t.Fatalf("rule section lost:\n%s", raw)
+	}
+	// empty pin keeps the existing one
+	if err := SavePairing(path, "AA:BB:CC:DD:EE:FF", ""); err != nil {
+		t.Fatalf("SavePairing(empty pin): %v", err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DeviceMAC != "AA:BB:CC:DD:EE:FF" || cfg.PIN != "111222" {
+		t.Fatalf("after empty-pin save: mac=%q pin=%q", cfg.DeviceMAC, cfg.PIN)
 	}
 }

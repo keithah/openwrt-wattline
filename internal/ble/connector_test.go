@@ -105,3 +105,91 @@ func TestConnectorBackoffOnDialError(t *testing.T) {
 		t.Fatalf("expected retries on dial error, got %d", dials)
 	}
 }
+
+func TestConnectorPauseClosesSessionAndBlocksRedial(t *testing.T) {
+	var dials int32
+	dial := func() (Transport, error) {
+		atomic.AddInt32(&dials, 1)
+		f := newFake()
+		scriptedHandshake(f)
+		return f, nil
+	}
+	store := state.NewStore()
+	c := NewConnector(dial, store, nil)
+	c.retryDelay = 5 * time.Millisecond
+	c.settle = 0
+	stop := make(chan struct{})
+	defer close(stop)
+	go c.Run(stop)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Session() == nil && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if c.Session() == nil {
+		t.Fatal("never connected")
+	}
+
+	c.Pause()
+	deadline = time.Now().Add(2 * time.Second)
+	for c.Session() != nil && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if c.Session() != nil {
+		t.Fatal("session not closed on Pause")
+	}
+	if store.Snapshot().Connected {
+		t.Fatal("store still reports connected after Pause")
+	}
+	before := atomic.LoadInt32(&dials)
+	time.Sleep(100 * time.Millisecond)
+	if after := atomic.LoadInt32(&dials); after != before {
+		t.Fatalf("connector redialed while paused (%d -> %d)", before, after)
+	}
+
+	c.Resume()
+	deadline = time.Now().Add(2 * time.Second)
+	for c.Session() == nil && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if c.Session() == nil {
+		t.Fatal("did not reconnect after Resume")
+	}
+}
+
+func TestPauseDuringDialDropsFreshConnection(t *testing.T) {
+	release := make(chan struct{})
+	var closed int32
+	dial := func() (Transport, error) {
+		<-release // simulate a long BLE scan in flight
+		f := newFake()
+		scriptedHandshake(f)
+		go func() {
+			<-f.disc
+			atomic.AddInt32(&closed, 1)
+		}()
+		return f, nil
+	}
+	store := state.NewStore()
+	c := NewConnector(dial, store, nil)
+	c.retryDelay = 5 * time.Millisecond
+	c.settle = 0
+	stop := make(chan struct{})
+	defer close(stop)
+	go c.Run(stop)
+
+	time.Sleep(20 * time.Millisecond) // let Run enter dial()
+	c.Pause()                         // pause lands while dial is in flight
+	close(release)                    // dial now returns a live transport
+
+	time.Sleep(100 * time.Millisecond)
+	if c.Session() != nil {
+		t.Fatal("paused connector committed a session from an in-flight dial")
+	}
+	if atomic.LoadInt32(&closed) == 0 {
+		t.Fatal("the freshly dialed transport was not closed")
+	}
+	if store.Snapshot().Connected {
+		t.Fatal("store reports connected while paused")
+	}
+}

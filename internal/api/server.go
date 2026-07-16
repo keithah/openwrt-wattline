@@ -24,6 +24,7 @@ type Deps struct {
 	Connected func() bool
 	SaveRules func([]config.Rule) error
 	LoadRules func() []config.Rule
+	Pairing   *ble.Pairing // nil when the platform has no pairing support
 }
 
 type server struct{ d Deps }
@@ -40,6 +41,10 @@ func NewServer(d Deps) http.Handler {
 	mux.HandleFunc("PUT /api/v1/rules/{name}", s.auth(s.putRule))
 	mux.HandleFunc("DELETE /api/v1/rules/{name}", s.auth(s.deleteRule))
 	mux.HandleFunc("POST /api/v1/device/action", s.auth(s.deviceAction))
+	mux.HandleFunc("GET /api/v1/pairing/status", s.auth(s.pairing(s.pairingStatus)))
+	mux.HandleFunc("POST /api/v1/pairing/scan", s.auth(s.pairing(s.pairingScan)))
+	mux.HandleFunc("POST /api/v1/pairing/pair", s.auth(s.pairing(s.pairingPair)))
+	mux.HandleFunc("DELETE /api/v1/pairing/device/{mac}", s.auth(s.pairing(s.pairingUnpair)))
 	return cors(mux)
 }
 

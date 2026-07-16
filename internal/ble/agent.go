@@ -8,19 +8,16 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// pairingAgent supplies a fixed PIN when BlueZ requests one (manual p.16:
-// default fixed PIN 020555, overridable). Registered as the system agent.
-type pairingAgent struct {
-	pin string
-}
+// pairingAgent supplies a PIN when BlueZ requests one (manual p.16: default
+// fixed PIN 020555, overridable; see SetAgentPIN). Registered as the system
+// agent.
+type pairingAgent struct{}
 
 func (a *pairingAgent) RequestPinCode(device dbus.ObjectPath) (string, *dbus.Error) {
-	return a.pin, nil
+	return currentAgentPIN(), nil
 }
 func (a *pairingAgent) RequestPasskey(device dbus.ObjectPath) (uint32, *dbus.Error) {
-	var p uint32
-	fmt.Sscanf(a.pin, "%d", &p)
-	return p, nil
+	return pinToPasskey(currentAgentPIN()), nil
 }
 func (a *pairingAgent) DisplayPinCode(device dbus.ObjectPath, pincode string) *dbus.Error {
 	return nil
@@ -35,19 +32,20 @@ func (a *pairingAgent) RequestAuthorization(device dbus.ObjectPath) *dbus.Error 
 func (a *pairingAgent) AuthorizeService(device dbus.ObjectPath, uuid string) *dbus.Error {
 	return nil
 }
-func (a *pairingAgent) Cancel() *dbus.Error   { return nil }
-func (a *pairingAgent) Release() *dbus.Error  { return nil }
+func (a *pairingAgent) Cancel() *dbus.Error  { return nil }
+func (a *pairingAgent) Release() *dbus.Error { return nil }
 
 const agentPath = dbus.ObjectPath("/com/wattline/agent")
 
 // RegisterPairingAgent exports a BlueZ agent on the system bus and makes it
 // the default. Returns a cancel func that unregisters it.
 func RegisterPairingAgent(pin string) (func(), error) {
+	SetAgentPIN(pin)
 	conn, err := dbus.SystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("system bus: %w", err)
 	}
-	agent := &pairingAgent{pin: pin}
+	agent := &pairingAgent{}
 	// Export all org.bluez.Agent1 methods.
 	if err := conn.Export(agent, agentPath, "org.bluez.Agent1"); err != nil {
 		return nil, fmt.Errorf("export agent: %w", err)

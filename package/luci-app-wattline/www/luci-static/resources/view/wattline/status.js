@@ -15,7 +15,10 @@ function api(token, port, method, path, body) {
 		method: method,
 		headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
 		body: body ? JSON.stringify(body) : null
-	}).then(function (r) { return r.json(); });
+	}).then(function (r) {
+		if (!r.ok) return r.text().then(function (t) { throw new Error((t || '').trim() || ('HTTP ' + r.status)); });
+		return r.json();
+	});
 }
 
 function css() {
@@ -42,7 +45,13 @@ function css() {
 '.wl-sw.on{background:#25b45f}.wl-sw::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.3)}' +
 '.wl-sw.on::after{left:23px}' +
 '.wl-note{color:#9aa0a6;font-size:12px;margin:6px 2px 0;line-height:1.5}' +
-'.wl-msg{text-align:center;color:#9aa0a6;padding:26px 10px}';
+'.wl-msg{text-align:center;color:#9aa0a6;padding:26px 10px}' +
+'.wl-btn{padding:8px 18px;border-radius:8px;font-size:14px;cursor:pointer;border:1px solid #d0d4d9;background:#fff;color:#3c4043}' +
+'.wl-btn.primary{border:none;background:#25b45f;color:#fff}' +
+'.wl-btn[disabled]{opacity:.5;cursor:default}' +
+'.wl-devrow{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-radius:10px;cursor:pointer;margin-top:6px;border:1px solid #e4e7eb}' +
+'.wl-devrow.sel{border:2px solid #25b45f;padding:9px 11px}' +
+'.wl-pin{width:90px;padding:7px 9px;font-size:14px;border:1px solid #d0d4d9;border-radius:8px;margin-top:2px}';
 }
 
 function hm(min) {
@@ -69,6 +78,72 @@ return view.extend({
 		]);
 
 		function act(action) { api(token, port, 'POST', '/device/action', { action: action }).catch(function () {}); }
+
+		/* Pairing state persists across polls; the card is only rebuilt when
+		   the pairing status changes so the PIN input survives refreshes.
+		   lastP caches the last /pairing/status so selection changes redraw
+		   locally, pollN gates the idle polling rate, and gen discards stale
+		   async responses that would otherwise append onto a rebuilt body. */
+		var selMac = '', pin = '020555', pairCard = null, pairKey = null;
+		var lastP = null, pairMsg = '', pollN = 0, gen = 0;
+		function redrawPairCard() {
+			var old = pairCard;
+			pairKey = null;
+			pairCard = buildPairCard(lastP || { stage: 'idle', devices: [] });
+			if (old && old.parentNode) old.parentNode.replaceChild(pairCard, old);
+		}
+		function buildPairCard(p) {
+			var busy = p.stage === 'scanning' || p.stage === 'pairing';
+			var kids = [
+				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Pair your Link-Power'))),
+				E('div', { 'class': 'wl-sub' }, _('Power on the Link-Power, keep it near the router, then scan. Make sure no phone or laptop app is connected to it.'))
+			];
+			var scanBtn = E('button', { 'class': 'wl-btn', style: 'margin-top:12px' },
+				p.stage === 'scanning' ? _('Scanning…') : _('Scan for devices'));
+			if (busy) scanBtn.setAttribute('disabled', '');
+			scanBtn.addEventListener('click', function () {
+				pairMsg = '';
+				api(token, port, 'POST', '/pairing/scan')
+					.then(function () { pollN = 0; pairKey = null; refresh(); })
+					.catch(function (e) { pairMsg = e.message; redrawPairCard(); });
+			});
+			kids.push(scanBtn);
+			(p.devices || []).forEach(function (d) {
+				var row = E('div', { 'class': 'wl-devrow' + (selMac === d.mac ? ' sel' : '') }, [
+					E('div', {}, [E('b', { style: 'font-size:14px' }, d.name || _('(unnamed)')),
+						E('div', { 'class': 'wl-sub', style: 'font-size:12px' }, d.mac + (d.paired ? _(' · previously paired') : ''))]),
+					E('div', { 'class': 'wl-sub', style: 'font-size:12px' }, d.rssi ? d.rssi + ' dBm' : '')
+				]);
+				row.addEventListener('click', function () { selMac = d.mac; redrawPairCard(); });
+				kids.push(row);
+			});
+			if (selMac) {
+				var pinInput = E('input', { 'class': 'wl-pin', maxlength: 6, value: pin, inputmode: 'numeric' });
+				pinInput.addEventListener('input', function () {
+					pinInput.value = pinInput.value.replace(/[^0-9]/g, '');
+					pin = pinInput.value;
+				});
+				var pairBtn = E('button', { 'class': 'wl-btn primary' }, p.stage === 'pairing' ? _('Pairing…') : _('Pair'));
+				if (busy) pairBtn.setAttribute('disabled', '');
+				pairBtn.addEventListener('click', function () {
+					pairMsg = '';
+					api(token, port, 'POST', '/pairing/pair', { mac: selMac, pin: pin })
+						.then(function () { pollN = 0; pairKey = null; refresh(); })
+						.catch(function (e) { pairMsg = e.message; redrawPairCard(); });
+				});
+				kids.push(E('div', { style: 'display:flex;align-items:flex-end;margin-top:12px' }, [
+					E('div', { style: 'margin-right:10px' }, [E('div', { 'class': 'wl-sub' }, _('PIN')), pinInput]),
+					E('div', { style: 'flex:1' }, ''), pairBtn
+				]));
+				kids.push(E('div', { 'class': 'wl-note' },
+					_('Default PIN is 020555 (see the manual). If the device shows a PIN on its screen, enter that instead.')));
+			}
+			if (pairMsg) kids.push(E('div', { style: 'color:' + RED + ';font-size:13px;margin-top:10px' }, pairMsg));
+			if (p.stage === 'pairing') kids.push(E('div', { style: 'color:' + ORANGE + ';font-size:13px;margin-top:10px' }, _('Pairing and verifying the connection… this usually takes under a minute.')));
+			if (p.stage === 'paired') kids.push(E('div', { style: 'color:' + GREEN + ';font-size:13px;margin-top:10px' }, _('Paired. Connecting…')));
+			if (p.stage === 'error') kids.push(E('div', { style: 'color:' + RED + ';font-size:13px;margin-top:10px' }, _('Pairing failed: ') + (p.error || _('unknown error'))));
+			return E('div', { 'class': 'wl-card' }, kids);
+		}
 		function sw(on, onA, offA) {
 			var e = E('div', { 'class': 'wl-sw' + (on ? ' on' : '') });
 			e.addEventListener('click', function () { act(on ? offA : onA); });
@@ -77,14 +152,30 @@ return view.extend({
 		function metric(v, l) { return E('div', { 'class': 'wl-metric' }, [E('b', {}, v), E('span', {}, l)]); }
 
 		function refresh() {
+			var myGen = ++gen;
 			api(token, port, 'GET', '/telemetry').then(function (t) {
+				if (myGen !== gen) return; // superseded by a newer poll
 				body.innerHTML = '';
 				if (!t || !t.connected) {
 					conn.className = 'wl-pill'; conn.textContent = _('Disconnected');
 					body.appendChild(E('div', { 'class': 'wl-card' }, E('div', { 'class': 'wl-msg' }, [
 						E('div', { style: 'font-size:15px;color:#3c4043;margin-bottom:6px' }, _('No power bank connected')),
-						_('Plug the USB BLE dongle into the router and power on the Link-Power. It will connect automatically.')
+						_('Plug the USB BLE dongle into the router and power on the Link-Power. Already-paired devices connect automatically.')
 					])));
+					var g = gen;
+					var busyStage = lastP && (lastP.stage === 'scanning' || lastP.stage === 'pairing');
+					pollN++;
+					if (!lastP || busyStage || pollN % 5 === 0) {
+						api(token, port, 'GET', '/pairing/status').then(function (p) {
+							if (g !== gen) return; // body was rebuilt since this poll started
+							lastP = p;
+							var key = JSON.stringify([p.stage, p.error, p.devices, selMac, pairMsg]);
+							if (key !== pairKey || !pairCard) { pairKey = key; pairCard = buildPairCard(p); }
+							body.appendChild(pairCard);
+						}).catch(function () {});
+					} else if (pairCard) {
+						body.appendChild(pairCard);
+					}
 					return;
 				}
 				conn.className = 'wl-pill on'; conn.textContent = _('Connected');

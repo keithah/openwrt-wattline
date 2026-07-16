@@ -34,6 +34,9 @@ func NewSession(t Transport, store *state.Store) *Session {
 	return &Session{t: t, store: store, settle: 2 * time.Second}
 }
 
+// Close drops the underlying BLE connection.
+func (s *Session) Close() error { return s.t.Close() }
+
 // command performs the write-then-read transaction on 0x4302.
 func (s *Session) command(req []byte) (byte, []byte, error) {
 	s.mu.Lock()

@@ -53,10 +53,24 @@ func run(cfgPath string, stop <-chan struct{}) error {
 	if err != nil {
 		return err
 	}
-	if cancel, err := ble.RegisterPairingAgent(cfg.PIN); err != nil {
-		log.Printf("wattline: pairing agent unavailable (non-fatal): %v", err)
-	} else {
-		defer cancel()
+	// The agent may fail to register when bluetoothd/the dongle come up after
+	// the daemon; ensureAgent retries before each pair attempt (idempotent).
+	var agentMu sync.Mutex
+	agentOK := false
+	ensureAgent := func() error {
+		agentMu.Lock()
+		defer agentMu.Unlock()
+		if agentOK {
+			return nil
+		}
+		if _, err := ble.RegisterPairingAgent(cfg.PIN); err != nil {
+			return err
+		}
+		agentOK = true
+		return nil
+	}
+	if err := ensureAgent(); err != nil {
+		log.Printf("wattline: pairing agent unavailable (non-fatal, retried on pair): %v", err)
 	}
 
 	store := state.NewStore()
@@ -89,10 +103,42 @@ func run(cfgPath string, stop <-chan struct{}) error {
 	})
 	go conn.Run(stop)
 
+	pairing := ble.NewPairing(ble.PairingDeps{
+		Ops:     ble.NewLazyPairOps(),
+		Prepare: ensureAgent,
+		Pause:   conn.Pause,
+		Resume:  conn.Resume,
+		// Empty pin = restore the configured PIN (reloaded from disk, since a
+		// prior successful pair may have persisted a new one).
+		SetPIN: func(pin string) {
+			if pin == "" {
+				if c, err := config.Load(cfgPath); err == nil {
+					pin = c.PIN
+				}
+			}
+			ble.SetAgentPIN(pin)
+		},
+		// A pair only counts once the connector reconnects and survives the
+		// protected handshake (continue.md: transient Paired: yes is not
+		// success). The connector retries every 2s; give it a minute.
+		WaitConnected: func() bool {
+			deadline := time.Now().Add(60 * time.Second)
+			for time.Now().Before(deadline) {
+				if store.Snapshot().Connected {
+					return true
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			return false
+		},
+		Persist: func(mac, pin string) error { return config.SavePairing(cfgPath, mac, pin) },
+	})
+
 	srv := &http.Server{
 		Addr: bindAddr(cfg),
 		Handler: api.NewServer(api.Deps{
 			Store: store, Engine: eng, Exec: exec, Token: cfg.Token,
+			Pairing:   pairing,
 			Identity:  func() ble.Identity { mu.Lock(); defer mu.Unlock(); return ident },
 			Connected: func() bool { return store.Snapshot().Connected },
 			LoadRules: func() []config.Rule {

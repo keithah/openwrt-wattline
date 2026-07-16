@@ -18,9 +18,11 @@ type Connector struct {
 	retryDelay time.Duration
 	settle     time.Duration
 
-	mu    sync.Mutex
-	sess  *Session
-	fails int
+	mu     sync.Mutex
+	sess   *Session
+	fails  int
+	paused bool
+	resume chan struct{} // non-nil while paused; closed by Resume
 }
 
 // logFailure reports whether the nth consecutive connect failure should be
@@ -47,12 +49,57 @@ func (c *Connector) sleep(d time.Duration, stop <-chan struct{}) bool {
 	}
 }
 
+// Pause stops the connector from dialing and closes any live session,
+// releasing the single-central Link-Power for pairing. A dial already in
+// flight cannot be interrupted, but Run re-checks the paused flag after the
+// dial and after the handshake and drops the fresh connection immediately.
+// Resume re-enables the connector.
+func (c *Connector) Pause() {
+	c.mu.Lock()
+	if !c.paused {
+		c.paused = true
+		c.resume = make(chan struct{})
+	}
+	sess := c.sess
+	c.mu.Unlock()
+	if sess != nil {
+		sess.Close()
+	}
+}
+
+func (c *Connector) Resume() {
+	c.mu.Lock()
+	if c.paused {
+		c.paused = false
+		close(c.resume)
+	}
+	c.mu.Unlock()
+}
+
+// pauseState returns the paused flag and the channel that unblocks waiters
+// when Resume is called.
+func (c *Connector) pauseState() (bool, <-chan struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.paused, c.resume
+}
+
+func (c *Connector) isPaused() bool { p, _ := c.pauseState(); return p }
+
 func (c *Connector) Run(stop <-chan struct{}) {
 	for {
 		select {
 		case <-stop:
 			return
 		default:
+		}
+		if paused, resume := c.pauseState(); paused {
+			select {
+			case <-stop:
+				return
+			case <-resume:
+			}
+			continue
 		}
 		t, err := c.dial()
 		if err != nil {
@@ -65,10 +112,19 @@ func (c *Connector) Run(stop <-chan struct{}) {
 			}
 			continue
 		}
+		// A pause may have landed while dial was in flight; the Link-Power
+		// accepts one central, so drop the fresh connection immediately.
+		if c.isPaused() {
+			t.Close()
+			continue
+		}
 		sess := NewSession(t, c.store)
 		sess.settle = c.settle
 		id, err := sess.Handshake()
 		if err != nil {
+			// Close, or the device stays occupied (it stops advertising while
+			// connected) and every retry — and any pairing scan — finds nothing.
+			t.Close()
 			if errors.Is(err, ErrBootloader) {
 				log.Printf("wattline: device in bootloader mode; leaving it alone")
 				if !c.sleep(30*time.Second, stop) {
@@ -83,6 +139,10 @@ func (c *Connector) Run(stop <-chan struct{}) {
 			if !c.sleep(c.retryDelay, stop) {
 				return
 			}
+			continue
+		}
+		if c.isPaused() {
+			sess.Close()
 			continue
 		}
 		c.fails = 0

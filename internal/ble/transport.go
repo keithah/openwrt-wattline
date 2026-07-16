@@ -26,4 +26,7 @@ type Transport interface {
 	ReadChar(uuid string) ([]byte, error)
 	Subscribe(uuid string, fn func([]byte)) error
 	Disconnected() <-chan struct{}
+	// Close drops the connection, freeing the device (which accepts a single
+	// central) for pairing or other clients. Disconnected() fires afterwards.
+	Close() error
 }

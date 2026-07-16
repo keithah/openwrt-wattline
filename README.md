@@ -182,7 +182,26 @@ curl -s -H "Authorization: Bearer $TOKEN" -X DELETE \
 # Manual device control (DC output, Type-C output, bypass, restart, shutdown)
 curl -s -H "Authorization: Bearer $TOKEN" -X POST \
 	-d '{"action":"shutdown"}' http://192.168.8.1:8377/api/v1/device/action
+
+# Pairing (first-run setup; also driven by the GL panel / LuCI UI)
+curl -s -H "Authorization: Bearer $TOKEN" -X POST \
+	http://192.168.8.1:8377/api/v1/pairing/scan            # async, ~12 s
+curl -s -H "Authorization: Bearer $TOKEN" \
+	http://192.168.8.1:8377/api/v1/pairing/status          # stage + devices found
+curl -s -H "Authorization: Bearer $TOKEN" -X POST \
+	-d '{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}' \
+	http://192.168.8.1:8377/api/v1/pairing/pair            # async pair + trust
+curl -s -H "Authorization: Bearer $TOKEN" -X DELETE \
+	http://192.168.8.1:8377/api/v1/pairing/device/DC:04:5A:EB:72:2B
 ```
+
+Pairing runs asynchronously: poll `/pairing/status` for
+`idle|scanning|pairing|paired|error`. While a scan or pair is in flight the
+daemon pauses its auto-reconnect loop (the Link-Power accepts one BLE central
+at a time). On success the MAC and PIN are persisted to `/etc/config/wattline`
+and the connector reconnects; treat `/api/v1/status` reporting
+`"connected": true` as the real success signal (see
+[`docs/pairing-design.md`](docs/pairing-design.md)).
 
 If `lan_api` is `1`, these are reachable from any LAN host at the router's
 address; set it to `0` to restrict the API to `localhost` on the router.

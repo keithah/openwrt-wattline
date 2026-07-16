@@ -20,5 +20,11 @@ func ScanAndConnect(namePrefix string) (Transport, error) {
 // RegisterPairingAgent is a no-op off Linux (no BlueZ agent to register).
 // Callers treat a nil error + no-op cancel as "no agent needed".
 func RegisterPairingAgent(pin string) (func(), error) {
+	SetAgentPIN(pin)
 	return func() {}, nil
+}
+
+// NewBlueZPairOps is unsupported off Linux; the API surfaces the error.
+func NewBlueZPairOps() (PairOps, error) {
+	return nil, fmt.Errorf("wattline: pairing is Linux/BlueZ only, not %s", runtime.GOOS)
 }

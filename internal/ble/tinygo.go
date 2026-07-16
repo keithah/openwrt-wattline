@@ -4,6 +4,7 @@ package ble
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -125,3 +126,16 @@ func (t *tinygoTransport) Subscribe(uuid string, fn func([]byte)) error {
 }
 
 func (t *tinygoTransport) Disconnected() <-chan struct{} { return t.disc }
+
+func (t *tinygoTransport) Close() error {
+	err := t.dev.Disconnect()
+	if err != nil {
+		// Surface it: the link may still be up, which blocks pairing scans
+		// until the peripheral itself drops it.
+		log.Printf("wattline: BLE disconnect failed: %v", err)
+	}
+	// The connect handler normally closes t.disc, but guard against a missed
+	// event so a paused connector can never hang waiting on the channel.
+	t.once.Do(func() { close(t.disc) })
+	return err
+}
