@@ -10,6 +10,18 @@ account. It exposes a local HTTP API (telemetry, rules, manual control) and ship
 two web UIs: a **native GL.iNet admin-panel app** (under Applications) and a
 **LuCI** app.
 
+Both UIs cover the full lifecycle:
+
+- **Pairing** — scan, select the Link-Power, enter its PIN, and pair from the
+  browser (authenticated BLE bonding; no SSH needed).
+- **Monitoring** — battery, DC-port and USB-C telemetry with live updates.
+- **Control** — DC / USB-C output and DC bypass toggles; USB-C output power
+  limit (30–140 W); DC bypass engage-voltage threshold; on-device on/off
+  schedules; and Restart / Power-off.
+- **Automation** — the rules engine and webhooks.
+
+See the [changelog](CHANGELOG.md) for version history.
+
 Built for the GL.iNet Spitz AX (GL-X3000) but portable to any aarch64 OpenWrt
 target. The BLE protocol reference is in [`docs/API.md`](docs/API.md)
 (reverse-engineered and live-verified).
@@ -32,17 +44,22 @@ make -C package all
 ls -la package/out/*.ipk
 ```
 
-This produces:
+This produces (the `<version>` in each filename is `VERSION` from
+`package/Makefile`):
 
-- `package/out/wattlined_1.0.0_aarch64_cortex-a53.ipk` — the daemon, procd
+- `package/out/wattlined_<version>_aarch64_cortex-a53.ipk` — the daemon, procd
   init script, UCI defaults, and a uci-defaults token generator.
-- `package/out/wattline-bt_1.0.0_all.ipk` — a metapackage pulling in
+- `package/out/wattline-bt_<version>_all.ipk` — a metapackage pulling in
   `bluez-daemon`, `dbus`, `kmod-bluetooth` (the Bluetooth stack for a USB BLE
   dongle on routers without onboard BLE, e.g. the Spitz AX). `kmod-bluetooth`
   ships `btusb.ko`; there is no separate `kmod-btusb` in the GL feed.
-- `package/out/luci-app-wattline_1.0.0_all.ipk` — the LuCI web UI (see below).
-- `package/out/gl-app-wattline_1.0.0_all.ipk` — native GL.iNet admin-panel app
+- `package/out/luci-app-wattline_<version>_all.ipk` — the LuCI web UI (see below).
+- `package/out/gl-app-wattline_<version>_all.ipk` — native GL.iNet admin-panel app
   (adds an entry under **Applications** in the GL UI; see Web UI below).
+
+Prebuilt `.ipk`s and an opkg feed index are attached to each
+[GitHub release](https://github.com/keithah/openwrt-wattline/releases) — see
+[Install from a release](#install-from-a-release) below.
 
 `ARCH` in `package/Makefile` targets `aarch64_cortex-a53` (GL.iNet Spitz AX /
 similar aarch64 OpenWrt targets). Adjust it if you're packaging for a
@@ -71,9 +88,9 @@ first:
 # scp isn't available on OpenWrt dropbear; pipe over ssh instead
 for f in package/out/*.ipk; do ssh root@192.168.8.1 "cat > /tmp/$(basename $f)" < "$f"; done
 ssh root@192.168.8.1 'opkg update && opkg install \
-  /tmp/wattline-bt_1.0.0_all.ipk \
-  /tmp/wattlined_1.0.0_aarch64_cortex-a53.ipk \
-  /tmp/luci-app-wattline_1.0.0_all.ipk'
+  /tmp/wattline-bt_*.ipk \
+  /tmp/wattlined_*.ipk \
+  /tmp/luci-app-wattline_*.ipk'
 ```
 
 With feed access, opkg pulls the bluez stack automatically; installs clean
@@ -81,6 +98,34 @@ with no `--force` flags (verified on a Spitz AX). `wattlined`'s `postinst`
 runs `/etc/uci-defaults/99-wattline` (generates a random API token into
 `/etc/config/wattline` if unset), then enables and **restart**s the procd
 service (restart, so an upgrade picks up the new binary and token).
+
+### Install from a release
+
+Each [GitHub release](https://github.com/keithah/openwrt-wattline/releases)
+attaches the four `.ipk`s plus a ready-made opkg feed index (`Packages`,
+`Packages.gz`). To install without building anything:
+
+```sh
+# Download the ipks from the latest release straight to the router
+ssh root@192.168.8.1 'cd /tmp && for p in \
+    wattline-bt_VER_all.ipk \
+    wattlined_VER_aarch64_cortex-a53.ipk \
+    luci-app-wattline_VER_all.ipk \
+    gl-app-wattline_VER_all.ipk; do
+  wget -q "https://github.com/keithah/openwrt-wattline/releases/latest/download/$p"
+done
+opkg update && opkg install /tmp/wattline-bt_*.ipk /tmp/wattlined_*.ipk \
+  /tmp/luci-app-wattline_*.ipk /tmp/gl-app-wattline_*.ipk'
+```
+
+Replace `VER` with the release version (e.g. `1.2.2`). The release assets are
+flat files, so they can also be registered directly as an opkg feed:
+
+```sh
+echo 'src/gz wattline https://github.com/keithah/openwrt-wattline/releases/latest/download' \
+  >> /etc/opkg/customfeeds.conf
+opkg update && opkg install wattlined luci-app-wattline gl-app-wattline
+```
 
 ### Updating without a manual reinstall (opkg feed)
 
@@ -93,7 +138,7 @@ router upgrades with `opkg upgrade` (or the GL **Plug-ins** page).
 # Build all ipks + the feed index. BUMP THE VERSION each release so opkg
 # detects an upgrade (the Version: field, filename, and index must all match —
 # the Makefile injects VERSION into all three).
-make -C package VERSION=1.0.1 feed
+make -C package VERSION=1.2.2 feed
 # → package/out/{*.ipk, Packages, Packages.gz}
 ```
 
