@@ -1,0 +1,23 @@
+{
+	"admin/services/wattline": {
+		"title": "Wattline",
+		"order": 60,
+		"action": { "type": "firstchild" },
+		"depends": { "acl": ["luci-app-wattline"] }
+	},
+	"admin/services/wattline/status": {
+		"title": "Status",
+		"order": 1,
+		"action": { "type": "view", "path": "wattline/status" }
+	},
+	"admin/services/wattline/rules": {
+		"title": "Rules",
+		"order": 2,
+		"action": { "type": "view", "path": "wattline/rules" }
+	},
+	"admin/services/wattline/settings": {
+		"title": "Settings",
+		"order": 3,
+		"action": { "type": "view", "path": "wattline/settings" }
+	}
+}

@@ -1,0 +1,10 @@
+{
+    "index": 90,
+    "view": "wattline",
+    "title": "Wattline",
+    "level": 2,
+    "parent": "applications",
+    "parent_icon": "application",
+    "parent_index": 55,
+    "show_mode": ["router"]
+}

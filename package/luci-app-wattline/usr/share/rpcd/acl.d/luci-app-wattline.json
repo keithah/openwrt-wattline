@@ -1,0 +1,12 @@
+{
+	"luci-app-wattline": {
+		"description": "Wattline power-bank automation",
+		"read": {
+			"uci": ["wattline"],
+			"ubus": { "service": ["list"] }
+		},
+		"write": {
+			"uci": ["wattline"]
+		}
+	}
+}

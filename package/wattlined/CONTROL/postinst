@@ -1,0 +1,9 @@
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] || {
+	/etc/uci-defaults/99-wattline
+	/etc/init.d/wattlined enable
+	# restart (not start) so an upgrade picks up the new binary and the
+	# freshly-generated token; restart also starts a stopped service.
+	/etc/init.d/wattlined restart
+}
+exit 0

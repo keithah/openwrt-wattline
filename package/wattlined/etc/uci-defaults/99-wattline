@@ -1,0 +1,9 @@
+#!/bin/sh
+# Generate an API token on first install if unset.
+tok="$(uci -q get wattline.main.token)"
+if [ -z "$tok" ]; then
+	newtok="$(head -c 24 /dev/urandom | md5sum | cut -c1-32)"
+	uci set wattline.main.token="$newtok"
+	uci commit wattline
+fi
+exit 0

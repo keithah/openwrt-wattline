@@ -1,0 +1,13 @@
+# build output
+package/out/
+*.ipk
+Packages
+Packages.gz
+/wattlined
+*.bin
+
+# go
+/bin/
+
+# os
+.DS_Store

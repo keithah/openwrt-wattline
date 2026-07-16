@@ -1,0 +1,16 @@
+config wattline 'main'
+	option device_mac ''
+	option pin '020555'
+	option port '8377'
+	option lan_api '1'
+	option token ''
+
+# Example rule (disabled). Enable and adjust via LuCI or the API.
+config rule 'no_input_shutdown'
+	option enabled '0'
+	option condition 'input_power'
+	option state 'absent'
+	option hold '10m'
+	list action 'webhook:https://ntfy.sh/CHANGME?msg=input+lost'
+	list action 'shutdown'
+	option confirm_shutdown '1'

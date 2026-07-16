@@ -1,0 +1,18 @@
+-- oui-httpd RPC handler for Wattline. Returns a table of methods; oui-httpd
+-- dofile()s this and dispatches call("<sid>","wattline","<method>",args).
+-- The nginx-lua sandbox blocks io.popen, so we only read UCI here (allowed)
+-- and hand the API token to the panel view, which then calls the daemon's
+-- REST API directly (CORS-enabled). Method name contains 'get' => read ACL.
+local uci = require "uci"
+
+local M = {}
+
+function M.get_config()
+    local c = uci.cursor()
+    return {
+        token = c:get("wattline", "main", "token") or "",
+        port  = c:get("wattline", "main", "port") or "8377"
+    }
+end
+
+return M

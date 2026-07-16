@@ -1,0 +1,8 @@
+Package: wattlined
+Version: 1.0.0
+Architecture: aarch64_cortex-a53
+Maintainer: Keith <keith@kodi.tv>
+Section: utils
+Priority: optional
+Depends: wattline-bt
+Description: PeakDo Link-Power BLE monitor + automation daemon for GL.iNet routers.

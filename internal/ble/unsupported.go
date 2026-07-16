@@ -1,0 +1,24 @@
+//go:build !linux
+
+package ble
+
+import (
+	"fmt"
+	"runtime"
+)
+
+// This file provides non-Linux stubs so the daemon compiles and its non-BLE
+// logic (rule engine, API, config, tick loop) stays testable on a dev host.
+// The real BLE transport (tinygo.go) and pairing agent (agent.go) are
+// //go:build linux — production runs on OpenWrt/BlueZ. See API.md §12.
+
+// ScanAndConnect is unsupported off Linux; production uses the BlueZ backend.
+func ScanAndConnect(namePrefix string) (Transport, error) {
+	return nil, fmt.Errorf("wattline: BLE transport is Linux/BlueZ only, not %s", runtime.GOOS)
+}
+
+// RegisterPairingAgent is a no-op off Linux (no BlueZ agent to register).
+// Callers treat a nil error + no-op cancel as "no agent needed".
+func RegisterPairingAgent(pin string) (func(), error) {
+	return func() {}, nil
+}
