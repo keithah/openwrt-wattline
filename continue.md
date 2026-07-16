@@ -1,60 +1,51 @@
-# Continue — GL-X3000 Link-Power pairing
+# Continue — GL-X3000 Link-Power pairing  ✅ RESOLVED
 
-## Last action (2026-07-16, laptop session)
+## Outcome (2026-07-16)
 
-Implemented the full GUI pairing flow (v1.1.0, uncommitted in worktree
-`wattline-ble-pairing-auth-757886`): async pairing state machine
-(`internal/ble/pairing.go`), BlueZ D-Bus scan/pair/trust/unpair
-(`internal/ble/bluez.go`), four authed endpoints under `/api/v1/pairing/*`,
-connector Pause/Resume (race-safe across in-flight dials), runtime agent-PIN
-override with rollback, UCI persistence, and pairing UI in both the GL panel
-and LuCI. Pairing success is verified — the manager waits for the connector to
-reconnect and survive the protected handshake before persisting or reporting
-`paired` (see `docs/pairing-design.md`). An 8-angle code review found and
-fixed 10 real bugs, including a transport leak on handshake failure and a
-PIN→UCI injection. `go test ./...`, linux/arm64 build, and `make all` (IPKs
-1.1.0, now needs GNU tar — auto-resolved) all pass.
+Pairing works end to end. On the GL-X3000 (BlueZ 5.64, RTL8761B), the daemon
+now bonds the Link-Power, stores a long-term key, and runs telemetry:
 
-## Root cause status (LTK bug) — still open, evidence staged
+- `POST /api/v1/pairing/pair {mac, pin:"020555"}` → stage `pairing` → `paired`
+- `/api/v1/status` → `"connected": true` (BP4SL3V2, fw 1.4.9)
+- `[LongTermKey]` persisted in `/etc/bluetooth/keys/<adapter>/DC:04:5A:EB:72:2B/info`,
+  `Trusted=true`; `device_mac`/`pin` saved to UCI
+- Protected `0x4301` write returns Write Response (success); full telemetry flows
 
-- The target router `gl-x3000` (192.168.8.1 = Tailscale **100.100.17.99**) has
-  been offline since ~09:00 on 2026-07-16. **`gl-x3000-1` is a different
-  router** (rejects the default key). A monitor + a ready-made btmon pairing
-  experiment script exist in the session scratchpad
-  (`router-pair-experiment.sh`: btmon -w + scripted bluetoothctl pair + bond
-  dump; PIN as $1).
-- Link-Power-2 is physically near the MacBook; macOS holds an LE bond and was
-  auto-connected at session start. **Leading hypothesis:** the peripheral's
-  bond slot is occupied by the Mac, so router pairing negotiates non-bonding
-  (matches transient `Paired: yes`, store_hint=0, no LTK). **Secondary:** the
-  2026-07-14 live test sent `BLE_PIN SET 000000`, so the device PIN may be
-  000000 rather than 020555.
-- The PWA does no SMP — "browser pairing" is macOS CoreBluetooth silently
-  pairing (likely Just Works). A Web Bluetooth capture harness is set up in
-  Chrome (button "WL CAPTURE" on pwa.peakdo.ca; logs to `window.__wl`) but
-  needs Keith to click it and pick the device in the chooser (synthetic
-  clicks can't drive the chooser).
+wattline 1.1.0 (with the GUI pairing flow) is installed and running on the router.
 
-## Next action
+## Root cause
 
-1. When Keith clicks WL CAPTURE: read `window.__wl` — confirm the protected
-   `0x4301 [0x84]` write works from the Mac's bond and note whether macOS
-   re-pairs.
-2. When `gl-x3000` comes back: free the device (disconnect/unpair the Mac if
-   needed — `blueutil` installed), install the 1.1.0 IPKs, run the btmon
-   experiment with PIN 020555 then 000000, and read the SMP pairing
-   request/response AuthReq flags + key distribution to pin the root cause.
-3. Fix per evidence (bond slot vs PIN vs RTL8761B/SC quirk), then validate the
-   full GUI flow end-to-end: scan → pair → stored `[LongTermKey]` →
-   `/api/v1/status` `"connected": true`.
+The device requires **authenticated LE pairing** (Passkey Entry — it holds the
+fixed passkey 020555 = numeric 20555; NOT Just Works, contrary to the old
+API.md note). SMP is only triggered by an explicit pair or a protected
+operation; BlueZ does **not** auto-elevate security on the device's
+`Insufficient Authentication` response the way macOS/CoreBluetooth does. The
+pre-1.1.0 daemon registered a pairing agent but never called
+`org.bluez.Device1.Pair`, so SMP never ran and no LTK was ever stored — hence
+the transient `Paired: yes` with nothing persisted.
 
-## Do not
+## Fix (validated on hardware)
 
-- Do not treat `Connected: yes` or transient `Paired: yes` as success. Require
-  a stored LTK, a successful protected `0x4301` write, and `/api/v1/status`
-  showing `"connected": true` (the daemon's pair flow now enforces this).
-- Do not factory-reset the Link-Power without explicit approval.
-- Do not upgrade GL firmware or change the 5.4.211 kernel; the custom RTL8761B
-  modules depend on that ABI.
-- Do not leave a manual scanner or browser connected while testing Wattline;
-  the Link-Power accepts one BLE client at a time.
+The 1.1.0 pairing flow supplies exactly what was missing: discover the device
+fresh → `Device1.Pair` (no prior `connect`) → the BlueZ agent answers
+`RequestPasskey` with 20555 → `Trust` → wait for the connector to reconnect and
+survive the protected handshake before reporting success. btmon confirmed the
+SMP exchange: initiator `Bonding, MITM, SC` (0x2d), device responds `Bonding,
+MITM, Legacy` (0x05, downgrades to legacy), passkey `0x504b`, Encryption
+Change, New Long Term Key stored. KeyboardOnly agent capability works.
+
+Bond storage note: on GL firmware `/var/lib/bluetooth` is a symlink to
+`/etc/bluetooth/keys/` (persistent flash); it is writable and persists bonds
+correctly. A `bluetoothctl remove` does not always delete the flash copy —
+`rm -rf` the device dir for a truly clean re-pair test.
+
+## If it regresses
+
+- Recheck the stored bond: `cat /etc/bluetooth/keys/*/DC:04:5A:EB:72:2B/info`
+  (needs `[LongTermKey]`).
+- Re-pair from the GUI (GL panel or LuCI → Wattline) or the API
+  (`/api/v1/pairing/scan` then `/pairing/pair`).
+- The device accepts one BLE central at a time — forget it on any phone/laptop
+  before router pairing (macOS re-bonds whenever the PWA connects).
+- Do not factory-reset the device or change the 5.4.211 kernel / RTL8761B
+  modules without explicit approval.
