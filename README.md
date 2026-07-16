@@ -183,6 +183,29 @@ curl -s -H "Authorization: Bearer $TOKEN" -X DELETE \
 curl -s -H "Authorization: Bearer $TOKEN" -X POST \
 	-d '{"action":"shutdown"}' http://192.168.8.1:8377/api/v1/device/action
 
+# Device settings (require a live connection; 503 when disconnected)
+# USB-C output power limit — read all types, set output cap, or clear to default
+curl -s -H "Authorization: Bearer $TOKEN" \
+	http://192.168.8.1:8377/api/v1/device/usbc-limit
+curl -s -H "Authorization: Bearer $TOKEN" -X POST \
+	-d '{"type":"output","watts":100}' http://192.168.8.1:8377/api/v1/device/usbc-limit
+curl -s -H "Authorization: Bearer $TOKEN" -X POST \
+	-d '{"type":"output","clear":true}' http://192.168.8.1:8377/api/v1/device/usbc-limit
+# DC bypass engage-voltage threshold
+curl -s -H "Authorization: Bearer $TOKEN" \
+	http://192.168.8.1:8377/api/v1/device/bypass-threshold
+curl -s -H "Authorization: Bearer $TOKEN" -X POST \
+	-d '{"volts":19.6}' http://192.168.8.1:8377/api/v1/device/bypass-threshold
+# On-device schedules (timers that fire even when the router/BLE is down)
+curl -s -H "Authorization: Bearer $TOKEN" \
+	http://192.168.8.1:8377/api/v1/device/schedules
+# add: type 0=once,1=daily,2=weekly,3=monthly; action 0=off,1=on (omit id to add)
+curl -s -H "Authorization: Bearer $TOKEN" -X POST \
+	-d '{"type":1,"hour":22,"minute":30,"action":0}' \
+	http://192.168.8.1:8377/api/v1/device/schedules
+curl -s -H "Authorization: Bearer $TOKEN" -X DELETE \
+	http://192.168.8.1:8377/api/v1/device/schedules/0
+
 # Pairing (first-run setup; also driven by the GL panel / LuCI UI)
 curl -s -H "Authorization: Bearer $TOKEN" -X POST \
 	http://192.168.8.1:8377/api/v1/pairing/scan            # async, ~12 s

@@ -71,13 +71,126 @@ return view.extend({
 		var conn = E('span', { 'class': 'wl-pill' }, _('…'));
 		var dev = E('div', { 'class': 'wl-dev' }, 'Link-Power');
 		var body = E('div', {}, E('div', { 'class': 'wl-msg' }, _('Loading…')));
+		// `extra` holds device settings/schedules/power. It is rebuilt only on
+		// connect and after a control action — NOT on every 2s telemetry poll —
+		// so its text inputs keep focus while the user types.
+		var extra = E('div', {});
 		var wrap = E('div', { 'class': 'wl-wrap' }, [
 			E('style', {}, css()),
 			E('div', { 'class': 'wl-head' }, [E('div', {}, [E('div', { 'class': 'wl-title' }, 'Wattline'), dev]), conn]),
-			body
+			body, extra
 		]);
 
 		function act(action) { api(token, port, 'POST', '/device/action', { action: action }).catch(function () {}); }
+
+		/* Device settings/schedules state (persists across telemetry polls). */
+		var usbcLimit = null, threshold = null, thrInput = '', schedules = null;
+		var ctlErr = '', extraLoaded = false, newSch = { type: 1, hour: 8, minute: 0, action: 1 };
+
+		function fetchExtras(rebuild) {
+			Promise.all([
+				api(token, port, 'GET', '/device/usbc-limit').then(function (l) { usbcLimit = l; }).catch(function () {}),
+				api(token, port, 'GET', '/device/bypass-threshold').then(function (t) {
+					threshold = (t && typeof t.volts === 'number') ? t.volts : null;
+					if (threshold != null && thrInput === '') thrInput = String(threshold);
+				}).catch(function () {}),
+				api(token, port, 'GET', '/device/schedules').then(function (s) { schedules = Array.isArray(s) ? s : []; }).catch(function () {})
+			]).then(function () { if (rebuild) buildExtra(); });
+		}
+		function ctlPost(path, bodyObj) {
+			ctlErr = '';
+			return api(token, port, 'POST', path, bodyObj)
+				.then(function () { fetchExtras(true); })
+				.catch(function (e) { ctlErr = e.message; buildExtra(); });
+		}
+		function buildExtra() {
+			extra.innerHTML = '';
+			if (!extraLoaded) return;
+			var wattChoices = [30, 45, 60, 65, 100, 140];
+			var curWatts = usbcLimit && usbcLimit.output ? usbcLimit.output.watts : 0;
+			var limitBtns = wattChoices.map(function (wv) {
+				var b = E('button', { 'class': 'wl-btn' + (curWatts === wv ? ' primary' : ''), style: 'margin:0 6px 6px 0' }, wv + ' W');
+				b.addEventListener('click', function () { ctlPost('/device/usbc-limit', { type: 'output', watts: wv }); });
+				return b;
+			});
+			var thrIn = E('input', { 'class': 'wl-pin', style: 'width:80px', inputmode: 'decimal', value: thrInput });
+			thrIn.addEventListener('input', function () { thrInput = thrIn.value; });
+			var thrBtn = E('button', { 'class': 'wl-btn' }, _('Set'));
+			thrBtn.addEventListener('click', function () {
+				var v = parseFloat(thrInput);
+				if (!(v > 0)) { ctlErr = _('Enter a voltage'); buildExtra(); return; }
+				ctlPost('/device/bypass-threshold', { volts: v });
+			});
+			var settings = E('div', { 'class': 'wl-card' }, [
+				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Device settings'))),
+				E('div', { 'class': 'wl-sub' }, _('USB-C output power limit')),
+				E('div', { style: 'display:flex;flex-wrap:wrap;margin-top:6px' }, limitBtns),
+				E('div', { style: 'display:flex;align-items:flex-end;margin-top:12px' }, [
+					E('div', { style: 'margin-right:10px' }, [E('div', { 'class': 'wl-sub' }, _('DC bypass engages at (V)')), thrIn]),
+					E('div', { style: 'flex:1' }, ''), thrBtn
+				]),
+				ctlErr ? E('div', { style: 'color:' + RED + ';font-size:12px;margin-top:8px' }, ctlErr) : E('span', {})
+			]);
+
+			var dayType = function (ty) { return ty === 0 ? _('Once') : ty === 1 ? _('Daily') : ty === 2 ? _('Weekly') : _('Monthly'); };
+			var hhmm = function (t) { return ('0' + t.hour).slice(-2) + ':' + ('0' + t.minute).slice(-2); };
+			var schKids = [
+				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Schedules'))),
+				E('div', { 'class': 'wl-sub' }, _('On/off timers stored on the device — they run even if the router is offline.'))
+			];
+			(schedules || []).forEach(function (t) {
+				var del = E('button', { 'class': 'wl-btn' }, _('Delete'));
+				del.addEventListener('click', function () {
+					ctlErr = '';
+					api(token, port, 'DELETE', '/device/schedules/' + t.id).then(function () { fetchExtras(true); })
+						.catch(function (e) { ctlErr = e.message; buildExtra(); });
+				});
+				schKids.push(E('div', { class: 'wl-devrow', style: 'cursor:default' }, [
+					E('div', {}, [E('b', { style: 'font-size:14px' }, hhmm(t) + ' · ' + (t.action ? _('On') : _('Off'))),
+						E('div', { 'class': 'wl-sub', style: 'font-size:12px' }, dayType(t.type) + (t.status === 1 ? '' : ' · ' + _('disabled')))]),
+					del
+				]));
+			});
+			if (!(schedules || []).length) schKids.push(E('div', { 'class': 'wl-sub', style: 'margin-top:6px' }, _('No schedules yet.')));
+			var mk = function (val, opts, onch) {
+				var sel = E('select', { style: 'padding:6px 8px;border-radius:8px;margin-right:6px;border:1px solid #d0d4d9' },
+					opts.map(function (o) { return E('option', { value: o[0] }, o[1]); }));
+				sel.value = String(val); sel.addEventListener('change', function () { onch(sel.value); });
+				return sel;
+			};
+			var hrIn = E('input', { 'class': 'wl-pin', style: 'width:48px', inputmode: 'numeric', value: newSch.hour });
+			hrIn.addEventListener('input', function () { newSch.hour = hrIn.value; });
+			var minIn = E('input', { 'class': 'wl-pin', style: 'width:48px', inputmode: 'numeric', value: newSch.minute });
+			minIn.addEventListener('input', function () { newSch.minute = minIn.value; });
+			var addBtn = E('button', { 'class': 'wl-btn primary' }, _('Add'));
+			addBtn.addEventListener('click', function () {
+				ctlPost('/device/schedules', { type: Number(newSch.type), hour: Number(newSch.hour), minute: Number(newSch.minute), action: Number(newSch.action) });
+			});
+			schKids.push(E('div', { style: 'display:flex;flex-wrap:wrap;align-items:center;margin-top:10px' }, [
+				mk(newSch.type, [[1, _('Daily')], [0, _('Once')], [2, _('Weekly')], [3, _('Monthly')]], function (v) { newSch.type = v; }),
+				hrIn, E('span', { 'class': 'wl-sub' }, ':'), minIn,
+				mk(newSch.action, [[1, _('Turn on')], [0, _('Turn off')]], function (v) { newSch.action = v; }),
+				addBtn
+			]));
+			var schedCard = E('div', { 'class': 'wl-card' }, schKids);
+
+			var restart = E('button', { 'class': 'wl-btn' }, _('Restart'));
+			restart.addEventListener('click', function () {
+				if (window.confirm(_('Restart the Link-Power? It will reconnect in about 15 seconds.'))) act('restart');
+			});
+			var poweroff = E('button', { 'class': 'wl-btn', style: 'border:none;background:' + RED + ';color:#fff' }, _('Power off'));
+			poweroff.addEventListener('click', function () {
+				if (window.confirm(_('Power OFF the Link-Power completely? This is a hard shutdown — the device (and anything it powers) turns off and will NOT return over Bluetooth until physically powered on again.'))) act('shutdown');
+			});
+			var powerCard = E('div', { 'class': 'wl-card' }, [
+				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Power'))),
+				E('div', { style: 'display:flex;gap:8px;margin-top:8px' }, [restart, poweroff])
+			]);
+
+			extra.appendChild(settings);
+			extra.appendChild(schedCard);
+			extra.appendChild(powerCard);
+		}
 
 		/* Pairing state persists across polls; the card is only rebuilt when
 		   the pairing status changes so the PIN input survives refreshes.
@@ -158,6 +271,7 @@ return view.extend({
 				body.innerHTML = '';
 				if (!t || !t.connected) {
 					conn.className = 'wl-pill'; conn.textContent = _('Disconnected');
+					if (extraLoaded) { extraLoaded = false; usbcLimit = null; schedules = null; extra.innerHTML = ''; }
 					body.appendChild(E('div', { 'class': 'wl-card' }, E('div', { 'class': 'wl-msg' }, [
 						E('div', { style: 'font-size:15px;color:#3c4043;margin-bottom:6px' }, _('No power bank connected')),
 						_('Plug the USB BLE dongle into the router and power on the Link-Power. Already-paired devices connect automatically.')
@@ -179,6 +293,7 @@ return view.extend({
 					return;
 				}
 				conn.className = 'wl-pill on'; conn.textContent = _('Connected');
+				if (!extraLoaded) { extraLoaded = true; fetchExtras(true); }
 				api(token, port, 'GET', '/status').then(function (s) {
 					if (s && s.device) dev.textContent = 'Link-Power' + (s.device.model ? ' · ' + s.device.model : '') + (s.device.firmware ? ' · fw ' + s.device.firmware : '');
 				}).catch(function () {});

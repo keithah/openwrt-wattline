@@ -4,7 +4,7 @@
 # An OpenWrt .ipk is a GZIPPED TAR (not an ar/.deb archive) wrapping
 # ./debian-binary + ./control.tar.gz + ./data.tar.gz. The router's opkg
 # (verified on GL-X3000, opkg 2021-06-13) segfaults on the ar/.deb form.
-VERSION := 1.1.0
+VERSION := 1.2.0
 ARCH := aarch64_cortex-a53
 # GNU tar required for --owner/--group/--mode normalization (macOS: brew
 # install gnu-tar); BSD tar lacks --mode and emits pax headers opkg rejects.

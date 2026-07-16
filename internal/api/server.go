@@ -24,7 +24,8 @@ type Deps struct {
 	Connected func() bool
 	SaveRules func([]config.Rule) error
 	LoadRules func() []config.Rule
-	Pairing   *ble.Pairing // nil when the platform has no pairing support
+	Pairing   *ble.Pairing   // nil when the platform has no pairing support
+	Control   func() Control // returns nil when no device is connected
 }
 
 type server struct{ d Deps }
@@ -45,6 +46,13 @@ func NewServer(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/v1/pairing/scan", s.auth(s.pairing(s.pairingScan)))
 	mux.HandleFunc("POST /api/v1/pairing/pair", s.auth(s.pairing(s.pairingPair)))
 	mux.HandleFunc("DELETE /api/v1/pairing/device/{mac}", s.auth(s.pairing(s.pairingUnpair)))
+	mux.HandleFunc("GET /api/v1/device/usbc-limit", s.auth(s.getUSBCLimit))
+	mux.HandleFunc("POST /api/v1/device/usbc-limit", s.auth(s.setUSBCLimit))
+	mux.HandleFunc("GET /api/v1/device/bypass-threshold", s.auth(s.getBypassThreshold))
+	mux.HandleFunc("POST /api/v1/device/bypass-threshold", s.auth(s.setBypassThreshold))
+	mux.HandleFunc("GET /api/v1/device/schedules", s.auth(s.getSchedules))
+	mux.HandleFunc("POST /api/v1/device/schedules", s.auth(s.postSchedule))
+	mux.HandleFunc("DELETE /api/v1/device/schedules/{id}", s.auth(s.deleteSchedule))
 	return cors(mux)
 }
 

@@ -141,6 +141,14 @@ func run(cfgPath string, stop <-chan struct{}) error {
 			Pairing:   pairing,
 			Identity:  func() ble.Identity { mu.Lock(); defer mu.Unlock(); return ident },
 			Connected: func() bool { return store.Snapshot().Connected },
+			Control: func() api.Control {
+				mu.Lock()
+				defer mu.Unlock()
+				if sess == nil {
+					return nil
+				}
+				return sess
+			},
 			LoadRules: func() []config.Rule {
 				c, err := config.Load(cfgPath)
 				if err != nil {

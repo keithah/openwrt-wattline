@@ -10,15 +10,15 @@ func TestDecodeSFloat(t *testing.T) {
 		raw  uint16
 		want float64
 	}{
-		{0xf0d0, 20.8},    // battery voltage
+		{0xf0d0, 20.8},     // battery voltage
 		{0xa7f3, 0.002035}, // battery current
-		{0xc1a8, 0.0424},  // battery power
-		{0xe7a7, 19.59},   // DC voltage
-		{0xb113, 0.00275}, // DC current
-		{0xc21b, 0.0539},  // DC power
-		{0xf0fa, 25.0},    // TypeC temperature
-		{0xe7d0, 20.0},    // bypass threshold
-		{0xf3de, 99.0},    // battery capacity Wh
+		{0xc1a8, 0.0424},   // battery power
+		{0xe7a7, 19.59},    // DC voltage
+		{0xb113, 0.00275},  // DC current
+		{0xc21b, 0.0539},   // DC power
+		{0xf0fa, 25.0},     // TypeC temperature
+		{0xe7d0, 20.0},     // bypass threshold
+		{0xf3de, 99.0},     // battery capacity Wh
 		{0x0000, 0.0},
 	}
 	for _, c := range cases {

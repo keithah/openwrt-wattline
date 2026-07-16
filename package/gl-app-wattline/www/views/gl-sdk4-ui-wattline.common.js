@@ -32,7 +32,9 @@
     name: 'wattline',
     data: function () {
       return { token: '', port: '8377', tel: null, dev: null, err: '', loaded: false,
-        pairing: null, pin: '020555', selMac: '', ptick: 0, uiErr: '' };
+        pairing: null, pin: '020555', selMac: '', ptick: 0, uiErr: '',
+        usbcLimit: null, threshold: null, thrInput: '', schedules: null,
+        etick: 0, ctlErr: '', newSch: { type: 1, hour: 8, minute: 0, action: 1 } };
     },
     created: function () {
       var self = this;
@@ -54,6 +56,13 @@
         this.get('/telemetry').then(function (t) {
           self.tel = t; self.err = ''; self.loaded = true;
           if (t.connected && !self.dev) self.get('/status').then(function (s) { self.dev = s.device || null; }).catch(function () {});
+          if (t.connected) {
+            // Refresh device settings on connect and every ~10s (they rarely change).
+            if (self.usbcLimit == null || self.etick % 5 === 0) self.fetchExtras();
+            self.etick++;
+          } else {
+            self.usbcLimit = null; self.threshold = null; self.schedules = null; self.etick = 0;
+          }
           if (!t.connected) {
             var pp = self.pairing;
             var pbusy = pp && (pp.stage === 'scanning' || pp.stage === 'pairing');
@@ -87,6 +96,41 @@
       act: function (a) { var self = this;
         this.post('/device/action', { action: a })
           .then(function () { setTimeout(function () { self.tick(); }, 800); }).catch(function () {});
+      },
+      fetchExtras: function () { var self = this;
+        this.get('/device/usbc-limit').then(function (l) { self.usbcLimit = l; }).catch(function () {});
+        this.get('/device/bypass-threshold').then(function (t) {
+          self.threshold = (t && typeof t.volts === 'number') ? t.volts : null;
+          if (self.threshold != null && self.thrInput === '') self.thrInput = String(self.threshold);
+        }).catch(function () {});
+        this.get('/device/schedules').then(function (s) { self.schedules = Array.isArray(s) ? s : []; }).catch(function () {});
+      },
+      setLimit: function (watts) { var self = this;
+        this.ctlErr = '';
+        this.post('/device/usbc-limit', { type: 'output', watts: watts })
+          .then(function () { self.fetchExtras(); }).catch(function (e) { self.ctlErr = e.message; });
+      },
+      setThreshold: function () { var self = this;
+        this.ctlErr = '';
+        var v = parseFloat(this.thrInput);
+        if (!(v > 0)) { this.ctlErr = 'Enter a voltage'; return; }
+        this.post('/device/bypass-threshold', { volts: v })
+          .then(function () { self.fetchExtras(); }).catch(function (e) { self.ctlErr = e.message; });
+      },
+      addSched: function () { var self = this;
+        this.ctlErr = '';
+        var n = this.newSch;
+        this.post('/device/schedules', { type: Number(n.type), hour: Number(n.hour), minute: Number(n.minute), action: Number(n.action) })
+          .then(function () { self.fetchExtras(); }).catch(function (e) { self.ctlErr = e.message; });
+      },
+      delSched: function (id) { var self = this;
+        this.ctlErr = '';
+        fetch(this.base() + '/device/schedules/' + id, { method: 'DELETE', headers: { Authorization: 'Bearer ' + this.token } })
+          .then(function (r) { if (!r.ok) return r.text().then(function (t) { throw new Error(t); }); self.fetchExtras(); })
+          .catch(function (e) { self.ctlErr = e.message; });
+      },
+      confirmAct: function (a, msg) { var self = this;
+        if (window.confirm(msg)) self.act(a);
       }
     },
     render: function (h) {
@@ -237,10 +281,85 @@
         ])
       ]);
 
+      // --- Device settings card: USB-C output limit + DC bypass threshold ---
+      var btn = function (label, onclick, kind) {
+        var bg = kind === 'danger' ? RED : kind === 'primary' ? GREEN : '#fff';
+        var col = kind ? '#fff' : '#3c4043';
+        return h('button', { style: { padding: '7px 14px', borderRadius: '8px', fontSize: '13px',
+          cursor: 'pointer', border: kind ? 'none' : '1px solid #d0d4d9', background: bg, color: col, marginRight: '8px' },
+          on: { click: onclick } }, label);
+      };
+      var wattChoices = [30, 45, 60, 65, 100, 140];
+      var curWatts = self.usbcLimit && self.usbcLimit.output ? self.usbcLimit.output.watts : 0;
+      var limitRow = el('div', { display: 'flex', flexWrap: 'wrap', alignItems: 'center', marginTop: '6px' },
+        wattChoices.map(function (wv) {
+          var on = curWatts === wv;
+          return h('button', { style: { padding: '6px 12px', borderRadius: '8px', fontSize: '13px', cursor: 'pointer',
+            marginRight: '6px', marginBottom: '6px', border: on ? '2px solid ' + GREEN : '1px solid #d0d4d9',
+            background: on ? '#e6f6ec' : '#fff', color: '#3c4043' }, on: { click: function () { self.setLimit(wv); } } }, wv + ' W');
+        }));
+      var thrRow = el('div', { display: 'flex', alignItems: 'flex-end', marginTop: '12px' }, [
+        el('div', { marginRight: '10px' }, [ sub('DC bypass engages at'),
+          h('input', { style: { width: '80px', padding: '7px 9px', fontSize: '14px', border: '1px solid #d0d4d9',
+            borderRadius: '8px', marginTop: '2px' }, attrs: { inputmode: 'decimal' }, domProps: { value: self.thrInput },
+            on: { input: function (e) { self.thrInput = e.target.value; } } }) ]),
+        sub('V', GREY), el('div', { flex: '1' }, ''), btn('Set', function () { self.setThreshold(); })
+      ]);
+      var settings = card([
+        cardhead('Device settings'),
+        sub('USB-C output power limit'),
+        limitRow,
+        thrRow,
+        self.ctlErr ? el('div', { color: RED, fontSize: '12px', marginTop: '8px' }, self.ctlErr) : ''
+      ]);
+
+      // --- Schedules card (on-device timers) ---
+      var dayType = function (ty) { return ty === 0 ? 'Once' : ty === 1 ? 'Daily' : ty === 2 ? 'Weekly' : 'Monthly'; };
+      var hhmm = function (t) { return ('0' + t.hour).slice(-2) + ':' + ('0' + t.minute).slice(-2); };
+      var schRows = (self.schedules || []).map(function (t) {
+        return el('div', { display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          padding: '8px 0', borderTop: '1px solid #eef1f4' }, [
+          el('div', {}, [ h('b', { style: { fontSize: '14px' } }, hhmm(t) + ' · ' + (t.action ? 'On' : 'Off')),
+            el('div', { color: GREY, fontSize: '12px' }, dayType(t.type) + (t.status === 1 ? '' : ' · disabled')) ]),
+          btn('Delete', function () { self.delSched(t.id); }, 'danger')
+        ]);
+      });
+      var ns = self.newSch;
+      var numInput = function (key, w) { return h('input', { style: { width: w, padding: '6px 8px', fontSize: '14px',
+        border: '1px solid #d0d4d9', borderRadius: '8px', marginRight: '6px' }, attrs: { inputmode: 'numeric' },
+        domProps: { value: ns[key] }, on: { input: function (e) { ns[key] = e.target.value; } } }); };
+      var addRow = el('div', { display: 'flex', flexWrap: 'wrap', alignItems: 'center', marginTop: '10px' }, [
+        h('select', { style: { padding: '6px 8px', borderRadius: '8px', marginRight: '6px', border: '1px solid #d0d4d9' },
+          on: { change: function (e) { ns.type = e.target.value; } } },
+          [[1, 'Daily'], [0, 'Once'], [2, 'Weekly'], [3, 'Monthly']].map(function (o) {
+            return h('option', { attrs: { value: o[0], selected: String(ns.type) === String(o[0]) } }, o[1]); })),
+        numInput('hour', '48px'), sub(':', GREY), numInput('minute', '48px'),
+        h('select', { style: { padding: '6px 8px', borderRadius: '8px', marginRight: '6px', border: '1px solid #d0d4d9' },
+          on: { change: function (e) { ns.action = e.target.value; } } },
+          [[1, 'Turn on'], [0, 'Turn off']].map(function (o) {
+            return h('option', { attrs: { value: o[0], selected: String(ns.action) === String(o[0]) } }, o[1]); })),
+        btn('Add', function () { self.addSched(); }, 'primary')
+      ]);
+      var schedCard = card([
+        cardhead('Schedules'),
+        sub('On/off timers stored on the device — they run even if the router is offline.'),
+        schRows.length ? el('div', { marginTop: '4px' }, schRows) : el('div', { color: GREY, fontSize: '13px', marginTop: '8px' }, 'No schedules yet.'),
+        addRow
+      ]);
+
+      // --- Power card ---
+      var powerCard = card([
+        cardhead('Power'),
+        el('div', { display: 'flex', marginTop: '8px' }, [
+          btn('Restart', function () { self.confirmAct('restart', 'Restart the Link-Power? It will reconnect in about 15 seconds.'); }),
+          btn('Power off', function () { self.confirmAct('shutdown', 'Power OFF the Link-Power completely?\n\nThis is a hard shutdown — the device (and anything it powers, including this router if it runs off the battery) will turn off, and it will NOT come back over Bluetooth until you physically power it on again.'); }, 'danger')
+        ])
+      ]);
+
       var note = el('div', { color: GREY, fontSize: '12px', maxWidth: '460px', margin: '6px 2px 0', lineHeight: '1.5' },
         '~10–15% of the battery is reserved for the Starlink Mini — USB-C output turns off automatically below that to keep your dish running.');
 
-      return wrap([battery, dcCard, cCard, note]);
+      return wrap([battery, dcCard, cCard, settings, schedCard, powerCard, note]);
     }
   };
 })()
