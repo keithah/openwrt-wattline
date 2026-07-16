@@ -22,6 +22,15 @@ Both UIs cover the full lifecycle:
 
 See the [changelog](CHANGELOG.md) for version history.
 
+## Screenshots
+
+The native GL.iNet admin-panel app (**Applications → Wattline**). The LuCI app
+mirrors the same layout.
+
+| Pairing | Monitoring & control |
+|---|---|
+| <img src="docs/screenshots/gl-pairing.png" alt="Pairing screen: scan, select the Link-Power, enter PIN" width="360"> | <img src="docs/screenshots/gl-panel.png" alt="Connected panel: battery, DC/USB-C, device settings, schedules, power" width="360"> |
+
 Built for the GL.iNet Spitz AX (GL-X3000) but portable to any aarch64 OpenWrt
 target. The BLE protocol reference is in [`docs/API.md`](docs/API.md)
 (reverse-engineered and live-verified).
@@ -99,11 +108,30 @@ runs `/etc/uci-defaults/99-wattline` (generates a random API token into
 `/etc/config/wattline` if unset), then enables and **restart**s the procd
 service (restart, so an upgrade picks up the new binary and token).
 
+### Install from the hosted opkg feed (recommended)
+
+A ready-to-use opkg feed is published via GitHub Pages at
+**https://keithah.github.io/openwrt-wattline/**. Register it once and opkg
+handles install and upgrades (it pulls the `bluez`/`dbus`/`kmod-bluetooth`
+dependencies by name from the router's own feeds):
+
+```sh
+ssh root@192.168.8.1
+echo 'src/gz wattline https://keithah.github.io/openwrt-wattline' >> /etc/opkg/customfeeds.conf
+opkg update
+opkg install wattlined luci-app-wattline gl-app-wattline   # first time
+opkg upgrade wattlined luci-app-wattline gl-app-wattline    # later releases
+```
+
+The feed is regenerated from `package/out/` on each release
+(`make -C package feed`, then published to the `gh-pages` branch).
+
 ### Install from a release
 
-Each [GitHub release](https://github.com/keithah/openwrt-wattline/releases)
-attaches the four `.ipk`s plus a ready-made opkg feed index (`Packages`,
-`Packages.gz`). To install without building anything:
+Prefer the hosted feed above. If you'd rather grab files directly, each
+[GitHub release](https://github.com/keithah/openwrt-wattline/releases) attaches
+the four `.ipk`s plus a ready-made opkg feed index (`Packages`, `Packages.gz`).
+To install without building anything:
 
 ```sh
 # Download the ipks from the latest release straight to the router
