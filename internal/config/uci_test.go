@@ -45,3 +45,26 @@ func TestParseAndSerializeRoundTrip(t *testing.T) {
 		t.Fatalf("round-trip mismatch:\n%s\n---\n%s", doc.Serialize(), doc2.Serialize())
 	}
 }
+
+func TestSerializeHostileSectionNameRoundTripsSafely(t *testing.T) {
+	const hostileName = "nightly'\n\toption token 'replacement"
+	doc := &UCIDoc{Sections: []*UCISection{
+		newSection("rule", hostileName),
+	}}
+
+	serialized := doc.Serialize()
+	roundTripped, err := ParseUCI(serialized)
+	if err != nil {
+		t.Fatalf("parse serialized document: %v\n%s", err, serialized)
+	}
+	if len(roundTripped.Sections) != 1 {
+		t.Fatalf("want 1 section, got %d:\n%s", len(roundTripped.Sections), serialized)
+	}
+	got := roundTripped.Sections[0]
+	if got.Name != hostileName {
+		t.Fatalf("section name = %q, want %q", got.Name, hostileName)
+	}
+	if _, injected := got.Options["token"]; injected {
+		t.Fatalf("hostile section name injected token option: %#v", got.Options)
+	}
+}
