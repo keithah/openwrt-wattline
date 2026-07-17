@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/keithah/openwrt-wattline/internal/actions"
+	"github.com/keithah/openwrt-wattline/internal/auth"
 	"github.com/keithah/openwrt-wattline/internal/ble"
 	"github.com/keithah/openwrt-wattline/internal/config"
 	"github.com/keithah/openwrt-wattline/internal/control"
@@ -18,20 +20,26 @@ import (
 )
 
 type Deps struct {
-	Store         *state.Store
-	Engine        *rules.Engine
-	Exec          *actions.Executor
-	Token         string
-	Identity      func() ble.Identity
-	Connected     func() bool
-	SaveRules     func([]config.Rule) error
-	LoadRules     func() []config.Rule
-	Pairing       *ble.Pairing   // nil when the platform has no pairing support
-	Control       func() Control // returns nil when no device is connected
-	DeviceControl *control.Service
-	MagicDNSName  func() string
-	Now           func() time.Time
-	SaveBLEPIN    func(string) error
+	Store          *state.Store
+	Engine         *rules.Engine
+	Exec           *actions.Executor
+	Token          string
+	Identity       func() ble.Identity
+	Connected      func() bool
+	SaveRules      func([]config.Rule) error
+	LoadRules      func() []config.Rule
+	Pairing        *ble.Pairing   // nil when the platform has no pairing support
+	Control        func() Control // returns nil when no device is connected
+	DeviceControl  *control.Service
+	MagicDNSName   func() string
+	Now            func() time.Time
+	SaveBLEPIN     func(string) error
+	Auth           *auth.Store
+	ClientPairing  *auth.Pairing
+	Settings       func() *config.Config
+	SaveMain       func(*config.Config) error
+	TLSFingerprint func() string
+	PreferredHost  func() string
 }
 
 type server struct{ d Deps }
@@ -57,25 +65,25 @@ func NewServer(d Deps) http.Handler {
 	mux.HandleFunc("PUT /api/v1/device/usbc/limit/{type}", s.auth(s.putLimit))
 	mux.HandleFunc("DELETE /api/v1/device/usbc/limit/{type}", s.auth(s.deleteLimit))
 	mux.HandleFunc("POST /api/v1/device/dc/bypass", s.auth(s.setBypass))
-	mux.HandleFunc("GET /api/v1/device/dc/bypass/threshold", s.auth(s.getThreshold))
-	mux.HandleFunc("PUT /api/v1/device/dc/bypass/threshold", s.auth(s.putThreshold))
+	mux.HandleFunc("GET /api/v1/device/dc/bypass/threshold", s.admin(s.getThreshold))
+	mux.HandleFunc("PUT /api/v1/device/dc/bypass/threshold", s.admin(s.putThreshold))
 	mux.HandleFunc("GET /api/v1/device/timers", s.auth(s.listTimers))
 	mux.HandleFunc("POST /api/v1/device/timers", s.auth(s.addTimer))
 	mux.HandleFunc("GET /api/v1/device/timers/{id}", s.auth(s.getTimer))
 	mux.HandleFunc("PUT /api/v1/device/timers/{id}", s.auth(s.putTimer))
 	mux.HandleFunc("DELETE /api/v1/device/timers/{id}", s.auth(s.deleteTimer))
-	mux.HandleFunc("GET /api/v1/device/clock", s.auth(s.getClock))
-	mux.HandleFunc("POST /api/v1/device/clock/sync", s.auth(s.syncClock))
+	mux.HandleFunc("GET /api/v1/device/clock", s.admin(s.getClock))
+	mux.HandleFunc("POST /api/v1/device/clock/sync", s.admin(s.syncClock))
 	mux.HandleFunc("POST /api/v1/device/restart", s.auth(s.restart))
 	mux.HandleFunc("POST /api/v1/device/shutdown", s.auth(s.shutdown))
-	mux.HandleFunc("GET /api/v1/device/ota", s.auth(s.otaInfo))
-	mux.HandleFunc("POST /api/v1/device/ota/enter", s.auth(s.enterOTA))
-	mux.HandleFunc("POST /api/v1/device/ota/exit", s.auth(s.exitOTA))
-	mux.HandleFunc("PUT /api/v1/device/advanced/running-mode", s.auth(s.putRunningMode))
-	mux.HandleFunc("GET /api/v1/device/advanced/barrier-free", s.auth(s.getBarrierFree))
-	mux.HandleFunc("PUT /api/v1/device/advanced/barrier-free", s.auth(s.putBarrierFree))
-	mux.HandleFunc("GET /api/v1/device/advanced/usb-fw-version", s.auth(s.getUSBFirmware))
-	mux.HandleFunc("PUT /api/v1/device/advanced/ble-pin", s.auth(s.putBLEPIN))
+	mux.HandleFunc("GET /api/v1/device/ota", s.admin(s.otaInfo))
+	mux.HandleFunc("POST /api/v1/device/ota/enter", s.admin(s.enterOTA))
+	mux.HandleFunc("POST /api/v1/device/ota/exit", s.admin(s.exitOTA))
+	mux.HandleFunc("PUT /api/v1/device/advanced/running-mode", s.admin(s.putRunningMode))
+	mux.HandleFunc("GET /api/v1/device/advanced/barrier-free", s.admin(s.getBarrierFree))
+	mux.HandleFunc("PUT /api/v1/device/advanced/barrier-free", s.admin(s.putBarrierFree))
+	mux.HandleFunc("GET /api/v1/device/advanced/usb-fw-version", s.admin(s.getUSBFirmware))
+	mux.HandleFunc("PUT /api/v1/device/advanced/ble-pin", s.admin(s.putBLEPIN))
 	mux.HandleFunc("GET /api/v1/rules", s.auth(s.getRules))
 	mux.HandleFunc("POST /api/v1/rules", s.auth(s.postRule))
 	mux.HandleFunc("PUT /api/v1/rules/{name}", s.auth(s.putRule))
@@ -87,11 +95,20 @@ func NewServer(d Deps) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/pairing/device/{mac}", s.auth(s.pairing(s.pairingUnpair)))
 	mux.HandleFunc("GET /api/v1/device/usbc-limit", s.auth(s.getUSBCLimit))
 	mux.HandleFunc("POST /api/v1/device/usbc-limit", s.auth(s.setUSBCLimit))
-	mux.HandleFunc("GET /api/v1/device/bypass-threshold", s.auth(s.getBypassThreshold))
-	mux.HandleFunc("POST /api/v1/device/bypass-threshold", s.auth(s.setBypassThreshold))
+	mux.HandleFunc("GET /api/v1/device/bypass-threshold", s.admin(s.getBypassThreshold))
+	mux.HandleFunc("POST /api/v1/device/bypass-threshold", s.admin(s.setBypassThreshold))
 	mux.HandleFunc("GET /api/v1/device/schedules", s.auth(s.getSchedules))
 	mux.HandleFunc("POST /api/v1/device/schedules", s.auth(s.postSchedule))
 	mux.HandleFunc("DELETE /api/v1/device/schedules/{id}", s.auth(s.deleteSchedule))
+	mux.HandleFunc("POST /api/v1/pair", s.clientPair)
+	mux.HandleFunc("GET /api/v1/pairing-mode", s.admin(s.pairingModeStatus))
+	mux.HandleFunc("POST /api/v1/pairing-mode", s.admin(s.openPairingMode))
+	mux.HandleFunc("DELETE /api/v1/pairing-mode", s.admin(s.closePairingMode))
+	mux.HandleFunc("GET /api/v1/pairing-mode/qr.png", s.admin(s.pairingQRCode))
+	mux.HandleFunc("GET /api/v1/tokens", s.admin(s.listTokens))
+	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.admin(s.revokeToken))
+	mux.HandleFunc("GET /api/v1/settings", s.admin(s.getSettings))
+	mux.HandleFunc("PUT /api/v1/settings", s.admin(s.putSettings))
 	return cors(mux)
 }
 
@@ -115,22 +132,53 @@ func cors(next http.Handler) http.Handler {
 
 func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.d.Token == "" {
+		principal, ok := s.authenticate(r)
+		if !ok {
 			writeAPIError(w, "unauthorized")
 			return
 		}
-		authorization := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authorization, "Bearer ") {
-			writeAPIError(w, "unauthorized")
-			return
-		}
-		tok := strings.TrimPrefix(authorization, "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.d.Token)) != 1 {
-			writeAPIError(w, "unauthorized")
+		next(w, r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal)))
+	}
+}
+
+type principalContextKey struct{}
+
+func principalFromContext(ctx context.Context) (auth.Principal, bool) {
+	principal, ok := ctx.Value(principalContextKey{}).(auth.Principal)
+	return principal, ok
+}
+
+func (s *server) authenticate(r *http.Request) (auth.Principal, bool) {
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 {
+		return auth.Principal{}, false
+	}
+	authorization := values[0]
+	if !strings.HasPrefix(authorization, "Bearer ") {
+		return auth.Principal{}, false
+	}
+	secret := strings.TrimPrefix(authorization, "Bearer ")
+	if secret == "" || strings.ContainsAny(secret, " \t\r\n") {
+		return auth.Principal{}, false
+	}
+	if s.d.Auth != nil {
+		return s.d.Auth.Authenticate(secret)
+	}
+	if s.d.Token != "" && subtle.ConstantTimeCompare([]byte(secret), []byte(s.d.Token)) == 1 {
+		return auth.Principal{TokenID: "bootstrap", Role: auth.RoleAdmin}, true
+	}
+	return auth.Principal{}, false
+}
+
+func (s *server) admin(next http.HandlerFunc) http.HandlerFunc {
+	return s.auth(func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := principalFromContext(r.Context())
+		if !ok || principal.Role != auth.RoleAdmin {
+			writeAPIError(w, "admin_required")
 			return
 		}
 		next(w, r)
-	}
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
