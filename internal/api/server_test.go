@@ -77,6 +77,22 @@ func TestAuth(t *testing.T) {
 	}
 }
 
+func TestAuthRequiresExactBearerScheme(t *testing.T) {
+	h, _, _ := testServer(t)
+	for _, header := range []string{"tok", "Basic tok", "bearer tok", "Bearer", "Bearer ", " Bearer tok"} {
+		t.Run(header, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+			req.Header.Set("Authorization", header)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized {
+				t.Fatalf("%q status %d", header, rr.Code)
+			}
+			exactBody(t, rr, `{"error":{"code":"unauthorized","message":"Bearer token is missing or invalid","details":{}}}`)
+		})
+	}
+}
+
 func TestCanonicalErrorCompatibilityRoutes(t *testing.T) {
 	h, _, _ := testServer(t)
 	tests := []struct {

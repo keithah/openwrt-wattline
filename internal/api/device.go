@@ -147,12 +147,12 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 }
 
 type boolRequest struct {
-	Enabled *bool `json:"enabled"`
+	On *bool `json:"on"`
 }
 
 func (s *server) setDC(w http.ResponseWriter, r *http.Request) {
 	var req boolRequest
-	if decodeJSON(r, &req) != nil || req.Enabled == nil {
+	if decodeJSON(r, &req) != nil || req.On == nil {
 		writeAPIError(w, "invalid_request")
 		return
 	}
@@ -160,7 +160,7 @@ func (s *server) setDC(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "device_disconnected")
 		return
 	}
-	observed, err := s.d.DeviceControl.SetDC(r.Context(), *req.Enabled)
+	result, err := s.d.DeviceControl.SetDCResult(r.Context(), *req.On)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -169,13 +169,13 @@ func (s *server) setDC(w http.ResponseWriter, r *http.Request) {
 		Enabled bool        `json:"enabled"`
 		Command commandView `json:"command"`
 	}{
-		Enabled: observed.Enabled, Command: s.latestCommand("dc_output"),
+		Enabled: result.Observed.Enabled, Command: commandFromState(result.Command),
 	})
 }
 
 func (s *server) setTypeCOutput(w http.ResponseWriter, r *http.Request) {
 	var req boolRequest
-	if decodeJSON(r, &req) != nil || req.Enabled == nil {
+	if decodeJSON(r, &req) != nil || req.On == nil {
 		writeAPIError(w, "invalid_request")
 		return
 	}
@@ -183,7 +183,7 @@ func (s *server) setTypeCOutput(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "device_disconnected")
 		return
 	}
-	observed, err := s.d.DeviceControl.SetTypeCOutput(r.Context(), *req.Enabled)
+	result, err := s.d.DeviceControl.SetTypeCOutputResult(r.Context(), *req.On)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -193,13 +193,13 @@ func (s *server) setTypeCOutput(w http.ResponseWriter, r *http.Request) {
 		Mode    uint8       `json:"mode"`
 		Command commandView `json:"command"`
 	}{
-		Enabled: observed.Mode == 3, Mode: observed.Mode, Command: s.latestCommand("usbc_output"),
+		Enabled: result.Observed.Mode == 3, Mode: result.Observed.Mode, Command: commandFromState(result.Command),
 	})
 }
 
 func (s *server) setBypass(w http.ResponseWriter, r *http.Request) {
 	var req boolRequest
-	if decodeJSON(r, &req) != nil || req.Enabled == nil {
+	if decodeJSON(r, &req) != nil || req.On == nil {
 		writeAPIError(w, "invalid_request")
 		return
 	}
@@ -207,7 +207,7 @@ func (s *server) setBypass(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "device_disconnected")
 		return
 	}
-	observed, err := s.d.DeviceControl.SetBypass(r.Context(), *req.Enabled)
+	result, err := s.d.DeviceControl.SetBypassResult(r.Context(), *req.On)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -216,18 +216,8 @@ func (s *server) setBypass(w http.ResponseWriter, r *http.Request) {
 		Enabled bool        `json:"enabled"`
 		Command commandView `json:"command"`
 	}{
-		Enabled: observed.Bypass, Command: s.latestCommand("dc_bypass"),
+		Enabled: result.Observed.Bypass, Command: commandFromState(result.Command),
 	})
-}
-
-func (s *server) latestCommand(operation string) commandView {
-	recent := s.d.Store.Snapshot().RecentCommands
-	for i := len(recent) - 1; i >= 0; i-- {
-		if recent[i].Operation == operation {
-			return commandFromState(recent[i])
-		}
-	}
-	return commandView{}
 }
 
 var canonicalLimitTypes = map[string]int{"global": proto.LimitGlobal, "input": proto.LimitInput, "output": proto.LimitOutput, "runtime": proto.LimitRuntime}

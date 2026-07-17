@@ -339,12 +339,13 @@ func TestCancellationDuringResolutionFinishesWithoutSessionCall(t *testing.T) {
 }
 
 func TestReconciledFailureAndDisconnectedAreTerminal(t *testing.T) {
+	writeErr := errors.New("write failed")
 	for _, tc := range []struct {
 		name    string
 		session Session
 		want    error
 	}{
-		{"write", &fakeSession{dcErr: errors.New("write failed")}, errors.New("write failed")},
+		{"write", &fakeSession{dcErr: writeErr}, writeErr},
 		{"disconnected", nil, ErrDisconnected},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -353,7 +354,7 @@ func TestReconciledFailureAndDisconnectedAreTerminal(t *testing.T) {
 			svc := testService(st, tc.session)
 			_, err := svc.SetDC(context.Background(), true)
 			if tc.name == "write" {
-				if err == nil || err.Error() != tc.want.Error() {
+				if !errors.Is(err, tc.want) || !errors.Is(err, ErrBLE) {
 					t.Fatalf("err=%v", err)
 				}
 			} else if !errors.Is(err, tc.want) {
@@ -464,7 +465,7 @@ func TestCommandIDEntropyFailureCreatesNoCommand(t *testing.T) {
 	svc := testService(st, sess)
 	want := errors.New("entropy unavailable")
 	svc.newID = func() (string, error) { return "", want }
-	if _, err := svc.SetDC(context.Background(), true); !errors.Is(err, want) {
+	if _, err := svc.SetDC(context.Background(), true); !errors.Is(err, want) || !errors.Is(err, ErrInternal) {
 		t.Fatalf("err=%v want %v", err, want)
 	}
 	snap := st.Snapshot()
@@ -473,6 +474,84 @@ func TestCommandIDEntropyFailureCreatesNoCommand(t *testing.T) {
 	}
 	if len(sess.dcCalls) != 0 {
 		t.Fatalf("DC calls=%v", sess.dcCalls)
+	}
+}
+
+func TestSessionFailureIsTypedBLEAndPreservesCause(t *testing.T) {
+	st := fullyCapableStore()
+	st.SetDC(proto.DCPort{})
+	want := errors.New("gatt secret")
+	svc := testService(st, &fakeSession{dcErr: want})
+	if _, err := svc.SetDC(context.Background(), true); !errors.Is(err, ErrBLE) || !errors.Is(err, want) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestPassThroughSessionFailuresAreTypedBLE(t *testing.T) {
+	want := errors.New("transport detail")
+	store := fullyCapableStore()
+	svc := testService(store, &fakeSession{err: want})
+	timer := proto.Timer{Status: 1, Type: proto.TimerDaily}
+	calls := []struct {
+		name string
+		call func() error
+	}{
+		{"limit get", func() error { _, err := svc.GetUSBCLimit(context.Background(), proto.LimitGlobal); return err }},
+		{"limit put", func() error { _, err := svc.PutUSBCLimit(context.Background(), proto.LimitGlobal, 1); return err }},
+		{"limit delete", func() error { _, err := svc.DeleteUSBCLimit(context.Background(), proto.LimitGlobal); return err }},
+		{"threshold get", func() error { _, err := svc.GetBypassThreshold(context.Background()); return err }},
+		{"threshold put", func() error { _, err := svc.PutBypassThreshold(context.Background(), 19.6); return err }},
+		{"barrier get", func() error { _, err := svc.BarrierFree(context.Background()); return err }},
+		{"barrier put", func() error { _, err := svc.SetBarrierFree(context.Background(), true); return err }},
+		{"running mode", func() error { return svc.SetRunningMode(context.Background(), 1) }},
+		{"USB firmware", func() error { _, err := svc.USBFirmwareVersion(context.Background()); return err }},
+		{"BLE PIN", func() error { return svc.SetBLEPIN(context.Background(), 20555) }},
+		{"clock read", func() error { _, _, err := svc.ReadClock(context.Background()); return err }},
+		{"clock sync", func() error { return svc.SyncClock(context.Background(), time.Now()) }},
+		{"OTA info", func() error { _, err := svc.OTAInfo(context.Background()); return err }},
+		{"OTA enter", func() error { return svc.EnterOTA(context.Background()) }},
+		{"OTA exit", func() error {
+			identity := *store.Snapshot().Device
+			identity.Mode = "ota"
+			store.SetIdentity(identity)
+			err := svc.ExitOTA(context.Background())
+			identity.Mode = "app"
+			store.SetIdentity(identity)
+			return err
+		}},
+		{"restart", func() error { return svc.Restart(context.Background()) }},
+		{"shutdown", func() error { return svc.Shutdown(context.Background()) }},
+		{"timers list", func() error { _, err := svc.ListTimers(context.Background()); return err }},
+		{"timer add", func() error { _, _, err := svc.AddTimer(context.Background(), timer); return err }},
+		{"timer put", func() error { _, err := svc.PutTimer(context.Background(), 1, timer); return err }},
+		{"timer delete", func() error { _, err := svc.DeleteTimer(context.Background(), 1); return err }},
+	}
+	for _, tc := range calls {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if !errors.Is(err, ErrBLE) || !errors.Is(err, want) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestMutationResultReturnsItsExactCommand(t *testing.T) {
+	st := fullyCapableStore()
+	st.SetDC(proto.DCPort{})
+	svc := testService(st, &fakeSession{})
+	svc.newID = func() (string, error) { return "cmd-exact", nil }
+	done := make(chan CommandResult[proto.DCPort], 1)
+	errCh := make(chan error, 1)
+	go func() { got, err := svc.SetDCResult(context.Background(), true); done <- got; errCh <- err }()
+	waitPending(t, st)
+	st.SetDC(proto.DCPort{Enabled: true})
+	got := <-done
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if got.Command.ID != "cmd-exact" || got.Command.Requested.(map[string]any)["on"] != true || !got.Observed.Enabled {
+		t.Fatalf("result: %+v", got)
 	}
 }
 

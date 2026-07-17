@@ -92,7 +92,12 @@ func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 			writeAPIError(w, "unauthorized")
 			return
 		}
-		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		authorization := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authorization, "Bearer ") {
+			writeAPIError(w, "unauthorized")
+			return
+		}
+		tok := strings.TrimPrefix(authorization, "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.d.Token)) != 1 {
 			writeAPIError(w, "unauthorized")
 			return

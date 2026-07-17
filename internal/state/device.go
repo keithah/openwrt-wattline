@@ -87,9 +87,9 @@ func (s *Store) BeginCommand(command Command) {
 	})
 }
 
-func (s *Store) FinishCommand(id, phase string, observed any, commandErr *CommandError) {
+func (s *Store) FinishCommand(id, phase string, observed any, commandErr *CommandError) (Command, bool) {
 	if !isTerminalCommandPhase(phase) {
-		return
+		return Command{}, false
 	}
 	observed = cloneValue(observed)
 	commandErr = cloneCommandError(commandErr)
@@ -97,7 +97,7 @@ func (s *Store) FinishCommand(id, phase string, observed any, commandErr *Comman
 	command, ok := s.snap.PendingCommands[id]
 	if !ok {
 		s.mu.Unlock()
-		return
+		return Command{}, false
 	}
 	command.Phase = phase
 	command.Observed = observed
@@ -110,6 +110,7 @@ func (s *Store) FinishCommand(id, phase string, observed any, commandErr *Comman
 	}
 	s.publishLocked(false)
 	s.mu.Unlock()
+	return cloneCommand(command), true
 }
 
 func isTerminalCommandPhase(phase string) bool {

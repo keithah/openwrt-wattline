@@ -138,7 +138,7 @@ administrative `advanced` switch.
 Each command object is exactly:
 
 ```json
-{"id":"cmd_f00dbabe","operation":"dc_output","requested":{"enabled":true},"phase":"pending","started_at":"2026-07-17T20:00:00Z","updated_at":"2026-07-17T20:00:00Z","error":null}
+{"id":"cmd_f00dbabe","operation":"dc_output","requested":{"on":true},"phase":"pending","started_at":"2026-07-17T20:00:00Z","updated_at":"2026-07-17T20:00:00Z","error":null}
 ```
 
 `phase` is `pending`, `confirmed`, `timeout`, or `failed`. `recent` retains at
@@ -202,10 +202,10 @@ The write transaction ends before waiting for telemetry. DC confirms only from
 
 ### `POST /api/v1/device/dc`
 
-Role: client. Request `{"enabled":true}`. Success `200 OK`:
+Role: client. Request `{"on":true}`. Success `200 OK`:
 
 ```json
-{"enabled":true,"command":{"id":"cmd_f00dbabe","operation":"dc_output","requested":{"enabled":true},"phase":"confirmed","started_at":"2026-07-17T20:00:00Z","updated_at":"2026-07-17T20:00:01Z","error":null}}
+{"enabled":true,"command":{"id":"cmd_f00dbabe","operation":"dc_output","requested":{"on":true},"phase":"confirmed","started_at":"2026-07-17T20:00:00Z","updated_at":"2026-07-17T20:00:01Z","error":null}}
 ```
 
 Errors: `400 invalid_request`, `409 capability_unsupported`,
@@ -214,10 +214,10 @@ BLE I/O: one serialized command transaction, then telemetry reconciliation.
 
 ### `POST /api/v1/device/usbc/output`
 
-Role: client. Request `{"enabled":false}`. Success `200 OK`:
+Role: client. Request `{"on":false}`. Success `200 OK`:
 
 ```json
-{"enabled":false,"mode":1,"command":{"id":"cmd_cafebabe","operation":"usbc_output","requested":{"enabled":false},"phase":"confirmed","started_at":"2026-07-17T20:00:00Z","updated_at":"2026-07-17T20:00:01Z","error":null}}
+{"enabled":false,"mode":1,"command":{"id":"cmd_cafebabe","operation":"usbc_output","requested":{"on":false},"phase":"confirmed","started_at":"2026-07-17T20:00:00Z","updated_at":"2026-07-17T20:00:01Z","error":null}}
 ```
 
 Errors: `400 invalid_request`, `409 capability_unsupported`,
@@ -253,10 +253,10 @@ runtime), `409 capability_unsupported`, `503 device_disconnected`,
 
 ### `POST /api/v1/device/dc/bypass`
 
-Role: client. Request `{"enabled":true}`. Success `200 OK`:
+Role: client. Request `{"on":true}`. Success `200 OK`:
 
 ```json
-{"enabled":true,"command":{"id":"cmd_deadbeef","operation":"dc_bypass","requested":{"enabled":true},"phase":"confirmed","started_at":"2026-07-17T20:00:00Z","updated_at":"2026-07-17T20:00:02Z","error":null}}
+{"enabled":true,"command":{"id":"cmd_deadbeef","operation":"dc_bypass","requested":{"on":true},"phase":"confirmed","started_at":"2026-07-17T20:00:00Z","updated_at":"2026-07-17T20:00:02Z","error":null}}
 ```
 
 Errors: `400 invalid_request`, `409 capability_unsupported`,

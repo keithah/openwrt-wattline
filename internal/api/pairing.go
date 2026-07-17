@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
@@ -21,27 +20,35 @@ var (
 func (s *server) pairing(next func(http.ResponseWriter, *http.Request, *ble.Pairing)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.d.Pairing == nil {
-			http.Error(w, "pairing unavailable on this platform", http.StatusServiceUnavailable)
+			writeAPIError(w, "capability_unsupported")
 			return
 		}
 		next(w, r, s.d.Pairing)
 	}
 }
 
-// pairingErr maps pairing-manager errors to HTTP: ErrBusy → 409, rest → 500.
+// pairingErr maps pairing-manager errors without exposing BlueZ/DBus details.
 func pairingErr(w http.ResponseWriter, err error) {
-	code := http.StatusInternalServerError
 	if errors.Is(err, ble.ErrBusy) {
-		code = http.StatusConflict
+		writeAPIError(w, "operation_in_progress")
+		return
 	}
-	http.Error(w, err.Error(), code)
+	writeAPIError(w, "ble_operation_failed")
 }
 
 func (s *server) pairingStatus(w http.ResponseWriter, r *http.Request, p *ble.Pairing) {
+	if requireNoBody(r) != nil {
+		writeAPIError(w, "invalid_request")
+		return
+	}
 	writeJSON(w, 200, p.Status())
 }
 
 func (s *server) pairingScan(w http.ResponseWriter, r *http.Request, p *ble.Pairing) {
+	if requireNoBody(r) != nil {
+		writeAPIError(w, "invalid_request")
+		return
+	}
 	if err := p.StartScan(); err != nil {
 		pairingErr(w, err)
 		return
@@ -54,12 +61,12 @@ func (s *server) pairingPair(w http.ResponseWriter, r *http.Request, p *ble.Pair
 		MAC string `json:"mac"`
 		PIN string `json:"pin"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !macRe.MatchString(req.MAC) {
-		http.Error(w, "body must be JSON with a valid \"mac\" (AA:BB:CC:DD:EE:FF)", http.StatusBadRequest)
+	if err := decodeJSON(r, &req); err != nil || !macRe.MatchString(req.MAC) {
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	if !pinRe.MatchString(req.PIN) {
-		http.Error(w, "\"pin\" must be up to 6 digits", http.StatusBadRequest)
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	if err := p.StartPair(req.MAC, req.PIN); err != nil {
@@ -70,9 +77,13 @@ func (s *server) pairingPair(w http.ResponseWriter, r *http.Request, p *ble.Pair
 }
 
 func (s *server) pairingUnpair(w http.ResponseWriter, r *http.Request, p *ble.Pairing) {
+	if requireNoBody(r) != nil {
+		writeAPIError(w, "invalid_request")
+		return
+	}
 	mac := r.PathValue("mac")
 	if !macRe.MatchString(mac) {
-		http.Error(w, "invalid MAC", http.StatusBadRequest)
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	if err := p.Unpair(mac); err != nil {

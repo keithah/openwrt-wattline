@@ -359,3 +359,25 @@ func TestCommandEvictsOldestAfter32TerminalCommands(t *testing.T) {
 		t.Fatalf("recent ring = %d [%s..%s]", len(recent), recent[0].ID, recent[len(recent)-1].ID)
 	}
 }
+
+func TestFinishCommandReturnsExactRecordAfterRingEviction(t *testing.T) {
+	s := NewStore()
+	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	var returned Command
+	for i := 0; i < 40; i++ {
+		id := fmt.Sprintf("cmd-%02d", i)
+		s.BeginCommand(Command{ID: id, Operation: "dc", Requested: map[string]any{"on": i%2 == 0}, StartedAt: now, UpdatedAt: now})
+		got, ok := s.FinishCommand(id, CommandConfirmed, map[string]any{"index": i}, nil)
+		if !ok {
+			t.Fatalf("finish %s not found", id)
+		}
+		returned = got
+	}
+	if returned.ID != "cmd-39" || returned.Requested.(map[string]any)["on"] != false || returned.Observed.(map[string]any)["index"] != 39 {
+		t.Fatalf("returned command: %+v", returned)
+	}
+	if len(s.Snapshot().RecentCommands) != 32 {
+		t.Fatalf("ring length %d", len(s.Snapshot().RecentCommands))
+	}
+}

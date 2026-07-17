@@ -3,8 +3,10 @@ package api
 import (
 	"bufio"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,11 +18,28 @@ import (
 	"github.com/keithah/openwrt-wattline/internal/state"
 )
 
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
+
 type canonicalSession struct {
 	store     *state.Store
 	err       error
 	limits    map[int]int
 	threshold float64
+}
+
+type orderedDCSession struct {
+	*canonicalSession
+	entered chan bool
+	release map[bool]chan struct{}
+}
+
+func (f *orderedDCSession) DCControl(on bool) error {
+	f.entered <- on
+	<-f.release[on]
+	f.store.SetDC(proto.DCPort{Enabled: on})
+	return nil
 }
 
 func (f *canonicalSession) DCControl(on bool) error {
@@ -173,7 +192,10 @@ func TestCanonicalErrorMapping(t *testing.T) {
 		{controlpkg.ErrAdvancedDisabled, 403, "advanced_disabled"},
 		{controlpkg.ErrTimeout, 504, "command_timeout"},
 		{controlpkg.ErrNotFound, 404, "not_found"},
-		{errors.New("gatt"), 502, "ble_operation_failed"},
+		{fmt.Errorf("%w: gatt", controlpkg.ErrBLE), 502, "ble_operation_failed"},
+		{fmt.Errorf("%w: %w", controlpkg.ErrBLE, controlpkg.ErrDisconnected), 502, "ble_operation_failed"},
+		{fmt.Errorf("%w: entropy", controlpkg.ErrInternal), 500, "internal_error"},
+		{errors.New("unknown"), 500, "internal_error"},
 	}
 	for _, tt := range tests {
 		rr := httptest.NewRecorder()
@@ -191,6 +213,18 @@ func TestCanonicalErrorMapping(t *testing.T) {
 	}
 }
 
+func TestDCCommandIDGenerationFailureIsInternalError(t *testing.T) {
+	h, _, _ := canonicalServer(t, true, true, true, nil)
+	original := cryptorand.Reader
+	cryptorand.Reader = failingReader{err: errors.New("secret entropy detail")}
+	defer func() { cryptorand.Reader = original }()
+	rr := do(t, h, http.MethodPost, "/api/v1/device/dc", "tok", `{"on":true}`)
+	if rr.Code != 500 {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	exactBody(t, rr, `{"error":{"code":"internal_error","message":"Internal server error","details":{}}}`)
+}
+
 func TestCanonicalErrorResponses(t *testing.T) {
 	bleErr := errors.New("gatt write failed")
 	tests := []struct {
@@ -202,8 +236,8 @@ func TestCanonicalErrorResponses(t *testing.T) {
 		want                           string
 	}{
 		{"unauthorized", true, true, true, nil, "GET", "/api/v1/device", "", "", 401, `{"error":{"code":"unauthorized","message":"Bearer token is missing or invalid","details":{}}}`},
-		{"disconnected", false, true, true, nil, "POST", "/api/v1/device/dc", "tok", `{"enabled":true}`, 503, `{"error":{"code":"device_disconnected","message":"Link-Power is not connected","details":{}}}`},
-		{"unsupported", true, false, true, nil, "POST", "/api/v1/device/dc", "tok", `{"enabled":true}`, 409, `{"error":{"code":"capability_unsupported","message":"Operation is not supported","details":{}}}`},
+		{"disconnected", false, true, true, nil, "POST", "/api/v1/device/dc", "tok", `{"on":true}`, 503, `{"error":{"code":"device_disconnected","message":"Link-Power is not connected","details":{}}}`},
+		{"unsupported", true, false, true, nil, "POST", "/api/v1/device/dc", "tok", `{"on":true}`, 409, `{"error":{"code":"capability_unsupported","message":"Operation is not supported","details":{}}}`},
 		{"advanced disabled", true, true, false, nil, "GET", "/api/v1/device/dc/bypass/threshold", "tok", "", 403, `{"error":{"code":"advanced_disabled","message":"Advanced operations are disabled","details":{}}}`},
 		{"ble failure", true, true, true, bleErr, "GET", "/api/v1/device/usbc/limit/output", "tok", "", 502, `{"error":{"code":"ble_operation_failed","message":"BLE operation failed","details":{}}}`},
 	}
@@ -223,9 +257,10 @@ func TestDeviceCanonicalRequestValidation(t *testing.T) {
 	h, _, _ := canonicalServer(t, true, true, true, nil)
 	tests := []struct{ name, method, path, body string }{
 		{"missing", "POST", "/api/v1/device/dc", ""},
-		{"malformed", "POST", "/api/v1/device/dc", `{"enabled":`},
-		{"unknown", "POST", "/api/v1/device/dc", `{"enabled":true,"extra":1}`},
-		{"trailing", "POST", "/api/v1/device/dc", `{"enabled":true}{}`},
+		{"malformed", "POST", "/api/v1/device/dc", `{"on":`},
+		{"unknown", "POST", "/api/v1/device/dc", `{"on":true,"extra":1}`},
+		{"enabled rejected", "POST", "/api/v1/device/dc", `{"enabled":true}`},
+		{"trailing", "POST", "/api/v1/device/dc", `{"on":true}{}`},
 		{"missing field", "POST", "/api/v1/device/dc", `{}`},
 		{"bad limit type", "GET", "/api/v1/device/usbc/limit/bogus", ""},
 		{"runtime put", "PUT", "/api/v1/device/usbc/limit/runtime", `{"watts":100}`},
@@ -255,23 +290,23 @@ func TestDCTypeCBypassLimitCanonicalRoutes(t *testing.T) {
 		method, path, body string
 		check              func(*testing.T, map[string]any)
 	}{
-		{"POST", "/api/v1/device/dc", `{"enabled":true}`, func(t *testing.T, v map[string]any) {
+		{"POST", "/api/v1/device/dc", `{"on":true}`, func(t *testing.T, v map[string]any) {
 			if v["enabled"] != true {
 				t.Fatal(v)
 			}
-			terminalCommand(t, v, "dc_output")
+			terminalCommand(t, v, "dc_output", true)
 		}},
-		{"POST", "/api/v1/device/usbc/output", `{"enabled":false}`, func(t *testing.T, v map[string]any) {
+		{"POST", "/api/v1/device/usbc/output", `{"on":false}`, func(t *testing.T, v map[string]any) {
 			if v["enabled"] != false || v["mode"] != float64(1) {
 				t.Fatal(v)
 			}
-			terminalCommand(t, v, "usbc_output")
+			terminalCommand(t, v, "usbc_output", false)
 		}},
-		{"POST", "/api/v1/device/dc/bypass", `{"enabled":true}`, func(t *testing.T, v map[string]any) {
+		{"POST", "/api/v1/device/dc/bypass", `{"on":true}`, func(t *testing.T, v map[string]any) {
 			if v["enabled"] != true {
 				t.Fatal(v)
 			}
-			terminalCommand(t, v, "dc_bypass")
+			terminalCommand(t, v, "dc_bypass", true)
 		}},
 		{"GET", "/api/v1/device/usbc/limit/output", "", func(t *testing.T, v map[string]any) {
 			if v["type"] != "output" || v["level"] != float64(4) || v["watts"] != float64(100) {
@@ -319,7 +354,7 @@ func TestDCTypeCBypassLimitCanonicalRoutes(t *testing.T) {
 	}
 }
 
-func terminalCommand(t *testing.T, v map[string]any, operation string) {
+func terminalCommand(t *testing.T, v map[string]any, operation string, on bool) {
 	t.Helper()
 	cmd, ok := v["command"].(map[string]any)
 	if !ok {
@@ -327,6 +362,10 @@ func terminalCommand(t *testing.T, v map[string]any, operation string) {
 	}
 	if cmd["operation"] != operation || cmd["phase"] != state.CommandConfirmed || cmd["error"] != nil {
 		t.Fatalf("command: %#v", cmd)
+	}
+	requested, ok := cmd["requested"].(map[string]any)
+	if !ok || requested["on"] != on {
+		t.Fatalf("requested: %#v", cmd["requested"])
 	}
 }
 
@@ -364,7 +403,7 @@ func TestSSEPendingThenConfirmedCompatibility(t *testing.T) {
 		t.Fatalf("legacy telemetry fields missing: %#v", initial)
 	}
 	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
-	store.BeginCommand(state.Command{ID: "cmd-1", Operation: "dc_output", Requested: map[string]any{"enabled": true}, StartedAt: now, UpdatedAt: now})
+	store.BeginCommand(state.Command{ID: "cmd-1", Operation: "dc_output", Requested: map[string]any{"on": true}, StartedAt: now, UpdatedAt: now})
 	pending := read()
 	commands := pending["commands"].(map[string]any)
 	if len(commands["active"].([]any)) != 1 {
@@ -375,5 +414,56 @@ func TestSSEPendingThenConfirmedCompatibility(t *testing.T) {
 	commands = confirmed["commands"].(map[string]any)
 	if len(commands["active"].([]any)) != 0 || len(commands["recent"].([]any)) != 1 {
 		t.Fatalf("confirmed frame: %#v", confirmed)
+	}
+}
+
+func TestDCConcurrentResponsesKeepExactCommandAssociation(t *testing.T) {
+	var session *orderedDCSession
+	h, store, _ := testServerWith(t, func(d *Deps) {
+		d.Store.SetConnected(true)
+		d.Store.SetIdentity(state.Identity{Mode: "app", FeatureSet: proto.FeatureSet{DCOutControl: true}, Characteristics: map[string]bool{"command": true, "dc": true}})
+		base := &canonicalSession{store: d.Store, limits: map[int]int{}}
+		session = &orderedDCSession{canonicalSession: base, entered: make(chan bool, 2), release: map[bool]chan struct{}{true: make(chan struct{}), false: make(chan struct{})}}
+		d.DeviceControl = controlpkg.NewService(func() controlpkg.Session { return session }, d.Store, nil, func() bool { return true })
+	})
+	store.SetDC(proto.DCPort{Enabled: false})
+	type response struct {
+		requested bool
+		rr        *httptest.ResponseRecorder
+	}
+	responses := make(chan response, 2)
+	for _, on := range []bool{true, false} {
+		on := on
+		go func() {
+			responses <- response{on, do(t, h, http.MethodPost, "/api/v1/device/dc", "tok", fmt.Sprintf(`{"on":%t}`, on))}
+		}()
+	}
+	seen := map[bool]bool{<-session.entered: true, <-session.entered: true}
+	if !seen[true] || !seen[false] {
+		t.Fatalf("entered: %+v", seen)
+	}
+	close(session.release[false])
+	first := <-responses
+	close(session.release[true])
+	second := <-responses
+	ids := map[string]bool{}
+	for _, response := range []response{first, second} {
+		if response.rr.Code != 200 {
+			t.Fatalf("request %t status %d: %s", response.requested, response.rr.Code, response.rr.Body.String())
+		}
+		var body struct {
+			Command commandView `json:"command"`
+		}
+		if err := json.Unmarshal(response.rr.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		requested := body.Command.Requested.(map[string]any)["on"]
+		if requested != response.requested {
+			t.Fatalf("request %t received command %+v", response.requested, body.Command)
+		}
+		if ids[body.Command.ID] {
+			t.Fatalf("duplicate command ID %q", body.Command.ID)
+		}
+		ids[body.Command.ID] = true
 	}
 }

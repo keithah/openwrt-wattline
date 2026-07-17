@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -10,20 +11,23 @@ import (
 )
 
 type scriptedOps struct {
-	devices []ble.Found
-	pairErr error
-	block   chan struct{}
+	devices   []ble.Found
+	scanErr   error
+	pairErr   error
+	trustErr  error
+	unpairErr error
+	block     chan struct{}
 }
 
 func (s *scriptedOps) Scan(time.Duration) ([]ble.Found, error) {
 	if s.block != nil {
 		<-s.block
 	}
-	return s.devices, nil
+	return s.devices, s.scanErr
 }
 func (s *scriptedOps) Pair(string) error   { return s.pairErr }
-func (s *scriptedOps) Trust(string) error  { return nil }
-func (s *scriptedOps) Unpair(string) error { return nil }
+func (s *scriptedOps) Trust(string) error  { return s.trustErr }
+func (s *scriptedOps) Unpair(string) error { return s.unpairErr }
 
 func pairingServer(t *testing.T, ops ble.PairOps) http.Handler {
 	h, _, _ := testServerWith(t, func(d *Deps) {
@@ -74,6 +78,8 @@ func TestPairingScanBusyIs409(t *testing.T) {
 	waitStage(t, h, "scanning")
 	if w := do(t, h, "POST", "/api/v1/pairing/scan", "tok", ""); w.Code != 409 {
 		t.Fatalf("busy scan = %d, want 409", w.Code)
+	} else {
+		exactBody(t, w, `{"error":{"code":"operation_in_progress","message":"Pairing operation already in progress","details":{}}}`)
 	}
 }
 
@@ -97,8 +103,49 @@ func TestPairingPairValidatesMAC(t *testing.T) {
 		`{"mac":"DC:04:5A:EB:72:2B","pin":"0123456"}`} {
 		if w := do(t, h, "POST", "/api/v1/pairing/pair", "tok", body); w.Code != 400 {
 			t.Fatalf("body %q -> %d, want 400", body, w.Code)
+		} else {
+			exactBody(t, w, `{"error":{"code":"invalid_request","message":"Request is invalid","details":{}}}`)
 		}
 	}
+}
+
+func TestPairingPairUsesExactJSON(t *testing.T) {
+	h := pairingServer(t, &scriptedOps{})
+	for _, body := range []string{
+		`{"mac":"DC:04:5A:EB:72:2B","pin":"020555","extra":true}`,
+		`{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}{}`,
+	} {
+		w := do(t, h, http.MethodPost, "/api/v1/pairing/pair", "tok", body)
+		if w.Code != 400 {
+			t.Fatalf("body %q status %d", body, w.Code)
+		}
+		exactBody(t, w, `{"error":{"code":"invalid_request","message":"Request is invalid","details":{}}}`)
+	}
+}
+
+func TestPairingBodylessRoutesRejectBodies(t *testing.T) {
+	h := pairingServer(t, &scriptedOps{})
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/pairing/status"},
+		{http.MethodPost, "/api/v1/pairing/scan"},
+		{http.MethodDelete, "/api/v1/pairing/device/DC:04:5A:EB:72:2B"},
+	} {
+		w := do(t, h, tc.method, tc.path, "tok", `{}`)
+		if w.Code != 400 {
+			t.Fatalf("%s %s status %d", tc.method, tc.path, w.Code)
+		}
+		exactBody(t, w, `{"error":{"code":"invalid_request","message":"Request is invalid","details":{}}}`)
+	}
+}
+
+func TestPairingCanonicalErrorsDoNotLeakOperations(t *testing.T) {
+	wantBLE := `{"error":{"code":"ble_operation_failed","message":"BLE operation failed","details":{}}}`
+	h := pairingServer(t, &scriptedOps{unpairErr: errors.New("secret dbus name")})
+	w := do(t, h, http.MethodDelete, "/api/v1/pairing/device/DC:04:5A:EB:72:2B", "tok", "")
+	if w.Code != 502 {
+		t.Fatalf("unpair status %d", w.Code)
+	}
+	exactBody(t, w, wantBLE)
 }
 
 func TestPairingUnpair(t *testing.T) {
@@ -111,7 +158,7 @@ func TestPairingUnpair(t *testing.T) {
 	}
 }
 
-func TestPairingUnavailableIs503(t *testing.T) {
+func TestPairingUnavailableIsCapabilityUnsupported(t *testing.T) {
 	h, _, _ := testServerWith(t, nil) // no Pairing configured
 	for _, c := range []struct{ method, path string }{
 		{"POST", "/api/v1/pairing/scan"},
@@ -119,8 +166,10 @@ func TestPairingUnavailableIs503(t *testing.T) {
 		{"POST", "/api/v1/pairing/pair"},
 		{"DELETE", "/api/v1/pairing/device/DC:04:5A:EB:72:2B"},
 	} {
-		if w := do(t, h, c.method, c.path, "tok", `{"mac":"DC:04:5A:EB:72:2B"}`); w.Code != 503 {
-			t.Fatalf("%s %s = %d, want 503", c.method, c.path, w.Code)
+		if w := do(t, h, c.method, c.path, "tok", ""); w.Code != 409 {
+			t.Fatalf("%s %s = %d, want 409", c.method, c.path, w.Code)
+		} else {
+			exactBody(t, w, `{"error":{"code":"capability_unsupported","message":"Operation is not supported","details":{}}}`)
 		}
 	}
 }

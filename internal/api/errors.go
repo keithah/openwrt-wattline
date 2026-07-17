@@ -48,6 +48,10 @@ func writeAPIError(w http.ResponseWriter, code string) {
 
 func writeError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, control.ErrInternal):
+		writeAPIError(w, "internal_error")
+	case errors.Is(err, control.ErrBLE):
+		writeAPIError(w, "ble_operation_failed")
 	case errors.Is(err, control.ErrDisconnected):
 		writeAPIError(w, "device_disconnected")
 	case errors.Is(err, control.ErrUnsupported):
@@ -59,7 +63,7 @@ func writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, control.ErrNotFound):
 		writeAPIError(w, "not_found")
 	default:
-		writeAPIError(w, "ble_operation_failed")
+		writeAPIError(w, "internal_error")
 	}
 }
 

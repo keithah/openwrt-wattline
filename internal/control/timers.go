@@ -15,7 +15,8 @@ func (s *Service) GetUSBCLimit(ctx context.Context, typ int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return session.GetUSBCLimit(typ)
+	value, err := session.GetUSBCLimit(typ)
+	return value, wrapBLE(err)
 }
 
 func (s *Service) PutUSBCLimit(ctx context.Context, typ, level int) (int, error) {
@@ -29,7 +30,8 @@ func (s *Service) PutUSBCLimit(ctx context.Context, typ, level int) (int, error)
 	if err != nil {
 		return 0, err
 	}
-	return session.PutUSBCLimit(typ, level)
+	value, err := session.PutUSBCLimit(typ, level)
+	return value, wrapBLE(err)
 }
 
 func (s *Service) DeleteUSBCLimit(ctx context.Context, typ int) (int, error) {
@@ -40,7 +42,8 @@ func (s *Service) DeleteUSBCLimit(ctx context.Context, typ int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return session.DeleteUSBCLimit(typ)
+	value, err := session.DeleteUSBCLimit(typ)
+	return value, wrapBLE(err)
 }
 
 func (s *Service) ListTimers(ctx context.Context) ([]proto.Timer, error) {
@@ -48,7 +51,8 @@ func (s *Service) ListTimers(ctx context.Context) ([]proto.Timer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return session.ListTimers()
+	timers, err := session.ListTimers()
+	return timers, wrapBLE(err)
 }
 
 func (s *Service) GetTimer(ctx context.Context, id byte) (proto.Timer, error) {
@@ -75,7 +79,8 @@ func (s *Service) AddTimer(ctx context.Context, timer proto.Timer) ([]proto.Time
 	if err != nil {
 		return nil, 0, err
 	}
-	return session.AddTimer(timer)
+	timers, id, err := session.AddTimer(timer)
+	return timers, id, wrapBLE(err)
 }
 
 func (s *Service) PutTimer(ctx context.Context, id byte, timer proto.Timer) ([]proto.Timer, error) {
@@ -89,7 +94,8 @@ func (s *Service) PutTimer(ctx context.Context, id byte, timer proto.Timer) ([]p
 	if err != nil {
 		return nil, err
 	}
-	return session.PutTimer(id, timer)
+	timers, err := session.PutTimer(id, timer)
+	return timers, wrapBLE(err)
 }
 
 func (s *Service) DeleteTimer(ctx context.Context, id byte) ([]proto.Timer, error) {
@@ -100,5 +106,6 @@ func (s *Service) DeleteTimer(ctx context.Context, id byte) ([]proto.Timer, erro
 	if err != nil {
 		return nil, err
 	}
-	return session.DeleteTimer(id)
+	timers, err := session.DeleteTimer(id)
+	return timers, wrapBLE(err)
 }
