@@ -248,6 +248,12 @@ func (s *Store) Authenticate(secret string) (Principal, bool) {
 	}
 
 	now := s.now().UTC()
+	if now.Before(matched.CreatedAt) {
+		now = matched.CreatedAt
+	}
+	if matched.LastSeenAt != nil && now.Before(*matched.LastSeenAt) {
+		now = *matched.LastSeenAt
+	}
 	matched.LastSeenAt = &now
 	if s.lastSeenPersistedAt.IsZero() || now.Sub(s.lastSeenPersistedAt) >= persistInterval {
 		result := s.persistLocked(true)

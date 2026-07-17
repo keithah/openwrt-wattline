@@ -330,6 +330,71 @@ func TestTokenAuthenticateDoesNotRetryAfterCommittedSyncFailure(t *testing.T) {
 	}
 }
 
+func TestTokenAuthenticateClampsClockRollbackToCreation(t *testing.T) {
+	created := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	now := created
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	store, err := OpenStore(path, "bootstrap", withClock(func() time.Time { return now }), withRandom(bytes.NewReader(bytes.Repeat([]byte{0x88}, 32))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, meta, err := store.Issue("phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = created.Add(-time.Hour)
+	if _, ok := store.Authenticate(secret); !ok {
+		t.Fatal("authentication failed after clock rollback")
+	}
+	listed := store.List()
+	if listed[1].LastSeenAt == nil || !listed[1].LastSeenAt.Equal(meta.CreatedAt) {
+		t.Fatalf("LastSeenAt after rollback = %v, want creation %v", listed[1].LastSeenAt, meta.CreatedAt)
+	}
+	if _, err := OpenStore(path, "bootstrap"); err != nil {
+		t.Fatalf("reopen after rolled-back authentication: %v", err)
+	}
+}
+
+func TestTokenAuthenticatePreservesLaterLastSeenOnClockRollback(t *testing.T) {
+	created := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	now := created
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	store, err := OpenStore(path, "bootstrap", withClock(func() time.Time { return now }), withRandom(bytes.NewReader(bytes.Repeat([]byte{0x99}, 32))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, meta, err := store.Issue("phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := created.Add(2 * time.Hour)
+	now = later
+	if _, ok := store.Authenticate(secret); !ok {
+		t.Fatal("initial authentication failed")
+	}
+	faults := &faultFileSystem{fileSystem: osFileSystem{}}
+	store.fs = faults
+	now = created.Add(time.Hour)
+	if _, ok := store.Authenticate(secret); !ok {
+		t.Fatal("authentication failed after clock rollback")
+	}
+	listed := store.List()
+	if listed[1].ID != meta.ID || listed[1].LastSeenAt == nil || !listed[1].LastSeenAt.Equal(later) {
+		t.Fatalf("LastSeenAt after rollback = %#v, want %v", listed[1], later)
+	}
+	if faults.renameCalls != 0 {
+		t.Fatalf("clock rollback triggered %d persistence writes", faults.renameCalls)
+	}
+	reopened, err := OpenStore(path, "bootstrap")
+	if err != nil {
+		t.Fatalf("reopen after preserving later last seen: %v", err)
+	}
+	reopenedMeta := reopened.List()
+	if reopenedMeta[1].LastSeenAt == nil || !reopenedMeta[1].LastSeenAt.Equal(later) {
+		t.Fatalf("persisted LastSeenAt = %v, want %v", reopenedMeta[1].LastSeenAt, later)
+	}
+}
+
 func TestTokenOpenRepairsPermissiveStoreMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tokens.json")
 	if _, err := OpenStore(path, "bootstrap"); err != nil {
