@@ -22,7 +22,18 @@ for compatibility and encrypted VPNs; HTTP exposed directly to WAN is insecure.
 No HTTP-to-HTTPS redirect is implied.
 
 Every non-SSE JSON success has the status and body stated below. CORS preflight
-`OPTIONS` is accepted with `204 No Content`; it performs no BLE I/O.
+`OPTIONS` bypasses bearer authentication and always returns `204 No Content`, an
+empty body, and exactly these headers (for every path, registered or not):
+
+```text
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS
+Access-Control-Allow-Headers: Authorization, Content-Type
+Access-Control-Max-Age: 600
+```
+
+Preflight performs no BLE I/O. Actual requests still require bearer
+authentication except public `POST /api/v1/pair`.
 
 ## Authentication roles
 
@@ -64,13 +75,34 @@ Canonical routes return errors only in this shape:
 | 403 | `advanced_disabled` | Hardware supports the operation but UCI `advanced=0`. |
 | 404 | `not_found` | The requested timer or managed token does not exist. |
 | 409 | `capability_unsupported` | Hardware, characteristic inventory, or current app/OTA mode lacks the operation. |
+| 409 | `operation_in_progress` | A BLE pairing scan or pair operation is already active. |
 | 502 | `ble_operation_failed` | A required BLE command, read, or write failed. |
 | 503 | `device_disconnected` | Live BLE is required and unavailable. |
 | 504 | `command_timeout` | Telemetry did not confirm a reconciled command in time. |
+| 500 | `internal_error` | An internal persistence, certificate, or streaming failure occurred. |
 
-Method mismatch and an unregistered path use Go HTTP routing responses and are
-not canonical JSON. Compatibility routes retain their legacy plain-text errors
-and are called out below.
+The exact error bodies referred to below are:
+
+| Symbol | Exact JSON body |
+|---|---|
+| `E(unauthorized)` | `{"error":{"code":"unauthorized","message":"Bearer token is missing or invalid","details":{}}}` |
+| `E(invalid_request)` | `{"error":{"code":"invalid_request","message":"Request is invalid","details":{}}}` |
+| `E(admin_required)` | `{"error":{"code":"admin_required","message":"Administrator token required","details":{}}}` |
+| `E(advanced_disabled)` | `{"error":{"code":"advanced_disabled","message":"Advanced operations are disabled","details":{}}}` |
+| `E(not_found)` | `{"error":{"code":"not_found","message":"Resource was not found","details":{}}}` |
+| `E(capability_unsupported)` | `{"error":{"code":"capability_unsupported","message":"Operation is not supported","details":{}}}` |
+| `E(operation_in_progress)` | `{"error":{"code":"operation_in_progress","message":"Pairing operation already in progress","details":{}}}` |
+| `E(ble_operation_failed)` | `{"error":{"code":"ble_operation_failed","message":"BLE operation failed","details":{}}}` |
+| `E(device_disconnected)` | `{"error":{"code":"device_disconnected","message":"Link-Power is not connected","details":{}}}` |
+| `E(command_timeout)` | `{"error":{"code":"command_timeout","message":"Device telemetry did not confirm the command","details":{}}}` |
+| `E(invalid_or_expired_pin)` | `{"error":{"code":"invalid_or_expired_pin","message":"Pairing PIN is invalid or expired","details":{}}}` |
+| `E(internal_error)` | `{"error":{"code":"internal_error","message":"Internal server error","details":{}}}` |
+
+Every listed `E(code)` is returned with `Content-Type: application/json`; the
+table is normative and is the exact body, including empty `details`. Method
+mismatch and an unregistered path use Go HTTP routing responses and are not
+canonical JSON. Compatibility routes retain successful response shapes, while
+their errors use this canonical catalog.
 
 ## Device identity
 
@@ -406,13 +438,13 @@ nanoseconds. Actions are `dc_on`, `dc_off`, `usbc_on`, `usbc_off`, `bypass_on`,
 | Endpoint | Role | Request | Success | Endpoint-specific errors | BLE I/O |
 |---|---|---|---|---|---|
 | `GET /api/v1/rules` | client | none | `200` array, empty `[]` | auth only | none |
-| `POST /api/v1/rules` | client | complete rule object | `200` stored rule; zero hysteresis defaults to `5` | legacy plain `400` validation, plain `500` persistence | none |
-| `PUT /api/v1/rules/{name}` | client | complete rule object; URL name wins | `200` stored rule | legacy plain `400`, plain `500` | none |
-| `DELETE /api/v1/rules/{name}` | client | none | `200 {"deleted":"low_battery"}` | legacy plain `404`, plain `500` | none |
-| `POST /api/v1/device/action` | client | `{"action":"dc_off"}` | `200 {"ok":"dc_off"}` | legacy plain `400`; `502 {"error":"..."}` | according to action; webhook may perform HTTP |
+| `POST /api/v1/rules` | client | complete rule object | `200` stored rule; zero hysteresis defaults to `5` | `400 invalid_request`, `500 internal_error` | none |
+| `PUT /api/v1/rules/{name}` | client | complete rule object; URL name wins | `200` stored rule | `400 invalid_request`, `500 internal_error` | none |
+| `DELETE /api/v1/rules/{name}` | client | none | `200 {"deleted":"low_battery"}` | `404 not_found`, `500 internal_error` | none |
+| `POST /api/v1/device/action` | client | `{"action":"dc_off"}` | `200 {"ok":"dc_off"}` | `400 invalid_request`, `502 ble_operation_failed` | according to action; webhook may perform HTTP |
 
 The action endpoint is deprecated in favor of granular routes. Its successful
-and error bodies remain legacy-compatible.
+body remains legacy-compatible; its errors use the canonical envelope.
 
 ## BLE-device pairing
 
@@ -421,10 +453,10 @@ These authenticated routes pair the router to a Link-Power over BlueZ. They use
 
 | Endpoint | Role | Request | Success | Endpoint-specific errors | BLE I/O |
 |---|---|---|---|---|---|
-| `GET /api/v1/pairing/status` | client | none | `200 {"stage":"idle","devices":[]}`; optional `error`, `target`; device entries are `{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}` | legacy plain `503` when unavailable | none |
-| `POST /api/v1/pairing/scan` | client | none | `202 {"status":"scanning"}` | legacy plain `409` busy, plain `500`, plain `503` unavailable | asynchronous BlueZ scan |
-| `POST /api/v1/pairing/pair` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` (`pin` may be empty to retain configured PIN) | `202 {"status":"pairing"}` | legacy plain `400`, plain `409` busy, plain `500`, plain `503` | asynchronous BlueZ pair/trust and BLE reconnect proof |
-| `DELETE /api/v1/pairing/device/{mac}` | client | none | `200 {"status":"removed"}` | legacy plain `400`, plain `409`, plain `500`, plain `503` | BlueZ unpair, not a device command |
+| `GET /api/v1/pairing/status` | client | none | `200 {"stage":"idle","devices":[]}`; optional `error`, `target`; device entries are `{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}` | `409 capability_unsupported` when BlueZ pairing is unavailable | none |
+| `POST /api/v1/pairing/scan` | client | none | `202 {"status":"scanning"}` | `409 operation_in_progress`, `409 capability_unsupported`, `502 ble_operation_failed` | asynchronous BlueZ scan |
+| `POST /api/v1/pairing/pair` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` (`pin` may be empty to retain configured PIN) | `202 {"status":"pairing"}` | `400 invalid_request`, `409 operation_in_progress`, `409 capability_unsupported` | asynchronous BlueZ pair/trust and BLE reconnect proof; asynchronous failure appears in status |
+| `DELETE /api/v1/pairing/device/{mac}` | client | none | `200 {"status":"removed"}` | `400 invalid_request`, `409 capability_unsupported`, `502 ble_operation_failed` | BlueZ unpair, not a device command |
 
 ## API-client pairing
 
@@ -508,12 +540,17 @@ BLE I/O: none.
 
 ### `PUT /api/v1/settings`
 
-Role: admin. Request is the complete settings object returned by GET, except
-`tls.sha256` is read-only; example changes may omit unchanged object fields:
-`{"advanced":true,"wan_access":false}`. Success `200 OK` returns the complete
-stored settings plus `"restart_required":true` when listener, TLS, mDNS, or
-firewall fields changed, otherwise `false`. Errors: `400 invalid_request`, plus
-auth/role errors. BLE I/O: none.
+Role: admin. Despite the approved `PUT` method, this endpoint has merge (PATCH-like)
+semantics: omitted fields and omitted nested-object members are preserved;
+supplied scalar, array, or nested members replace their stored value; an explicit
+empty array clears that array; and every unknown field or read-only
+`tls.sha256` is rejected. For example, `{"advanced":true,"wan_access":false}`
+changes exactly those two fields and preserves every listener, TLS, pairing, and
+mDNS field. Success `200 OK` returns the complete merged settings object from GET
+plus `"restart_required":true` when a supplied listener, TLS, mDNS, or firewall
+field changed, otherwise `false`. Errors: `400 invalid_request` for malformed
+JSON, an unknown/read-only field, invalid value, or invalid resulting listener
+configuration, plus auth/role errors. BLE I/O: none.
 
 ### `POST /api/v1/tls/rotate`
 
@@ -579,29 +616,59 @@ optional parameter is distinct from a value of zero or `none`.
 
 ## Compatibility routes
 
-The following existing routes remain registered. Deprecated aliases retain their
-current successful shapes and legacy plain-text errors even when their canonical
-counterpart uses the error envelope.
+This inventory is exhaustive for the routes registered by
+`internal/api/server.go` when this contract was written. Successful bodies remain
+wire-compatible; all errors use the exact `E(code)` bodies in the error-envelope
+section. Every row can also return `401 E(unauthorized)` when its bearer token is
+missing or invalid. Admin rows can additionally return `403 E(admin_required)`
+for a valid client token. “No body” means an exactly zero-byte request body.
 
-| Endpoint | Role | Request | Success | Canonical replacement / BLE I/O |
-|---|---|---|---|---|
-| `GET /api/v1/status` | client | none | `200 {"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"V2","firmware":"1.4.9","mac":"DC:04:5A:EB:72:2B","cid":773,"features":4095},"rules":[]}` | `GET /api/v1/device`; no BLE I/O |
-| `GET /api/v1/device/usbc-limit` | client | none | `200 {"global":{"level":4,"watts":100},"input":{"level":3,"watts":65},"output":{"level":4,"watts":100},"runtime":{"level":-1,"watts":0}}` | per-type canonical GET; four BLE GETs |
-| `POST /api/v1/device/usbc-limit` | client | `{"type":"output","watts":100}` or `{"type":"output","clear":true}` | `200 {"watts":100,"level":4}` or `200 {"status":"cleared"}` | canonical PUT/DELETE; one SET/DELETE (legacy response remains optimistic) |
-| `GET /api/v1/device/bypass-threshold` | admin | none | `200 {"volts":19.6}` | canonical threshold GET; one BLE GET |
-| `POST /api/v1/device/bypass-threshold` | admin | `{"volts":19.6}` | `200 {"volts":19.6}` | canonical threshold PUT; one BLE SET (legacy response remains request echo) |
-| `GET /api/v1/device/schedules` | client | none | `200 [{"id":3,"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}]` | canonical timer list; BLE list |
-| `POST /api/v1/device/schedules` | client | legacy timer with optional `id`; omitted ID adds | `200` legacy timer with assigned ID | canonical timer POST/PUT; BLE ADD/EDIT |
-| `DELETE /api/v1/device/schedules/{id}` | client | none | `200 {"status":"deleted"}` | canonical timer DELETE; BLE DELETE |
+### Cached state compatibility routes
 
-`GET /api/v1/telemetry`, `GET /api/v1/history`, `GET /api/v1/events`, all
-`/api/v1/rules` routes, `/api/v1/device/action`, and all `/api/v1/pairing/*`
-routes are also compatibility surfaces, but remain their own canonical v1 paths
-because no replacement exists. Their exact contracts appear in earlier sections.
+| Endpoint | Role | Exact request | Exact success | Additional errors (status, body, condition) | BLE I/O |
+|---|---|---|---|---|---|
+| `GET /api/v1/status` | client | no body | `200 {"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"V2","firmware":"1.4.9","mac":"DC:04:5A:EB:72:2B","cid":773,"features":4095},"rules":[]}` | none | none |
+| `GET /api/v1/telemetry` | client | no body | `200 {"battery":{"enabled":true,"status":1,"full":false,"max_wh":221.0,"wh":170.2,"level":77,"volts":25.6,"amps":1.2,"watts":30.7,"remain_min":332},"dc":{"enabled":true,"status":0,"volts":24.0,"amps":0.5,"watts":12.0,"bypass":false},"typec":{"enabled":true,"status":0,"volts":20.0,"amps":1.0,"watts":20.0,"temp_c":35.0,"mode":3,"dc_input":false},"connected":true,"updated_at":"2026-07-17T20:00:00Z"}` | none | none |
+| `GET /api/v1/history` | client | no body | `200 [{"at":"2026-07-17T19:59:00Z","level":77,"status":1,"dc_w":12.0,"typec_w":20.0}]` (empty is exactly `[]`) | none | none |
+| `GET /api/v1/events` | client | no body | `200`, `Content-Type: text/event-stream`, then the exact complete-snapshot framing specified above | `500 E(internal_error)` if response streaming is unavailable | none |
 
-Existing compatibility errors include plain `400`, `404`, `409`, `500`, `502`,
-and `503` bodies terminated by a newline. All routes, including compatibility
-routes, still require the role stated above.
+### Rule and action compatibility routes
+
+The exact rule used in the rows below is
+`{"name":"low_battery","enabled":true,"condition":"battery_level","op":"below","percent":15,"hold":600000000000,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}`.
+
+| Endpoint | Role | Exact request | Exact success | Additional errors (status, body, condition) | BLE I/O |
+|---|---|---|---|---|---|
+| `GET /api/v1/rules` | client | no body | `200 [{"name":"low_battery","enabled":true,"condition":"battery_level","op":"below","percent":15,"hold":600000000000,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}]` | none | none |
+| `POST /api/v1/rules` | client | exact rule above | `200` and the exact same rule JSON | `400 E(invalid_request)` for malformed JSON, invalid condition/action, or shutdown without confirmation; `500 E(internal_error)` when persistence fails | none |
+| `PUT /api/v1/rules/{name}` | client | exact rule above; for path `/api/v1/rules/low_battery` | `200` and the exact same rule JSON (URL name replaces a different body name) | `400 E(invalid_request)` for malformed JSON or invalid rule/action; `500 E(internal_error)` when persistence fails | none |
+| `DELETE /api/v1/rules/{name}` | client | no body; for path `/api/v1/rules/low_battery` | `200 {"deleted":"low_battery"}` | `404 E(not_found)` when no rule has that name; `500 E(internal_error)` when persistence fails | none |
+| `POST /api/v1/device/action` | client | `{"action":"dc_off"}` | `200 {"ok":"dc_off"}` | `400 E(invalid_request)` for malformed JSON or an unknown/empty action; `502 E(ble_operation_failed)` when any device action or webhook fails | one device operation for device actions; outbound HTTP only for `webhook:URL` |
+
+### BLE-device pairing compatibility routes
+
+| Endpoint | Role | Exact request | Exact success | Additional errors (status, body, condition) | BLE I/O |
+|---|---|---|---|---|---|
+| `GET /api/v1/pairing/status` | client | no body | `200 {"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}]}` | `409 E(capability_unsupported)` when platform/adapter pairing support is unavailable | none |
+| `POST /api/v1/pairing/scan` | client | no body | `202 {"status":"scanning"}` | `409 E(operation_in_progress)` while scan/pair is active; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` if the scan cannot be started | asynchronous BlueZ scan, not a device command |
+| `POST /api/v1/pairing/pair` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` | `202 {"status":"pairing"}` | `400 E(invalid_request)` for malformed JSON, invalid MAC, or a PIN string containing non-digits or more than six digits (empty is allowed); `409 E(operation_in_progress)` while scan/pair is active; `409 E(capability_unsupported)` when pairing support is unavailable | asynchronous BlueZ pair/trust and BLE reconnect proof; later failure is reported by status |
+| `DELETE /api/v1/pairing/device/{mac}` | client | no body; for path `/api/v1/pairing/device/DC:04:5A:EB:72:2B` | `200 {"status":"removed"}` | `400 E(invalid_request)` for invalid MAC; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` when BlueZ unpair fails | BlueZ unpair, not a device command |
+
+### Deprecated device-control aliases
+
+| Endpoint | Role | Exact request | Exact success | Additional errors (status, body, condition) | BLE I/O / replacement |
+|---|---|---|---|---|---|
+| `GET /api/v1/device/usbc-limit` | client | no body | `200 {"global":{"level":4,"watts":100},"input":{"level":3,"watts":65},"output":{"level":4,"watts":100},"runtime":{"level":-1,"watts":0}}` | `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` when any GET fails | four GET commands; replace with per-type canonical GET |
+| `POST /api/v1/device/usbc-limit` | client | set: `{"type":"output","watts":100,"clear":false}`; clear: `{"type":"output","watts":0,"clear":true}` | set: `200 {"watts":100,"level":4}`; clear: `200 {"status":"cleared"}` | `400 E(invalid_request)` for malformed JSON, type outside `global|input|output`, or watts outside `30|45|60|65|100|140`; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on SET/DELETE failure | one SET/DELETE; replace with canonical PUT/DELETE |
+| `GET /api/v1/device/bypass-threshold` | admin | no body | `200 {"volts":19.6}` | `403 E(advanced_disabled)` when policy is off; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on GET failure | one GET; replace with canonical threshold GET |
+| `POST /api/v1/device/bypass-threshold` | admin | `{"volts":19.6}` | `200 {"volts":19.6}` | `400 E(invalid_request)` for malformed JSON or volts not in `(0,60]`; `403 E(advanced_disabled)` when policy is off; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on SET failure | one SET; replace with canonical threshold PUT |
+| `GET /api/v1/device/schedules` | client | no body | `200 [{"id":3,"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}]` (empty is exactly `[]`) | `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on list/GET failure | list then timer GETs; replace with canonical timer list |
+| `POST /api/v1/device/schedules` | client | add: `{"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`; edit: `{"id":3,"status":-1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}` | add: `200 {"id":3,"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`; edit: `200 {"id":3,"status":-1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}` | `400 E(invalid_request)` for malformed JSON, ID outside `0..254`, type outside `0..3`, hour outside `0..23`, minute outside `0..59`, action outside `0..1`, or invalid status/repeat structure; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on ADD/EDIT failure | one ADD/EDIT; replace with canonical timer POST/PUT |
+| `DELETE /api/v1/device/schedules/{id}` | client | no body; for path `/api/v1/device/schedules/3` | `200 {"status":"deleted"}` | `400 E(invalid_request)` for nondecimal ID or ID outside `0..254`; `404 E(not_found)` when timer is absent; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on DELETE failure | one DELETE; replace with canonical timer DELETE |
+
+These 20 method/path entries are the complete compatibility inventory. No
+compatibility route permits unauthenticated actual requests; only CORS preflight
+bypasses authentication.
 
 ## On-target caveats
 
