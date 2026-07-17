@@ -1,6 +1,7 @@
 package state
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -50,6 +51,32 @@ func TestSubscribe(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no snapshot published")
+	}
+}
+
+func TestSubscribeSaturationRetainsFinalTerminalState(t *testing.T) {
+	s := NewStore()
+	ch, cancel := s.Subscribe()
+	defer cancel()
+	for i := 0; i < 64; i++ {
+		s.SetIdentity(Identity{Model: fmt.Sprintf("model-%d", i)})
+	}
+	s.BeginCommand(Command{ID: "cmd-1", Operation: "dc", Phase: CommandPending})
+	s.FinishCommand("cmd-1", CommandConfirmed, map[string]any{"on": true}, nil)
+
+	foundTerminal := false
+	for {
+		select {
+		case snap := <-ch:
+			if len(snap.RecentCommands) == 1 && snap.RecentCommands[0].Phase == CommandConfirmed {
+				foundTerminal = true
+			}
+		default:
+			if !foundTerminal {
+				t.Fatal("final terminal command state was dropped from saturated subscriber")
+			}
+			return
+		}
 	}
 }
 

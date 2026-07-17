@@ -36,14 +36,14 @@ type Store struct {
 	history []HistoryPoint
 	lastMin time.Time
 	subs    map[chan Snapshot]struct{}
-	waiters map[chan struct{}]struct{}
+	waiters map[*snapshotWaiter]struct{}
 	now     func() time.Time // test hook
 }
 
 func NewStore() *Store {
 	return &Store{
 		subs:    make(map[chan Snapshot]struct{}),
-		waiters: make(map[chan struct{}]struct{}),
+		waiters: make(map[*snapshotWaiter]struct{}),
 		now:     time.Now,
 	}
 }
@@ -69,16 +69,25 @@ func (s *Store) publishLocked(recordHistory bool) {
 		s.record()
 	}
 	for ch := range s.subs {
+		snap := cloneSnapshot(s.snap)
 		select {
-		case ch <- cloneSnapshot(s.snap):
-		default: // slow subscriber: drop
+		case ch <- snap:
+		default:
+			// A complete snapshot supersedes older queued snapshots. Replace
+			// the oldest item so a saturated subscriber always progresses
+			// toward the latest (including terminal command state).
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- snap:
+			default:
+			}
 		}
 	}
-	for ch := range s.waiters {
-		select {
-		case ch <- struct{}{}:
-		default:
-		}
+	for waiter := range s.waiters {
+		waiter.enqueue(cloneSnapshot(s.snap))
 	}
 }
 

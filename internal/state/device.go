@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/keithah/openwrt-wattline/internal/proto"
@@ -87,6 +88,9 @@ func (s *Store) BeginCommand(command Command) {
 }
 
 func (s *Store) FinishCommand(id, phase string, observed any, commandErr *CommandError) {
+	if !isTerminalCommandPhase(phase) {
+		return
+	}
 	observed = cloneValue(observed)
 	commandErr = cloneCommandError(commandErr)
 	s.mu.Lock()
@@ -108,18 +112,69 @@ func (s *Store) FinishCommand(id, phase string, observed any, commandErr *Comman
 	s.mu.Unlock()
 }
 
+func isTerminalCommandPhase(phase string) bool {
+	return phase == CommandConfirmed || phase == CommandTimeout || phase == CommandFailed
+}
+
+type snapshotWaiter struct {
+	mu    sync.Mutex
+	queue []Snapshot
+	ready chan struct{}
+}
+
+func newSnapshotWaiter() *snapshotWaiter {
+	return &snapshotWaiter{ready: make(chan struct{}, 1)}
+}
+
+func (w *snapshotWaiter) enqueue(snap Snapshot) {
+	w.mu.Lock()
+	w.queue = append(w.queue, snap)
+	select {
+	case w.ready <- struct{}{}:
+	default:
+	}
+	w.mu.Unlock()
+}
+
+func (w *snapshotWaiter) next(ctx context.Context) (Snapshot, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return Snapshot{}, ctx.Err()
+		case <-w.ready:
+		}
+
+		w.mu.Lock()
+		if len(w.queue) == 0 {
+			w.mu.Unlock()
+			continue
+		}
+		snap := w.queue[0]
+		w.queue[0] = Snapshot{}
+		w.queue = w.queue[1:]
+		if len(w.queue) > 0 {
+			select {
+			case w.ready <- struct{}{}:
+			default:
+			}
+		}
+		w.mu.Unlock()
+		return snap, nil
+	}
+}
+
 // Wait returns the first snapshot satisfying predicate, or the context error.
 // Registering the waiter and taking its initial snapshot happen under one lock,
 // so a mutation cannot be lost between those two operations.
 func (s *Store) Wait(ctx context.Context, predicate func(Snapshot) bool) (Snapshot, error) {
-	wake := make(chan struct{}, 1)
+	waiter := newSnapshotWaiter()
 	s.mu.Lock()
-	s.waiters[wake] = struct{}{}
+	s.waiters[waiter] = struct{}{}
 	snap := cloneSnapshot(s.snap)
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		delete(s.waiters, wake)
+		delete(s.waiters, waiter)
 		s.mu.Unlock()
 	}()
 
@@ -127,11 +182,10 @@ func (s *Store) Wait(ctx context.Context, predicate func(Snapshot) bool) (Snapsh
 		if predicate(snap) {
 			return snap, nil
 		}
-		select {
-		case <-ctx.Done():
-			return Snapshot{}, ctx.Err()
-		case <-wake:
-			snap = s.Snapshot()
+		var err error
+		snap, err = waiter.next(ctx)
+		if err != nil {
+			return Snapshot{}, err
 		}
 	}
 }
@@ -173,6 +227,7 @@ func cloneValue(in any) any {
 type cloneVisit struct {
 	typeOf  reflect.Type
 	pointer uintptr
+	length  int
 }
 
 // cloneReflect preserves concrete command-payload types while recursively
@@ -216,7 +271,7 @@ func cloneReflect(in reflect.Value, seen map[cloneVisit]reflect.Value) reflect.V
 		if in.IsNil() {
 			return reflect.Zero(in.Type())
 		}
-		visit := cloneVisit{typeOf: in.Type(), pointer: in.Pointer()}
+		visit := cloneVisit{typeOf: in.Type(), pointer: in.Pointer(), length: in.Len()}
 		if out, ok := seen[visit]; ok {
 			return out
 		}

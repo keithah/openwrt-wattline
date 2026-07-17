@@ -125,6 +125,30 @@ func TestCommandTimeoutAndFailure(t *testing.T) {
 	}
 }
 
+func TestCommandRejectsNonTerminalFinishPhases(t *testing.T) {
+	for _, phase := range []string{"", CommandPending, ConnectionReady, "arbitrary"} {
+		t.Run(fmt.Sprintf("phase_%q", phase), func(t *testing.T) {
+			s := NewStore()
+			command := Command{
+				ID:        "cmd-1",
+				Operation: "dc",
+				Phase:     CommandPending,
+				Requested: map[string]any{"on": true},
+			}
+			s.BeginCommand(command)
+			before := s.Snapshot().PendingCommands[command.ID]
+
+			s.FinishCommand(command.ID, phase, map[string]any{"on": true}, &CommandError{Code: "invalid"})
+
+			snap := s.Snapshot()
+			after, ok := snap.PendingCommands[command.ID]
+			if !ok || !reflect.DeepEqual(after, before) || len(snap.RecentCommands) != 0 {
+				t.Fatalf("invalid phase %q changed command state: pending=%+v recent=%+v", phase, snap.PendingCommands, snap.RecentCommands)
+			}
+		})
+	}
+}
+
 func TestCommandTransitionsNotifySubscribers(t *testing.T) {
 	s := NewStore()
 	ch, cancel := s.Subscribe()
@@ -198,6 +222,42 @@ func TestWaitPredicateRunsWithoutStoreLock(t *testing.T) {
 	}
 }
 
+func TestWaitObservesTransientMatchingSnapshot(t *testing.T) {
+	s := NewStore()
+	s.SetConnection(Connection{Phase: ConnectionConnecting})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan Snapshot, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		snap, err := s.Wait(ctx, func(sn Snapshot) bool {
+			if sn.Connection == nil {
+				return false
+			}
+			if sn.Connection.Phase == ConnectionConnecting {
+				close(entered)
+				<-release
+			}
+			return sn.Connection.Phase == ConnectionReady
+		})
+		result <- snap
+		errCh <- err
+	}()
+	<-entered
+	s.SetConnection(Connection{Phase: ConnectionReady})
+	s.SetConnection(Connection{Phase: ConnectionDisconnected})
+	close(release)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("Wait missed transient ready state: %v", err)
+	}
+	if got := (<-result).Connection; got == nil || got.Phase != ConnectionReady {
+		t.Fatalf("Wait returned %+v, want transient ready snapshot", got)
+	}
+}
+
 func TestCommandSubscriberSnapshotIsIndependent(t *testing.T) {
 	s := NewStore()
 	ch, cancel := s.Subscribe()
@@ -242,6 +302,25 @@ func TestCommandTypedPayloadIsCopied(t *testing.T) {
 	fresh := s.Snapshot().PendingCommands["cmd-1"].Requested.(*payload)
 	if fresh.Levels[0] != 1 || !fresh.Flags["on"] {
 		t.Fatalf("snapshot payload aliases store state: %+v", fresh)
+	}
+}
+
+func TestCommandTypedPayloadCopiesDistinctSliceViews(t *testing.T) {
+	type payload struct {
+		Short []int
+		Long  []int
+	}
+	base := []int{7, 8}
+	s := NewStore()
+	s.BeginCommand(Command{
+		ID:        "cmd-1",
+		Operation: "limit",
+		Requested: payload{Short: base[:1], Long: base[:2]},
+	})
+
+	got := s.Snapshot().PendingCommands["cmd-1"].Requested.(payload)
+	if !reflect.DeepEqual(got.Short, []int{7}) || !reflect.DeepEqual(got.Long, []int{7, 8}) {
+		t.Fatalf("overlapping slice views cloned incorrectly: short=%v long=%v", got.Short, got.Long)
 	}
 }
 
