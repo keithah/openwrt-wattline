@@ -3,8 +3,12 @@ package config
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,7 +43,70 @@ type Config struct {
 	Token     string
 	Port      int
 	LANAPI    bool
-	Rules     []Rule
+
+	BLEPIN          string
+	HTTPEnabled     bool
+	HTTPAddr4       string
+	HTTPAddr6       string
+	HTTPPort        int
+	HTTPSEnabled    bool
+	HTTPSAddr4      string
+	HTTPSAddr6      string
+	HTTPSPort       int
+	TLSCert         string
+	TLSKey          string
+	TokenStore      string
+	PairingTTL      time.Duration
+	PairingAlwaysOn bool
+	Advanced        bool
+	MDNSEnabled     bool
+	WANAccess       bool
+	MDNSInterfaces  []string
+
+	Rules []Rule
+}
+
+type ListenerSettings struct {
+	Enabled bool   `json:"enabled"`
+	Addr4   string `json:"addr4"`
+	Addr6   string `json:"addr6"`
+	Port    int    `json:"port"`
+}
+
+type TLSSettings struct {
+	Cert string `json:"cert"`
+	Key  string `json:"key"`
+}
+
+type MDNSSettings struct {
+	Enabled    bool     `json:"enabled"`
+	Interfaces []string `json:"interfaces"`
+}
+
+// SettingsView is safe to return from an administrative settings endpoint. It
+// contains paths and policy, but never the bootstrap bearer token or file data.
+type SettingsView struct {
+	HTTP            ListenerSettings `json:"http"`
+	HTTPS           ListenerSettings `json:"https"`
+	TLS             TLSSettings      `json:"tls"`
+	TokenStore      string           `json:"token_store"`
+	PairingTTL      string           `json:"pairing_ttl"`
+	PairingAlwaysOn bool             `json:"pairing_always_on"`
+	Advanced        bool             `json:"advanced"`
+	MDNS            MDNSSettings     `json:"mdns"`
+	WANAccess       bool             `json:"wan_access"`
+	BLEPIN          string           `json:"ble_pin"`
+}
+
+func (c *Config) SettingsView() SettingsView {
+	return SettingsView{
+		HTTP:  ListenerSettings{Enabled: c.HTTPEnabled, Addr4: c.HTTPAddr4, Addr6: c.HTTPAddr6, Port: c.HTTPPort},
+		HTTPS: ListenerSettings{Enabled: c.HTTPSEnabled, Addr4: c.HTTPSAddr4, Addr6: c.HTTPSAddr6, Port: c.HTTPSPort},
+		TLS:   TLSSettings{Cert: c.TLSCert, Key: c.TLSKey}, TokenStore: c.TokenStore,
+		PairingTTL: c.PairingTTL.String(), PairingAlwaysOn: c.PairingAlwaysOn, Advanced: c.Advanced,
+		MDNS:      MDNSSettings{Enabled: c.MDNSEnabled, Interfaces: append([]string{}, c.MDNSInterfaces...)},
+		WANAccess: c.WANAccess, BLEPIN: c.BLEPIN,
+	}
 }
 
 func hasShutdown(actions []string) bool {
@@ -173,6 +240,132 @@ func ruleToSection(r Rule) *UCISection {
 	return s
 }
 
+func defaultConfig() *Config {
+	return &Config{
+		PIN: "020555", Port: 8377, LANAPI: true,
+		BLEPIN:      "020555",
+		HTTPEnabled: true, HTTPAddr4: "0.0.0.0", HTTPAddr6: "::", HTTPPort: 8377,
+		HTTPSEnabled: true, HTTPSAddr4: "0.0.0.0", HTTPSAddr6: "::", HTTPSPort: 8378,
+		TLSCert: "/etc/wattline/tls/server.crt", TLSKey: "/etc/wattline/tls/server.key",
+		TokenStore: "/etc/wattline/tokens.json", PairingTTL: 5 * time.Minute,
+		MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"},
+	}
+}
+
+func parseBoolOption(options map[string]string, key string, dst *bool) error {
+	v, ok := options[key]
+	if !ok {
+		return nil
+	}
+	switch v {
+	case "0":
+		*dst = false
+	case "1":
+		*dst = true
+	default:
+		return fmt.Errorf("%s must be 0 or 1", key)
+	}
+	return nil
+}
+
+func parsePortOption(options map[string]string, key string, dst *int) error {
+	v, ok := options[key]
+	if !ok {
+		return nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("%s must be a port from 1 to 65535", key)
+	}
+	*dst = n
+	return nil
+}
+
+func validateAddress(name, value string, ipv4 bool) error {
+	if value == "" {
+		return nil
+	}
+	ip := net.ParseIP(value)
+	if ip == nil || (ipv4 && ip.To4() == nil) || (!ipv4 && ip.To4() != nil) {
+		return fmt.Errorf("%s is not a valid IPv%d address", name, map[bool]int{true: 4, false: 6}[ipv4])
+	}
+	return nil
+}
+
+func validatePath(name, value string) error {
+	if value == "" || !filepath.IsAbs(value) || filepath.Clean(value) != value || strings.ContainsAny(value, "\x00\r\n") {
+		return fmt.Errorf("%s must be a clean absolute path", name)
+	}
+	return nil
+}
+
+var interfaceNameRE = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,15}$`)
+
+func listenersConflict(a4, a6 string, aPort int, b4, b6 string, bPort int) bool {
+	if aPort != bPort {
+		return false
+	}
+	v4Conflict := a4 != "" && b4 != "" && (a4 == b4 || a4 == "0.0.0.0" || b4 == "0.0.0.0")
+	v6Conflict := a6 != "" && b6 != "" && (a6 == b6 || a6 == "::" || b6 == "::")
+	return v4Conflict || v6Conflict
+}
+
+// Validate checks settings that would otherwise make listener startup,
+// persistence, or LAN discovery fail.
+func (c *Config) Validate() error {
+	for _, p := range []struct {
+		name  string
+		value int
+	}{{"port", c.HTTPPort}, {"https_port", c.HTTPSPort}} {
+		if p.value < 1 || p.value > 65535 {
+			return fmt.Errorf("%s must be a port from 1 to 65535", p.name)
+		}
+	}
+	for _, address := range []struct {
+		name, value string
+		ipv4        bool
+	}{{"http_addr4", c.HTTPAddr4, true}, {"http_addr6", c.HTTPAddr6, false},
+		{"https_addr4", c.HTTPSAddr4, true}, {"https_addr6", c.HTTPSAddr6, false}} {
+		if err := validateAddress(address.name, address.value, address.ipv4); err != nil {
+			return err
+		}
+	}
+	if !c.HTTPEnabled && !c.HTTPSEnabled {
+		return fmt.Errorf("at least one HTTP or HTTPS listener must be enabled")
+	}
+	if c.HTTPEnabled && c.HTTPAddr4 == "" && c.HTTPAddr6 == "" {
+		return fmt.Errorf("enabled HTTP listener needs an IPv4 or IPv6 address")
+	}
+	if c.HTTPSEnabled && c.HTTPSAddr4 == "" && c.HTTPSAddr6 == "" {
+		return fmt.Errorf("enabled HTTPS listener needs an IPv4 or IPv6 address")
+	}
+	if c.HTTPEnabled && c.HTTPSEnabled && listenersConflict(c.HTTPAddr4, c.HTTPAddr6, c.HTTPPort, c.HTTPSAddr4, c.HTTPSAddr6, c.HTTPSPort) {
+		return fmt.Errorf("HTTP and HTTPS listeners overlap on port %d", c.HTTPPort)
+	}
+	for _, path := range []struct{ name, value string }{{"tls_cert", c.TLSCert}, {"tls_key", c.TLSKey}, {"token_store", c.TokenStore}} {
+		if err := validatePath(path.name, path.value); err != nil {
+			return err
+		}
+	}
+	if c.PairingTTL <= 0 {
+		return fmt.Errorf("pairing_ttl must be positive")
+	}
+	seen := make(map[string]struct{}, len(c.MDNSInterfaces))
+	for _, name := range c.MDNSInterfaces {
+		if !interfaceNameRE.MatchString(name) {
+			return fmt.Errorf("invalid mdns_interface %q", name)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return fmt.Errorf("duplicate mdns_interface %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	if c.MDNSEnabled && len(c.MDNSInterfaces) == 0 {
+		return fmt.Errorf("enabled mDNS needs at least one interface")
+	}
+	return nil
+}
+
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -182,23 +375,86 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := &Config{PIN: "020555", Port: 8377, LANAPI: true}
+	cfg := defaultConfig()
 	if main := doc.Find("wattline", "main"); main != nil {
 		if v := main.Options["device_mac"]; v != "" {
 			cfg.DeviceMAC = v
 		}
 		if v := main.Options["pin"]; v != "" {
 			cfg.PIN = v
+			cfg.BLEPIN = v
 		}
 		if v := main.Options["token"]; v != "" {
 			cfg.Token = v
 		}
-		if v := main.Options["port"]; v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				cfg.Port = n
+		if err := parsePortOption(main.Options, "port", &cfg.HTTPPort); err != nil {
+			return nil, err
+		}
+		cfg.Port = cfg.HTTPPort
+		cfg.LANAPI = main.Options["lan_api"] != "0"
+		if _, ok := main.Options["http_addr4"]; !ok {
+			if cfg.LANAPI {
+				cfg.HTTPAddr4 = "0.0.0.0"
+			} else {
+				cfg.HTTPAddr4 = "127.0.0.1"
+			}
+		} else {
+			cfg.HTTPAddr4 = main.Options["http_addr4"]
+		}
+		if _, ok := main.Options["http_addr6"]; !ok {
+			if cfg.LANAPI {
+				cfg.HTTPAddr6 = "::"
+			} else {
+				cfg.HTTPAddr6 = "::1"
+			}
+		} else {
+			cfg.HTTPAddr6 = main.Options["http_addr6"]
+		}
+		if err := parseBoolOption(main.Options, "http_enabled", &cfg.HTTPEnabled); err != nil {
+			return nil, err
+		}
+		if err := parseBoolOption(main.Options, "https_enabled", &cfg.HTTPSEnabled); err != nil {
+			return nil, err
+		}
+		if v, ok := main.Options["https_addr4"]; ok {
+			cfg.HTTPSAddr4 = v
+		}
+		if v, ok := main.Options["https_addr6"]; ok {
+			cfg.HTTPSAddr6 = v
+		}
+		if err := parsePortOption(main.Options, "https_port", &cfg.HTTPSPort); err != nil {
+			return nil, err
+		}
+		if v, ok := main.Options["tls_cert"]; ok {
+			cfg.TLSCert = v
+		}
+		if v, ok := main.Options["tls_key"]; ok {
+			cfg.TLSKey = v
+		}
+		if v, ok := main.Options["token_store"]; ok {
+			cfg.TokenStore = v
+		}
+		if v, ok := main.Options["pairing_ttl"]; ok {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return nil, fmt.Errorf("pairing_ttl: %w", err)
+			}
+			cfg.PairingTTL = d
+		}
+		for key, dst := range map[string]*bool{
+			"pairing_always_on": &cfg.PairingAlwaysOn, "advanced": &cfg.Advanced,
+			"mdns_enabled": &cfg.MDNSEnabled, "wan_access": &cfg.WANAccess,
+		} {
+			if err := parseBoolOption(main.Options, key, dst); err != nil {
+				return nil, err
 			}
 		}
-		cfg.LANAPI = main.Options["lan_api"] != "0"
+		if interfaces, ok := main.Lists["mdns_interface"]; ok {
+			cfg.MDNSInterfaces = append([]string(nil), interfaces...)
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 	for _, s := range doc.Sections {
 		if s.Type != "rule" {
@@ -218,6 +474,66 @@ func Load(path string) (*Config, error) {
 // goroutine) and SaveRules (HTTP handlers) so concurrent saves can't clobber
 // each other's changes through a stale read.
 var saveMu sync.Mutex
+
+func boolOption(v bool) string {
+	if v {
+		return "1"
+	}
+	return "0"
+}
+
+// SaveMain updates only the named wattline main section. Rule sections,
+// extension options/lists, and unknown section types are retained.
+func (c *Config) SaveMain(path string) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	doc, err := ParseUCI(string(raw))
+	if err != nil {
+		return err
+	}
+	main := doc.Find("wattline", "main")
+	if main == nil {
+		main = newSection("wattline", "main")
+		doc.Sections = append(doc.Sections, main)
+	}
+	pin := c.BLEPIN
+	if pin == "" {
+		pin = c.PIN
+	}
+	main.Options["device_mac"] = c.DeviceMAC
+	main.Options["pin"] = pin
+	main.Options["token"] = c.Token
+	main.Options["port"] = strconv.Itoa(c.HTTPPort)
+	main.Options["lan_api"] = boolOption(c.LANAPI)
+	main.Options["http_enabled"] = boolOption(c.HTTPEnabled)
+	main.Options["http_addr4"] = c.HTTPAddr4
+	main.Options["http_addr6"] = c.HTTPAddr6
+	main.Options["https_enabled"] = boolOption(c.HTTPSEnabled)
+	main.Options["https_addr4"] = c.HTTPSAddr4
+	main.Options["https_addr6"] = c.HTTPSAddr6
+	main.Options["https_port"] = strconv.Itoa(c.HTTPSPort)
+	main.Options["tls_cert"] = c.TLSCert
+	main.Options["tls_key"] = c.TLSKey
+	main.Options["token_store"] = c.TokenStore
+	main.Options["pairing_ttl"] = c.PairingTTL.String()
+	main.Options["pairing_always_on"] = boolOption(c.PairingAlwaysOn)
+	main.Options["advanced"] = boolOption(c.Advanced)
+	main.Options["mdns_enabled"] = boolOption(c.MDNSEnabled)
+	main.Options["wan_access"] = boolOption(c.WANAccess)
+	main.Lists["mdns_interface"] = append([]string(nil), c.MDNSInterfaces...)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(doc.Serialize()), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
 
 // SavePairing records the paired device in the main section, preserving the
 // rest of the file. An empty pin keeps the currently configured PIN.
