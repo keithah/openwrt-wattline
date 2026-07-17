@@ -1,12 +1,87 @@
 package ble
 
 import (
+	"encoding/hex"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/keithah/openwrt-wattline/internal/proto"
 	"github.com/keithah/openwrt-wattline/internal/state"
 )
+
+type thresholdAtomicTransport struct {
+	mu        sync.Mutex
+	writes    []string
+	reads     int
+	firstRead chan struct{}
+	release   chan struct{}
+}
+
+func newThresholdAtomicTransport() *thresholdAtomicTransport {
+	return &thresholdAtomicTransport{firstRead: make(chan struct{}), release: make(chan struct{})}
+}
+func (f *thresholdAtomicTransport) WriteChar(_ string, data []byte) error {
+	f.mu.Lock()
+	f.writes = append(f.writes, hex.EncodeToString(data))
+	f.mu.Unlock()
+	return nil
+}
+func (f *thresholdAtomicTransport) ReadChar(string) ([]byte, error) {
+	f.mu.Lock()
+	f.reads++
+	read := f.reads
+	f.mu.Unlock()
+	switch read {
+	case 1:
+		close(f.firstRead)
+		<-f.release
+		return []byte{0x15, 0x81, 0x00}, nil
+	case 2:
+		return []byte{0x15, 0x80, 0x00, 0xd0, 0xe7}, nil
+	default:
+		return []byte{0x01, 0x81, 0x00}, nil
+	}
+}
+func (*thresholdAtomicTransport) Subscribe(string, func([]byte)) error { return nil }
+func (*thresholdAtomicTransport) HasChar(string) bool                  { return true }
+func (*thresholdAtomicTransport) Disconnected() <-chan struct{}        { return make(chan struct{}) }
+func (*thresholdAtomicTransport) Close() error                         { return nil }
+func (f *thresholdAtomicTransport) frames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.writes...)
+}
+
+func TestAtomicBypassThresholdPutOwnsSetAndGet(t *testing.T) {
+	f := newThresholdAtomicTransport()
+	s := NewSession(f, state.NewStore())
+	putDone := make(chan error, 1)
+	go func() { _, err := s.PutBypassThreshold(20); putDone <- err }()
+	<-f.firstRead
+	if s.mu.TryLock() {
+		s.mu.Unlock()
+		t.Fatal("threshold PUT released session ownership between SET and GET")
+	}
+	dcStarted := make(chan struct{})
+	dcDone := make(chan error, 1)
+	go func() { close(dcStarted); dcDone <- s.DCControl(true) }()
+	<-dcStarted
+	if got := f.frames(); !reflect.DeepEqual(got, []string{"1501d0e7"}) {
+		t.Fatalf("interleaved while threshold SET awaited reply: %v", got)
+	}
+	close(f.release)
+	if err := <-putDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-dcDone; err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"1501d0e7", "1500", "010101"}
+	if got := f.frames(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("frames=%v want %v", got, want)
+	}
+}
 
 func writeFrames(f *fakeTransport) []string {
 	frames := make([]string, len(f.writes))

@@ -32,6 +32,7 @@ type Session interface {
 	DeleteUSBCLimit(int) (int, error)
 	BypassThreshold() (float64, error)
 	SetBypassThreshold(float64) error
+	PutBypassThreshold(float64) (float64, error)
 	ListTimers() ([]proto.Timer, error)
 	AddTimer(proto.Timer) ([]proto.Timer, byte, error)
 	PutTimer(byte, proto.Timer) ([]proto.Timer, error)
@@ -68,7 +69,7 @@ type Service struct {
 	confirmTimeout time.Duration
 	bypassTimeout  time.Duration
 	now            func() time.Time
-	newID          func() string
+	newID          func() (string, error)
 }
 
 func NewService(resolve func() Session, store *state.Store, connector Connector, advanced func() bool) *Service {
@@ -85,12 +86,12 @@ func NewService(resolve func() Session, store *state.Store, connector Connector,
 	}
 }
 
-func randomCommandID() string {
+func randomCommandID() (string, error) {
 	var raw [8]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Sprintf("cmd_%x", time.Now().UnixNano())
+		return "", err
 	}
-	return "cmd_" + hex.EncodeToString(raw[:])
+	return "cmd_" + hex.EncodeToString(raw[:]), nil
 }
 
 type telemetryKind byte
@@ -141,8 +142,18 @@ func (s *Service) reconcile(
 	issue func(Session) error,
 	confirmed func(state.Snapshot) bool,
 ) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return observedTelemetry(s.store.Snapshot(), kind), err
+	}
+	session := s.resolve()
 	started := s.now()
-	id := s.newID()
+	id, err := s.newID()
+	if err != nil {
+		return observedTelemetry(s.store.Snapshot(), kind), fmt.Errorf("generate command ID: %w", err)
+	}
+	if id == "" {
+		return observedTelemetry(s.store.Snapshot(), kind), errors.New("generate command ID: empty ID")
+	}
 	s.store.BeginCommand(state.Command{ID: id, Operation: operation, Requested: requested, StartedAt: started, UpdatedAt: started})
 
 	finish := func(phase string, observed any, err error) (any, error) {
@@ -151,16 +162,12 @@ func (s *Service) reconcile(
 	}
 	current := func() any { return observedTelemetry(s.store.Snapshot(), kind) }
 
-	if err := ctx.Err(); err != nil {
-		return finish(state.CommandFailed, current(), err)
+	if session == nil {
+		return finish(state.CommandFailed, current(), ErrDisconnected)
 	}
 	snap := s.store.Snapshot()
 	if !supported(snap) {
 		return finish(state.CommandFailed, observedTelemetry(snap, kind), ErrUnsupported)
-	}
-	session := s.resolve()
-	if session == nil {
-		return finish(state.CommandFailed, current(), ErrDisconnected)
 	}
 	if err := issue(session); err != nil {
 		return finish(state.CommandFailed, current(), err)
@@ -171,7 +178,7 @@ func (s *Service) reconcile(
 
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	snap, err := s.store.Wait(waitCtx, confirmed)
+	snap, err = s.store.Wait(waitCtx, confirmed)
 	if err == nil {
 		return finish(state.CommandConfirmed, observedTelemetry(snap, kind), nil)
 	}
@@ -264,15 +271,15 @@ func (s *Service) sessionFor(ctx context.Context, supported func(state.Snapshot)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	session := s.resolve()
+	if session == nil {
+		return nil, ErrDisconnected
+	}
 	if !supported(s.store.Snapshot()) {
 		return nil, ErrUnsupported
 	}
 	if advanced && !s.advanced() {
 		return nil, ErrAdvancedDisabled
-	}
-	session := s.resolve()
-	if session == nil {
-		return nil, ErrDisconnected
 	}
 	return session, nil
 }
@@ -300,13 +307,7 @@ func (s *Service) PutBypassThreshold(ctx context.Context, volts float64) (float6
 	if err != nil {
 		return 0, err
 	}
-	if err := session.SetBypassThreshold(volts); err != nil {
-		return 0, err
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	return session.BypassThreshold()
+	return session.PutBypassThreshold(volts)
 }
 
 func (s *Service) BarrierFree(ctx context.Context) (bool, error) {
@@ -326,6 +327,9 @@ func (s *Service) SetBarrierFree(ctx context.Context, on bool) (bool, error) {
 }
 
 func (s *Service) SetRunningMode(ctx context.Context, mode byte) error {
+	if mode > 1 {
+		return fmt.Errorf("running mode %d is outside 0..1", mode)
+	}
 	session, err := s.advancedCommand(ctx, func(id state.Identity) bool { return id.FeatureSet.FactoryMode })
 	if err != nil {
 		return err
@@ -355,7 +359,7 @@ func (s *Service) SetBLEPIN(ctx context.Context, pin uint32) error {
 func (s *Service) ReadClock(ctx context.Context) (time.Time, bool, error) {
 	session, err := s.sessionFor(ctx, func(sn state.Snapshot) bool {
 		id, ok := identity(sn)
-		return ok && id.Mode == "app" && id.Characteristics["current_time"]
+		return ok && id.Mode == "app"
 	}, true)
 	if err != nil {
 		return time.Time{}, false, err

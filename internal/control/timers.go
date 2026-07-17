@@ -49,6 +49,9 @@ func (s *Service) ListTimers(ctx context.Context) ([]proto.Timer, error) {
 }
 
 func (s *Service) GetTimer(ctx context.Context, id byte) (proto.Timer, error) {
+	if id == 0xff {
+		return proto.Timer{}, fmt.Errorf("timer ID 255 is reserved for add")
+	}
 	timers, err := s.ListTimers(ctx)
 	if err != nil {
 		return proto.Timer{}, err
@@ -73,6 +76,9 @@ func (s *Service) AddTimer(ctx context.Context, timer proto.Timer) ([]proto.Time
 }
 
 func (s *Service) PutTimer(ctx context.Context, id byte, timer proto.Timer) ([]proto.Timer, error) {
+	if id == 0xff {
+		return nil, fmt.Errorf("timer ID 255 is reserved for add")
+	}
 	if err := proto.ValidateTimerWrite(timer); err != nil {
 		return nil, err
 	}
@@ -84,6 +90,9 @@ func (s *Service) PutTimer(ctx context.Context, id byte, timer proto.Timer) ([]p
 }
 
 func (s *Service) DeleteTimer(ctx context.Context, id byte) ([]proto.Timer, error) {
+	if id == 0xff {
+		return nil, fmt.Errorf("timer ID 255 is reserved for add")
+	}
 	session, err := s.sessionFor(ctx, supportsTimers, false)
 	if err != nil {
 		return nil, err

@@ -69,18 +69,35 @@ func (s *Session) ClearUSBCLimit(typ int) error {
 }
 
 // BypassThreshold returns the DC bypass engage voltage.
-func (s *Session) BypassThreshold() (float64, error) {
-	_, payload, err := s.command(proto.BypassThresholdGet())
+func (s *Session) bypassThresholdLocked() (float64, error) {
+	_, payload, err := s.commandLocked(proto.BypassThresholdGet())
 	if err != nil {
 		return 0, err
 	}
 	return proto.ParseBypassThreshold(payload)
 }
 
+func (s *Session) BypassThreshold() (float64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bypassThresholdLocked()
+}
+
 // SetBypassThreshold sets the DC bypass engage voltage.
 func (s *Session) SetBypassThreshold(volts float64) error {
 	_, _, err := s.command(proto.BypassThresholdSet(volts))
 	return err
+}
+
+// PutBypassThreshold sets the threshold and returns the authoritative device
+// re-read while retaining command-channel ownership across both operations.
+func (s *Session) PutBypassThreshold(volts float64) (float64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, _, err := s.commandLocked(proto.BypassThresholdSet(volts)); err != nil {
+		return 0, err
+	}
+	return s.bypassThresholdLocked()
 }
 
 // Schedules lists all on-device timers with their settings.

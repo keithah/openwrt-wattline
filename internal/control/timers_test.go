@@ -51,6 +51,31 @@ func TestTimerValidationHappensBeforeBLE(t *testing.T) {
 	}
 }
 
+func TestTimerIDFFRejectedBeforeResolution(t *testing.T) {
+	valid := proto.Timer{Status: 1, Type: proto.TimerDaily}
+	for _, tc := range []struct {
+		name string
+		call func(*Service) error
+	}{
+		{"get", func(s *Service) error { _, err := s.GetTimer(context.Background(), 0xff); return err }},
+		{"put", func(s *Service) error { _, err := s.PutTimer(context.Background(), 0xff, valid); return err }},
+		{"delete", func(s *Service) error { _, err := s.DeleteTimer(context.Background(), 0xff); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := &fakeSession{}
+			resolveCalls := 0
+			svc := testService(fullyCapableStore(), sess)
+			svc.resolve = func() Session { resolveCalls++; return sess }
+			if err := tc.call(svc); err == nil {
+				t.Fatal("ID 0xff accepted")
+			}
+			if resolveCalls != 0 || sess.listTimerCalls != 0 || sess.putTimerCalls != 0 || sess.deleteTimerCalls != 0 {
+				t.Fatalf("BLE touched: resolve=%d list=%d put=%d delete=%d", resolveCalls, sess.listTimerCalls, sess.putTimerCalls, sess.deleteTimerCalls)
+			}
+		})
+	}
+}
+
 func TestOrdinaryCapabilitiesAreDistinctFromDisconnect(t *testing.T) {
 	st := fullyCapableStore()
 	st.SetIdentity(stateIdentityWithoutFeatures())
