@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,7 @@ func TestTokenIssuePersistsOnlyHashAtomically(t *testing.T) {
 	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
 	random := bytes.Repeat([]byte{0x7d}, 32)
 	path := filepath.Join(t.TempDir(), "tokens.json")
-	store, err := OpenStore(path, "bootstrap-secret", WithClock(func() time.Time { return now }), WithRandom(bytes.NewReader(random)))
+	store, err := OpenStore(path, "bootstrap-secret", withClock(func() time.Time { return now }), withRandom(bytes.NewReader(random)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ func TestTokenIssuePersistsOnlyHashAtomically(t *testing.T) {
 
 func TestTokenBootstrapMetadataAndAuthentication(t *testing.T) {
 	now := time.Date(2026, 7, 17, 19, 0, 0, 0, time.UTC)
-	store, err := OpenStore(filepath.Join(t.TempDir(), "tokens.json"), "bootstrap-secret", WithClock(func() time.Time { return now }))
+	store, err := OpenStore(filepath.Join(t.TempDir(), "tokens.json"), "bootstrap-secret", withClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func TestTokenBootstrapMetadataAndAuthentication(t *testing.T) {
 
 func TestTokenManagedAuthenticationAndImmediateRevocation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tokens.json")
-	store, err := OpenStore(path, "bootstrap", WithRandom(bytes.NewReader(bytes.Repeat([]byte{0x42}, 32))))
+	store, err := OpenStore(path, "bootstrap", withRandom(bytes.NewReader(bytes.Repeat([]byte{0x42}, 32))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +124,7 @@ func TestTokenRejectsUnsafeLabels(t *testing.T) {
 func TestTokenRejectsDuplicateID(t *testing.T) {
 	one := append(bytes.Repeat([]byte{0x11}, 8), bytes.Repeat([]byte{0x22}, 24)...)
 	two := append(bytes.Repeat([]byte{0x11}, 8), bytes.Repeat([]byte{0x33}, 24)...)
-	store, err := OpenStore(filepath.Join(t.TempDir(), "tokens.json"), "bootstrap", WithRandom(bytes.NewReader(append(one, two...))))
+	store, err := OpenStore(filepath.Join(t.TempDir(), "tokens.json"), "bootstrap", withRandom(bytes.NewReader(append(one, two...))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +136,21 @@ func TestTokenRejectsDuplicateID(t *testing.T) {
 	}
 }
 
+func TestTokenIssueRejectsDuplicateHash(t *testing.T) {
+	random := bytes.Repeat([]byte{0x77}, 32)
+	bootstrap := "wlt_" + hex.EncodeToString(random)
+	store, err := OpenStore(filepath.Join(t.TempDir(), "tokens.json"), bootstrap, withRandom(bytes.NewReader(random)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Issue("same secret"); err == nil {
+		t.Fatal("Issue accepted a secret hash already owned by bootstrap")
+	}
+	if got := store.List(); len(got) != 1 || !got[0].Bootstrap {
+		t.Fatalf("List after duplicate hash = %#v", got)
+	}
+}
+
 func TestTokenCorruptFileFailsClosed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tokens.json")
 	if err := os.WriteFile(path, []byte(`{"tokens":[`), 0o600); err != nil {
@@ -142,6 +158,175 @@ func TestTokenCorruptFileFailsClosed(t *testing.T) {
 	}
 	if store, err := OpenStore(path, "bootstrap"); err == nil || store != nil {
 		t.Fatalf("OpenStore(corrupt) = %#v, %v", store, err)
+	}
+}
+
+func TestTokenMissingOrNullDocumentFailsClosed(t *testing.T) {
+	for _, raw := range []string{"null", `{}`, `{"tokens":null}`} {
+		t.Run(raw, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "tokens.json")
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if store, err := OpenStore(path, "bootstrap"); err == nil || store != nil {
+				t.Fatalf("OpenStore(%s) = %#v, %v", raw, store, err)
+			}
+		})
+	}
+}
+
+func TestTokenRejectsDuplicateHashes(t *testing.T) {
+	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	duplicate := hashSecret("same-secret")
+	tests := []struct {
+		name      string
+		bootstrap string
+		tokens    []tokenRecord
+	}{
+		{
+			name:      "managed tokens",
+			bootstrap: "bootstrap",
+			tokens: []tokenRecord{
+				{TokenMeta: TokenMeta{ID: "1111111111111111", Label: "one", CreatedAt: now}, Hash: duplicate},
+				{TokenMeta: TokenMeta{ID: "2222222222222222", Label: "two", CreatedAt: now}, Hash: duplicate},
+			},
+		},
+		{
+			name:      "bootstrap reconciliation",
+			bootstrap: "new-bootstrap",
+			tokens: []tokenRecord{
+				{TokenMeta: TokenMeta{ID: bootstrapID, Label: bootstrapLabel, CreatedAt: now, Bootstrap: true}, Hash: hashSecret("old-bootstrap")},
+				{TokenMeta: TokenMeta{ID: "3333333333333333", Label: "client", CreatedAt: now}, Hash: hashSecret("new-bootstrap")},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "tokens.json")
+			writeDiskTokens(t, path, test.tokens)
+			if store, err := OpenStore(path, test.bootstrap); err == nil || store != nil {
+				t.Fatalf("OpenStore(duplicate hashes) = %#v, %v", store, err)
+			}
+		})
+	}
+}
+
+func TestTokenRejectsInvalidPersistedTimestamps(t *testing.T) {
+	utc := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		created time.Time
+		seen    *time.Time
+	}{
+		{name: "non UTC creation", created: time.Date(2026, 7, 17, 13, 0, 0, 0, time.FixedZone("PDT", -7*60*60))},
+		{name: "non UTC last seen", created: utc, seen: timePointer(time.Date(2026, 7, 17, 13, 1, 0, 0, time.FixedZone("PDT", -7*60*60)))},
+		{name: "last seen before creation", created: utc, seen: timePointer(utc.Add(-time.Second))},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "tokens.json")
+			writeDiskTokens(t, path, []tokenRecord{{
+				TokenMeta: TokenMeta{ID: "1111111111111111", Label: "client", CreatedAt: test.created, LastSeenAt: test.seen},
+				Hash:      hashSecret("secret"),
+			}})
+			if store, err := OpenStore(path, "bootstrap"); err == nil || store != nil {
+				t.Fatalf("OpenStore(invalid timestamp) = %#v, %v", store, err)
+			}
+		})
+	}
+}
+
+func TestTokenIssueRollsBackOnlyBeforeAtomicCommit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	store, err := OpenStore(path, "bootstrap", withRandom(bytes.NewReader(bytes.Repeat([]byte{0x44}, 32))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	faults := &faultFileSystem{fileSystem: osFileSystem{}, renameErr: errors.New("rename failed")}
+	store.fs = faults
+	secret, meta, err := store.Issue("phone")
+	if err == nil || secret != "" || meta != (TokenMeta{}) {
+		t.Fatalf("Issue before commit = (%q, %#v, %v)", secret, meta, err)
+	}
+	if got := store.List(); len(got) != 1 {
+		t.Fatalf("List after pre-commit failure = %#v", got)
+	}
+}
+
+func TestTokenIssueSurvivesPostCommitDirectorySyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	store, err := OpenStore(path, "bootstrap", withRandom(bytes.NewReader(bytes.Repeat([]byte{0x55}, 32))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	faults := &faultFileSystem{fileSystem: osFileSystem{}, directorySyncErr: errors.New("directory sync failed")}
+	store.fs = faults
+	secret, meta, err := store.Issue("phone")
+	if err != nil || secret == "" || meta.ID == "" {
+		t.Fatalf("Issue after committed rename = (%q, %#v, %v)", secret, meta, err)
+	}
+	if store.lastPersistenceError == nil {
+		t.Fatal("post-commit directory sync failure was not recorded")
+	}
+	if principal, ok := store.Authenticate(secret); !ok || principal.Role != RoleClient {
+		t.Fatalf("committed issued token does not authenticate: %#v, %v", principal, ok)
+	}
+	reopened, err := OpenStore(path, "bootstrap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.Authenticate(secret); !ok {
+		t.Fatal("committed issued token was absent after reopen")
+	}
+}
+
+func TestTokenRevokeSurvivesPostCommitDirectorySyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	store, err := OpenStore(path, "bootstrap", withRandom(bytes.NewReader(bytes.Repeat([]byte{0x66}, 32))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, meta, err := store.Issue("phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.fs = &faultFileSystem{fileSystem: osFileSystem{}, directorySyncErr: errors.New("directory sync failed")}
+	if err := store.Revoke(meta.ID); err != nil {
+		t.Fatalf("Revoke after committed rename: %v", err)
+	}
+	if store.lastPersistenceError == nil {
+		t.Fatal("post-commit directory sync failure was not recorded")
+	}
+	if _, ok := store.Authenticate(secret); ok {
+		t.Fatal("committed revocation was rolled back in memory")
+	}
+	reopened, err := OpenStore(path, "bootstrap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.Authenticate(secret); ok {
+		t.Fatal("committed revocation was absent after reopen")
+	}
+}
+
+func TestTokenAuthenticateDoesNotRetryAfterCommittedSyncFailure(t *testing.T) {
+	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	store, err := OpenStore(path, "bootstrap", withClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	faults := &faultFileSystem{fileSystem: osFileSystem{}, directorySyncErr: errors.New("directory sync failed")}
+	store.fs = faults
+	if _, ok := store.Authenticate("bootstrap"); !ok {
+		t.Fatal("first authentication failed")
+	}
+	now = now.Add(time.Minute)
+	if _, ok := store.Authenticate("bootstrap"); !ok {
+		t.Fatal("second authentication failed")
+	}
+	if faults.renameCalls != 1 {
+		t.Fatalf("Authenticate rename calls = %d, want 1", faults.renameCalls)
 	}
 }
 
@@ -168,7 +353,7 @@ func TestTokenOpenRepairsPermissiveStoreMode(t *testing.T) {
 func TestTokenLastSeenPersistenceIsCoalesced(t *testing.T) {
 	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "tokens.json")
-	store, err := OpenStore(path, "bootstrap", WithClock(func() time.Time { return now }), WithRandom(bytes.NewReader(bytes.Repeat([]byte{0xaa}, 32))))
+	store, err := OpenStore(path, "bootstrap", withClock(func() time.Time { return now }), withRandom(bytes.NewReader(bytes.Repeat([]byte{0xaa}, 32))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +389,7 @@ func TestTokenLastSeenPersistenceIsCoalescedAcrossTokens(t *testing.T) {
 	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "tokens.json")
 	random := append(bytes.Repeat([]byte{0xaa}, 32), bytes.Repeat([]byte{0xbb}, 32)...)
-	store, err := OpenStore(path, "bootstrap", WithClock(func() time.Time { return now }), WithRandom(bytes.NewReader(random)))
+	store, err := OpenStore(path, "bootstrap", withClock(func() time.Time { return now }), withRandom(bytes.NewReader(random)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +417,7 @@ func TestTokenMetadataWritesDoNotFlushUncoalescedLastSeen(t *testing.T) {
 	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "tokens.json")
 	random := append(bytes.Repeat([]byte{0xaa}, 32), bytes.Repeat([]byte{0xbb}, 32)...)
-	store, err := OpenStore(path, "bootstrap", WithClock(func() time.Time { return now }), WithRandom(bytes.NewReader(random)))
+	store, err := OpenStore(path, "bootstrap", withClock(func() time.Time { return now }), withRandom(bytes.NewReader(random)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +442,7 @@ func TestTokenMetadataWritesDoNotFlushUncoalescedLastSeen(t *testing.T) {
 }
 
 func TestTokenConcurrentAccessReturnsSafeCopies(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "tokens.json"), "bootstrap", WithRandom(bytes.NewReader(bytes.Repeat([]byte{0xbb}, 32))))
+	store, err := OpenStore(filepath.Join(t.TempDir(), "tokens.json"), "bootstrap", withRandom(bytes.NewReader(bytes.Repeat([]byte{0xbb}, 32))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,4 +498,52 @@ func findDiskLastSeen(t *testing.T, path, id string) *time.Time {
 	}
 	t.Fatalf("token %q missing from disk", id)
 	return nil
+}
+
+func writeDiskTokens(t *testing.T, path string, tokens []tokenRecord) {
+	t.Helper()
+	raw, err := json.Marshal(diskStore{Tokens: tokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func timePointer(value time.Time) *time.Time { return &value }
+
+type faultFileSystem struct {
+	fileSystem
+	renameErr        error
+	directorySyncErr error
+	renameCalls      int
+}
+
+func (f *faultFileSystem) Rename(oldPath, newPath string) error {
+	f.renameCalls++
+	if f.renameErr != nil {
+		return f.renameErr
+	}
+	return f.fileSystem.Rename(oldPath, newPath)
+}
+
+func (f *faultFileSystem) OpenDirectory(path string) (syncCloser, error) {
+	directory, err := f.fileSystem.OpenDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+	return &faultDirectory{syncCloser: directory, syncErr: f.directorySyncErr}, nil
+}
+
+type faultDirectory struct {
+	syncCloser
+	syncErr error
+}
+
+func (d *faultDirectory) Sync() error {
+	if d.syncErr != nil {
+		return d.syncErr
+	}
+	return d.syncCloser.Sync()
 }
