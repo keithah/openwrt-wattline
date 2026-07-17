@@ -74,6 +74,20 @@ Prebuilt `.ipk`s and an opkg feed index are attached to each
 similar aarch64 OpenWrt targets). Adjust it if you're packaging for a
 different target.
 
+### Releasing
+
+CI (GitHub Actions) handles releases — pushing a `v*` tag runs the tests, builds
+the four `.ipk`s and the opkg index, publishes a GitHub release with those
+assets, and force-updates the `gh-pages` feed:
+
+```sh
+git tag v1.2.3 && git push origin v1.2.3
+```
+
+The tag drives the package version (the `v` is stripped), so the `Makefile`
+`VERSION` default only matters for local builds. Every push to `main` and every
+PR also runs `go vet`, `go test`, and a package build via the CI workflow.
+
 ### `.ipk` format (verified on-target)
 
 Two things that only surface on the real router (GL-X3000, opkg 2021-06-13):
@@ -123,8 +137,8 @@ opkg install wattlined luci-app-wattline gl-app-wattline   # first time
 opkg upgrade wattlined luci-app-wattline gl-app-wattline    # later releases
 ```
 
-The feed is regenerated from `package/out/` on each release
-(`make -C package feed`, then published to the `gh-pages` branch).
+The feed is regenerated and published automatically on each release (see
+[Releasing](#releasing)).
 
 ### Install from a release
 
