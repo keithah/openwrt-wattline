@@ -2,6 +2,7 @@ package ble
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ func TestConnectorReconnects(t *testing.T) {
 		// close disconnect channel shortly after connect to force a reconnect
 		go func() {
 			time.Sleep(20 * time.Millisecond)
-			close(f.disc)
+			f.Close()
 		}()
 		return f, nil
 	}
@@ -302,4 +303,235 @@ func TestConnectorDisarmReconnectBlocksShutdownUntilResume(t *testing.T) {
 	}
 	c.ResumeReconnect()
 	waitForConnector(t, "reconnect after resume", func() bool { return atomic.LoadInt32(&dials) >= 2 })
+}
+
+type connectorTimerRequest struct {
+	delay time.Duration
+	fire  chan time.Time
+}
+
+func controlledConnectorTimer(c *Connector) <-chan connectorTimerRequest {
+	requests := make(chan connectorTimerRequest, 8)
+	c.after = func(delay time.Duration) <-chan time.Time {
+		fire := make(chan time.Time, 1)
+		requests <- connectorTimerRequest{delay: delay, fire: fire}
+		return fire
+	}
+	return requests
+}
+
+func TestConnectorDisarmInterruptsActiveReconnectDelay(t *testing.T) {
+	var dials int32
+	dialed := make(chan struct{}, 4)
+	dial := func() (Transport, error) {
+		atomic.AddInt32(&dials, 1)
+		dialed <- struct{}{}
+		f := newFake()
+		scriptedHandshake(f)
+		return f, nil
+	}
+	c := NewConnector(dial, state.NewStore(), nil)
+	c.retryDelay, c.settle = time.Minute, 0
+	timers := controlledConnectorTimer(c)
+	stop := make(chan struct{})
+	defer close(stop)
+	go c.Run(stop)
+	<-dialed
+	waitForConnector(t, "initial connection", func() bool { return c.Session() != nil })
+	if err := c.Session().Close(); err != nil {
+		t.Fatal(err)
+	}
+	active := <-timers
+	if active.delay != time.Minute {
+		t.Fatalf("active delay = %v, want %v", active.delay, time.Minute)
+	}
+
+	c.DisarmReconnect()
+	active.fire <- time.Now() // stale timer firing must not authorize a dial
+	select {
+	case <-dialed:
+		t.Fatal("connector dialed after disarming an active reconnect delay")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := atomic.LoadInt32(&dials); got != 1 {
+		t.Fatalf("dials after disarm = %d, want 1", got)
+	}
+}
+
+func TestConnectorArmReplacesActiveDefaultReconnectDelay(t *testing.T) {
+	dialed := make(chan struct{}, 4)
+	dial := func() (Transport, error) {
+		dialed <- struct{}{}
+		f := newFake()
+		scriptedHandshake(f)
+		return f, nil
+	}
+	c := NewConnector(dial, state.NewStore(), nil)
+	c.retryDelay, c.settle = time.Minute, 0
+	timers := controlledConnectorTimer(c)
+	stop := make(chan struct{})
+	defer close(stop)
+	go c.Run(stop)
+	<-dialed
+	waitForConnector(t, "initial connection", func() bool { return c.Session() != nil })
+	if err := c.Session().Close(); err != nil {
+		t.Fatal(err)
+	}
+	stale := <-timers
+	if stale.delay != time.Minute {
+		t.Fatalf("default delay = %v, want %v", stale.delay, time.Minute)
+	}
+
+	c.ArmReconnect(23 * time.Millisecond)
+	var replacement connectorTimerRequest
+	select {
+	case replacement = <-timers:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("ArmReconnect did not replace the active default delay")
+	}
+	if replacement.delay != 23*time.Millisecond {
+		t.Fatalf("replacement delay = %v, want 23ms", replacement.delay)
+	}
+	replacement.fire <- time.Now()
+	select {
+	case <-dialed:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("replacement delay did not authorize reconnect")
+	}
+}
+
+type blockingHandshakeTransport struct {
+	*fakeTransport
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (t *blockingHandshakeTransport) ReadChar(uuid string) ([]byte, error) {
+	if uuid == CharOTA {
+		t.once.Do(func() { close(t.entered) })
+		<-t.release
+	}
+	return t.fakeTransport.ReadChar(uuid)
+}
+
+func newBlockingHandshakeTransport() *blockingHandshakeTransport {
+	f := newFake()
+	scriptedHandshake(f)
+	return &blockingHandshakeTransport{fakeTransport: f, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func TestConnectorDisarmDuringHandshakeRemainsAuthoritative(t *testing.T) {
+	var dials int32
+	bt := newBlockingHandshakeTransport()
+	dial := func() (Transport, error) {
+		if atomic.AddInt32(&dials, 1) == 1 {
+			return bt, nil
+		}
+		f := newFake()
+		scriptedHandshake(f)
+		return f, nil
+	}
+	store := state.NewStore()
+	c := NewConnector(dial, store, nil)
+	c.settle = 0
+	stop := make(chan struct{})
+	defer close(stop)
+	go c.Run(stop)
+	<-bt.entered
+	c.DisarmReconnect()
+	close(bt.release)
+	waitForConnector(t, "handshake did not publish session", func() bool { return c.Session() != nil })
+	if conn := store.Snapshot().Connection; conn == nil || conn.ReconnectArmed {
+		t.Fatalf("ready state overwrote disarm: %+v", conn)
+	}
+	if err := bt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := atomic.LoadInt32(&dials); got != 1 {
+		t.Fatalf("disarmed handshake reconnected: %d dials", got)
+	}
+}
+
+func TestConnectorStopClosesLiveSessionAndPublishesDisconnected(t *testing.T) {
+	var f *fakeTransport
+	dial := func() (Transport, error) {
+		f = newFake()
+		scriptedHandshake(f)
+		return f, nil
+	}
+	store := state.NewStore()
+	c := NewConnector(dial, store, nil)
+	c.settle = 0
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() { c.Run(stop); close(done) }()
+	waitForConnector(t, "initial connection", func() bool { return c.Session() != nil })
+	close(stop)
+	<-done
+	if c.Session() != nil {
+		t.Fatal("stop left a published live session")
+	}
+	select {
+	case <-f.Disconnected():
+	default:
+		t.Fatal("stop did not close live transport")
+	}
+	snap := store.Snapshot()
+	if snap.Connected || snap.Connection == nil || snap.Connection.Phase != state.ConnectionDisconnected {
+		t.Fatalf("stop state = connected %v, connection %+v", snap.Connected, snap.Connection)
+	}
+}
+
+func TestConnectorStopDuringDialClosesReturnedTransport(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	f := newFake()
+	scriptedHandshake(f)
+	dial := func() (Transport, error) {
+		close(entered)
+		<-release
+		return f, nil
+	}
+	store := state.NewStore()
+	c := NewConnector(dial, store, nil)
+	c.settle = 0
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() { c.Run(stop); close(done) }()
+	<-entered
+	close(stop)
+	close(release)
+	<-done
+	select {
+	case <-f.Disconnected():
+	default:
+		t.Fatal("transport returned after stop was not closed")
+	}
+	if f.reads != 0 || c.Session() != nil || store.Snapshot().Connected {
+		t.Fatalf("stop-during-dial leaked live state: reads=%d session=%v connected=%v",
+			f.reads, c.Session(), store.Snapshot().Connected)
+	}
+}
+
+func TestConnectorStopDuringHandshakeClosesFreshTransport(t *testing.T) {
+	bt := newBlockingHandshakeTransport()
+	store := state.NewStore()
+	c := NewConnector(func() (Transport, error) { return bt, nil }, store, nil)
+	c.settle = 0
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() { c.Run(stop); close(done) }()
+	<-bt.entered
+	close(stop)
+	close(bt.release)
+	<-done
+	select {
+	case <-bt.Disconnected():
+	default:
+		t.Fatal("stop during handshake did not close transport")
+	}
+	if c.Session() != nil || store.Snapshot().Connected {
+		t.Fatalf("stop-during-handshake leaked live state: session=%v connected=%v",
+			c.Session(), store.Snapshot().Connected)
+	}
 }

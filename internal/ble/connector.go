@@ -17,6 +17,7 @@ type Connector struct {
 	onSession  func(*Session, Identity)
 	retryDelay time.Duration
 	settle     time.Duration
+	after      func(time.Duration) <-chan time.Time
 
 	mu     sync.Mutex
 	sess   *Session
@@ -24,9 +25,10 @@ type Connector struct {
 	paused bool
 	resume chan struct{} // non-nil while paused; closed by Resume
 
-	reconnectArmed  bool
-	reconnectDelay  time.Duration
-	reconnectResume chan struct{} // non-nil while disarmed
+	reconnectArmed        bool
+	reconnectDelay        time.Duration
+	reconnectDelayPending bool
+	policyChanged         chan struct{}
 }
 
 // logFailure reports whether the nth consecutive connect failure should be
@@ -35,22 +37,14 @@ func logFailure(n int) bool { return n == 1 || n%30 == 0 }
 
 func NewConnector(dial Dialer, store *state.Store, onSession func(*Session, Identity)) *Connector {
 	return &Connector{dial: dial, store: store, onSession: onSession,
-		retryDelay: 2 * time.Second, settle: 2 * time.Second, reconnectArmed: true}
+		retryDelay: 2 * time.Second, settle: 2 * time.Second, after: time.After,
+		reconnectArmed: true, policyChanged: make(chan struct{})}
 }
 
 func (c *Connector) Session() *Session {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.sess
-}
-
-func (c *Connector) sleep(d time.Duration, stop <-chan struct{}) bool {
-	select {
-	case <-stop:
-		return false
-	case <-time.After(d):
-		return true
-	}
 }
 
 // Pause stops the connector from dialing and closes any live session,
@@ -87,12 +81,10 @@ func (c *Connector) ArmReconnect(delay time.Duration) {
 	c.mu.Lock()
 	c.reconnectArmed = true
 	c.reconnectDelay = delay
-	if c.reconnectResume != nil {
-		close(c.reconnectResume)
-		c.reconnectResume = nil
-	}
+	c.reconnectDelayPending = true
+	c.signalPolicyChangedLocked()
+	c.setConnectionReconnectLocked(true)
 	c.mu.Unlock()
-	c.setConnectionReconnect(true)
 }
 
 // DisarmReconnect prevents an expected disconnect (shutdown) from causing a
@@ -101,18 +93,22 @@ func (c *Connector) DisarmReconnect() {
 	c.mu.Lock()
 	c.reconnectArmed = false
 	c.reconnectDelay = 0
-	if c.reconnectResume == nil {
-		c.reconnectResume = make(chan struct{})
-	}
+	c.reconnectDelayPending = false
+	c.signalPolicyChangedLocked()
+	c.setConnectionReconnectLocked(false)
 	c.mu.Unlock()
-	c.setConnectionReconnect(false)
 }
 
 func (c *Connector) ResumeReconnect() {
 	c.ArmReconnect(0)
 }
 
-func (c *Connector) setConnectionReconnect(armed bool) {
+func (c *Connector) signalPolicyChangedLocked() {
+	close(c.policyChanged)
+	c.policyChanged = make(chan struct{})
+}
+
+func (c *Connector) setConnectionReconnectLocked(armed bool) {
 	snap := c.store.Snapshot()
 	connection := state.Connection{Phase: state.ConnectionDisconnected, ReconnectArmed: armed, Since: time.Now()}
 	if snap.Connection != nil {
@@ -122,32 +118,72 @@ func (c *Connector) setConnectionReconnect(armed bool) {
 	c.store.SetConnection(connection)
 }
 
-func (c *Connector) reconnectPolicy() (bool, time.Duration, <-chan struct{}) {
+func (c *Connector) publishConnection(phase string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.reconnectArmed {
-		return false, 0, c.reconnectResume
-	}
-	delay := c.reconnectDelay
-	c.reconnectDelay = 0
-	if delay == 0 {
-		delay = c.retryDelay
-	}
-	return true, delay, nil
+	c.store.SetConnection(state.Connection{Phase: phase, ReconnectArmed: c.reconnectArmed, Since: time.Now()})
+	c.mu.Unlock()
 }
 
-func (c *Connector) waitForReconnect(stop <-chan struct{}) bool {
+func (c *Connector) reconnectPolicy() (bool, time.Duration, bool, <-chan struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delay, pending := c.retryDelay, c.reconnectDelayPending
+	if pending {
+		delay = c.reconnectDelay
+	}
+	return c.reconnectArmed, delay, pending, c.policyChanged
+}
+
+func (c *Connector) claimReconnect(policy <-chan struct{}, pending bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if policy != c.policyChanged || !c.reconnectArmed {
+		return false
+	}
+	if pending {
+		c.reconnectDelayPending = false
+	}
+	return true
+}
+
+// waitForDial returns the policy generation authorizing the next dial. A
+// reconnect attempt observes its delay; the first attempt only waits for an
+// armed policy. Any policy change interrupts the wait and starts it over.
+func (c *Connector) waitForDial(stop <-chan struct{}, reconnect bool) (<-chan struct{}, bool) {
 	for {
-		armed, delay, resume := c.reconnectPolicy()
-		if armed {
-			return c.sleep(delay, stop)
+		armed, delay, pending, changed := c.reconnectPolicy()
+		if !armed {
+			select {
+			case <-stop:
+				return nil, false
+			case <-changed:
+				continue
+			}
 		}
+		if !reconnect || delay <= 0 {
+			if c.claimReconnect(changed, reconnect && pending) {
+				return changed, true
+			}
+			continue
+		}
+		timer := c.after(delay)
 		select {
 		case <-stop:
-			return false
-		case <-resume:
+			return nil, false
+		case <-changed:
+			continue
+		case <-timer:
+			if c.claimReconnect(changed, pending) {
+				return changed, true
+			}
 		}
 	}
+}
+
+func (c *Connector) policyCurrent(policy <-chan struct{}) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return policy == c.policyChanged && c.reconnectArmed
 }
 
 func (c *Connector) publishIdentity(id Identity, sess *Session) {
@@ -178,34 +214,76 @@ func (c *Connector) pauseState() (bool, <-chan struct{}) {
 
 func (c *Connector) isPaused() bool { p, _ := c.pauseState(); return p }
 
+func stopped(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Connector) closeSession(sess *Session) {
+	if sess != nil {
+		sess.Close()
+	}
+	c.mu.Lock()
+	if c.sess == sess {
+		c.sess = nil
+	}
+	c.mu.Unlock()
+	c.store.SetConnected(false)
+	c.publishConnection(state.ConnectionDisconnected)
+}
+
 func (c *Connector) Run(stop <-chan struct{}) {
+	reconnect := false
 	for {
-		select {
-		case <-stop:
+		policy, ok := c.waitForDial(stop, reconnect)
+		if !ok {
+			c.closeSession(c.Session())
 			return
-		default:
 		}
+		reconnect = false
 		if paused, resume := c.pauseState(); paused {
 			select {
 			case <-stop:
+				c.closeSession(c.Session())
 				return
 			case <-resume:
 			}
 			continue
 		}
+		if !c.policyCurrent(policy) {
+			reconnect = true
+			continue
+		}
 		t, err := c.dial()
+		if stopped(stop) {
+			if t != nil {
+				t.Close()
+			}
+			c.closeSession(nil)
+			return
+		}
+		// A reconnect policy change while dialing invalidates this attempt.
+		// Close any returned transport and honor the replacement policy.
+		if !c.policyCurrent(policy) {
+			if t != nil {
+				t.Close()
+			}
+			reconnect = true
+			continue
+		}
 		if err != nil {
 			c.fails++
 			if logFailure(c.fails) {
 				log.Printf("wattline: dial failed: %v", err)
 			}
-			if !c.sleep(c.retryDelay, stop) {
-				return
-			}
+			reconnect = true
 			continue
 		}
-		c.store.SetConnection(state.Connection{Phase: state.ConnectionHandshaking,
-			ReconnectArmed: true, Since: time.Now()})
+		c.publishConnection(state.ConnectionHandshaking)
 		// A pause may have landed while dial was in flight; the Link-Power
 		// accepts one central, so drop the fresh connection immediately.
 		if c.isPaused() {
@@ -215,6 +293,10 @@ func (c *Connector) Run(stop <-chan struct{}) {
 		sess := NewSession(t, c.store)
 		sess.settle = c.settle
 		id, err := sess.Handshake()
+		if stopped(stop) {
+			c.closeSession(sess)
+			return
+		}
 		if err != nil {
 			// Close, or the device stays occupied (it stops advertising while
 			// connected) and every retry — and any pairing scan — finds nothing.
@@ -223,9 +305,7 @@ func (c *Connector) Run(stop <-chan struct{}) {
 			if logFailure(c.fails) {
 				log.Printf("wattline: handshake failed: %v", err)
 			}
-			if !c.sleep(c.retryDelay, stop) {
-				return
-			}
+			reconnect = true
 			continue
 		}
 		if c.isPaused() {
@@ -237,6 +317,10 @@ func (c *Connector) Run(stop <-chan struct{}) {
 		if c.onSession != nil {
 			c.onSession(sess, id)
 		}
+		if stopped(stop) {
+			c.closeSession(sess)
+			return
+		}
 		c.mu.Lock()
 		c.sess = sess
 		c.mu.Unlock()
@@ -245,22 +329,19 @@ func (c *Connector) Run(stop <-chan struct{}) {
 		if sess.Mode() == "ota" {
 			phase = state.ConnectionBootloader
 		}
-		c.store.SetConnection(state.Connection{Phase: phase, ReconnectArmed: true, Since: time.Now()})
+		c.publishConnection(phase)
 		select {
 		case <-stop:
+			c.closeSession(sess)
 			return
 		case <-t.Disconnected():
 			c.store.SetConnected(false)
 			c.mu.Lock()
 			c.sess = nil
-			armed := c.reconnectArmed
 			c.mu.Unlock()
-			c.store.SetConnection(state.Connection{Phase: state.ConnectionDisconnected,
-				ReconnectArmed: armed, Since: time.Now()})
+			c.publishConnection(state.ConnectionDisconnected)
 			log.Printf("wattline: device disconnected")
-			if !c.waitForReconnect(stop) {
-				return
-			}
+			reconnect = true
 		}
 	}
 }

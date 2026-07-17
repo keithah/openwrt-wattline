@@ -17,7 +17,9 @@ const (
 	CharTime    = "00002a2b-0000-1000-8000-00805f9b34fb"
 )
 
-// ErrBootloader means the device is in OTA/firmware-update mode; leave it alone.
+// ErrBootloader is retained for source compatibility. Bootloader mode is now a
+// valid Session state and Handshake no longer returns this error.
+// Deprecated: inspect Session.Mode instead.
 var ErrBootloader = errors.New("device is in bootloader (OTA) mode")
 
 // Transport is one live BLE connection. Implemented by tinygoTransport
