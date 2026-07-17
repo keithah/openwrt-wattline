@@ -39,6 +39,9 @@ func (s *Session) Close() error { return s.t.Close() }
 
 // command performs the write-then-read transaction on 0x4302.
 func (s *Session) command(req []byte) (byte, []byte, error) {
+	if len(req) == 0 {
+		return 0, nil, fmt.Errorf("invalid command frame: empty request")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.t.WriteChar(CharCmd, req); err != nil {

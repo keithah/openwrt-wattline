@@ -24,7 +24,8 @@ func (s *Session) USBCLimit(typ int) (int, error) {
 	return proto.ParseTypeCLimit(payload)
 }
 
-// SetUSBCLimit sets a limit type to a level (0..5), or -1 to send "unset".
+// SetUSBCLimit sets a mutable limit type to a level (0..5). Invalid types,
+// runtime writes, and levels outside 0..5 are rejected locally.
 func (s *Session) SetUSBCLimit(typ, level int) error {
 	_, _, err := s.command(proto.TypeCLimitSet(byte(typ), level))
 	return err

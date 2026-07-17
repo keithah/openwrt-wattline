@@ -3,6 +3,7 @@ package ble
 import (
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -11,7 +12,8 @@ import (
 
 // fakeTransport scripts read replies per char and records writes.
 type fakeTransport struct {
-	writes     [][2]string         // (uuid, hex)
+	writes     [][2]string // (uuid, hex)
+	reads      int
 	replies    map[string][][]byte // uuid -> FIFO of read replies
 	subs       map[string]func([]byte)
 	failWrites map[string]error // uuid -> error to return on write
@@ -38,12 +40,26 @@ func (f *fakeTransport) WriteChar(uuid string, data []byte) error {
 	return f.failWrites[uuid]
 }
 func (f *fakeTransport) ReadChar(uuid string) ([]byte, error) {
+	f.reads++
 	q := f.replies[uuid]
 	if len(q) == 0 {
 		return nil, errors.New("no scripted reply for " + uuid)
 	}
 	f.replies[uuid] = q[1:]
 	return q[0], nil
+}
+
+func TestCommandRejectsEmptyFrameWithoutTransportIO(t *testing.T) {
+	f := newFake()
+	s := NewSession(f, state.NewStore())
+
+	_, _, err := s.command(nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid command frame") {
+		t.Fatalf("command(nil) error = %v, want invalid command frame", err)
+	}
+	if len(f.writes) != 0 || f.reads != 0 {
+		t.Fatalf("command(nil) transport calls: writes=%d reads=%d, want zero", len(f.writes), f.reads)
+	}
 }
 func (f *fakeTransport) Subscribe(uuid string, fn func([]byte)) error {
 	f.subs[uuid] = fn
