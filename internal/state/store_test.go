@@ -52,3 +52,15 @@ func TestSubscribe(t *testing.T) {
 		t.Fatal("no snapshot published")
 	}
 }
+
+func TestIdentityMutationDoesNotConsumeTelemetryHistoryMinute(t *testing.T) {
+	s := NewStore()
+	base := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return base }
+	s.SetIdentity(Identity{Model: "BP4SL3V2"})
+	s.SetBattery(proto.Battery{Level: 88, Status: 1})
+	history := s.History()
+	if len(history) != 1 || history[0].Level != 88 {
+		t.Fatalf("history after metadata then telemetry: %+v", history)
+	}
+}

@@ -9,11 +9,15 @@ import (
 )
 
 type Snapshot struct {
-	Battery   *proto.Battery   `json:"battery,omitempty"`
-	DC        *proto.DCPort    `json:"dc,omitempty"`
-	TypeC     *proto.TypeCPort `json:"typec,omitempty"`
-	Connected bool             `json:"connected"`
-	UpdatedAt time.Time        `json:"updated_at"`
+	Battery         *proto.Battery     `json:"battery,omitempty"`
+	DC              *proto.DCPort      `json:"dc,omitempty"`
+	TypeC           *proto.TypeCPort   `json:"typec,omitempty"`
+	Connected       bool               `json:"connected"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+	Device          *Identity          `json:"device,omitempty"`
+	Connection      *Connection        `json:"connection,omitempty"`
+	PendingCommands map[string]Command `json:"pending_commands,omitempty"`
+	RecentCommands  []Command          `json:"recent_commands,omitempty"`
 }
 
 type HistoryPoint struct {
@@ -32,26 +36,50 @@ type Store struct {
 	history []HistoryPoint
 	lastMin time.Time
 	subs    map[chan Snapshot]struct{}
+	waiters map[chan struct{}]struct{}
 	now     func() time.Time // test hook
 }
 
 func NewStore() *Store {
-	return &Store{subs: make(map[chan Snapshot]struct{}), now: time.Now}
+	return &Store{
+		subs:    make(map[chan Snapshot]struct{}),
+		waiters: make(map[chan struct{}]struct{}),
+		now:     time.Now,
+	}
 }
 
 func (s *Store) mutate(f func(*Snapshot)) {
+	s.apply(f, true)
+}
+
+func (s *Store) mutateState(f func(*Snapshot)) {
+	s.apply(f, false)
+}
+
+func (s *Store) apply(f func(*Snapshot), recordHistory bool) {
 	s.mu.Lock()
 	f(&s.snap)
+	s.publishLocked(recordHistory)
+	s.mu.Unlock()
+}
+
+func (s *Store) publishLocked(recordHistory bool) {
 	s.snap.UpdatedAt = s.now()
-	s.record()
-	snap := s.snap
+	if recordHistory {
+		s.record()
+	}
 	for ch := range s.subs {
 		select {
-		case ch <- snap:
+		case ch <- cloneSnapshot(s.snap):
 		default: // slow subscriber: drop
 		}
 	}
-	s.mu.Unlock()
+	for ch := range s.waiters {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (s *Store) record() {
@@ -84,7 +112,44 @@ func (s *Store) SetConnected(v bool)        { s.mutate(func(sn *Snapshot) { sn.C
 func (s *Store) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.snap
+	return cloneSnapshot(s.snap)
+}
+
+func cloneSnapshot(in Snapshot) Snapshot {
+	out := in
+	if in.Battery != nil {
+		battery := *in.Battery
+		out.Battery = &battery
+	}
+	if in.DC != nil {
+		dc := *in.DC
+		out.DC = &dc
+	}
+	if in.TypeC != nil {
+		typeC := *in.TypeC
+		out.TypeC = &typeC
+	}
+	if in.Device != nil {
+		device := cloneIdentity(*in.Device)
+		out.Device = &device
+	}
+	if in.Connection != nil {
+		connection := *in.Connection
+		out.Connection = &connection
+	}
+	if in.PendingCommands != nil {
+		out.PendingCommands = make(map[string]Command, len(in.PendingCommands))
+		for id, command := range in.PendingCommands {
+			out.PendingCommands[id] = cloneCommand(command)
+		}
+	}
+	if in.RecentCommands != nil {
+		out.RecentCommands = make([]Command, len(in.RecentCommands))
+		for i, command := range in.RecentCommands {
+			out.RecentCommands[i] = cloneCommand(command)
+		}
+	}
+	return out
 }
 
 func (s *Store) History() []HistoryPoint {
