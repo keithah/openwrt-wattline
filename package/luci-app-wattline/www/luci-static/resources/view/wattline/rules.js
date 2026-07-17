@@ -18,6 +18,7 @@ return view.extend({
 		cond.value('input_power', _('Input power'));
 		cond.value('battery_level', _('Battery level'));
 		cond.value('port_power', _('Port power'));
+		cond.value('temperature', _('Temperature'));
 		cond.value('schedule', _('Schedule'));
 
 		var st = s.option(form.ListValue, 'state', _('Input'));
@@ -28,6 +29,7 @@ return view.extend({
 		op.value('below', _('below')); op.value('above', _('above'));
 		op.depends('condition', 'battery_level');
 		op.depends('condition', 'port_power');
+		op.depends('condition', 'temperature');
 
 		var pct = s.option(form.Value, 'percent', _('%'));
 		pct.datatype = 'range(0,100)';
@@ -37,6 +39,11 @@ return view.extend({
 		port.value('dc', 'DC'); port.value('usbc', 'USB-C');
 		port.depends('condition', 'port_power');
 		s.option(form.Value, 'watts', _('Watts')).depends('condition', 'port_power');
+
+		var tempc = s.option(form.Value, 'temp_c', _('°C'),
+			_('USB-C port temperature threshold'));
+		tempc.datatype = 'range(0,120)';
+		tempc.depends('condition', 'temperature');
 
 		s.option(form.Value, 'cron', _('Cron')).depends('condition', 'schedule');
 		s.option(form.Value, 'hold', _('Hold'), _('e.g. 10m'));

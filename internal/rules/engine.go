@@ -122,6 +122,14 @@ func conditionTrue(r config.Rule, s state.Snapshot) bool {
 			return w < r.Watts
 		}
 		return w > r.Watts
+	case "temperature":
+		if s.TypeC == nil {
+			return false
+		}
+		if r.Op == "below" {
+			return s.TypeC.TempC < r.TempC
+		}
+		return s.TypeC.TempC > r.TempC
 	}
 	return false
 }
@@ -133,6 +141,15 @@ func rearmTrue(r config.Rule, s state.Snapshot) bool {
 			return int(s.Battery.Level) >= r.Percent+r.HysteresisMargin
 		}
 		return int(s.Battery.Level) <= r.Percent-r.HysteresisMargin
+	}
+	// Temperature re-arms with the same margin (°C) to avoid flapping near
+	// the threshold — e.g. an "above 60" cutoff only re-arms below 60-margin.
+	if r.Condition == "temperature" && s.TypeC != nil {
+		m := float64(r.HysteresisMargin)
+		if r.Op == "below" {
+			return s.TypeC.TempC >= r.TempC+m
+		}
+		return s.TypeC.TempC <= r.TempC-m
 	}
 	return !conditionTrue(r, s)
 }

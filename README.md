@@ -229,7 +229,21 @@ config rule 'no_input_shutdown'
 	list action 'webhook:https://ntfy.sh/CHANGME?msg=input+lost'
 	list action 'shutdown'
 	option confirm_shutdown '1'
+
+# Thermal cutoff: disable USB-C output if the port runs hot for 1 min.
+config rule 'usbc_thermal'
+	option enabled '0'
+	option condition 'temperature'   # USB-C port temperature (°C)
+	option op 'above'
+	option temp_c '60'
+	option hold '1m'
+	list action 'usbc_off'
 ```
+
+Rule conditions: `input_power`, `battery_level`, `port_power`, `temperature`
+(USB-C port °C), and `schedule` (cron). `battery_level` and `temperature`
+re-arm with a hysteresis margin (`option hysteresis_margin`, default 5) to
+avoid flapping near the threshold.
 
 Rules can also be managed live through the API (see below); edits made via
 the API are persisted back to this UCI file, and the running daemon is

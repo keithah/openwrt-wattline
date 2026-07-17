@@ -3,6 +3,19 @@
 All notable changes to openwrt-wattline. Versions are the `.ipk` package
 versions built from `package/Makefile`.
 
+## 1.2.3
+
+- New **temperature** rule condition (USB-C port °C, op below/above) with
+  hysteresis re-arm — e.g. disable USB-C output when the port runs hot.
+  Editable in the LuCI rules UI.
+- **CI/CD** via GitHub Actions: `go vet`/`go test`/package build on every push
+  and PR, and a tag-driven release workflow that publishes the `.ipk`s, the
+  GitHub release, and the `gh-pages` opkg feed.
+- Investigated device-side charge management: the Link-Power exposes no
+  supported "disable charge input" command (the `TYPEC_CONTROL` input selector
+  is rejected), so battery-longevity control remains the existing DC **bypass**
+  (pass-through without cycling the battery) plus its engage-voltage threshold.
+
 ## 1.2.2
 
 - Fix the USB-C **temperature** reading rendering blank in the GL panel (the
