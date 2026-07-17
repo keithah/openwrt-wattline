@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/keithah/openwrt-wattline/internal/actions"
 	"github.com/keithah/openwrt-wattline/internal/ble"
@@ -29,9 +30,17 @@ type Deps struct {
 	Control       func() Control // returns nil when no device is connected
 	DeviceControl *control.Service
 	MagicDNSName  func() string
+	Now           func() time.Time
 }
 
 type server struct{ d Deps }
+
+func (s *server) now() time.Time {
+	if s.d.Now != nil {
+		return s.d.Now()
+	}
+	return time.Now()
+}
 
 func NewServer(d Deps) http.Handler {
 	s := &server{d: d}
@@ -49,6 +58,23 @@ func NewServer(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/v1/device/dc/bypass", s.auth(s.setBypass))
 	mux.HandleFunc("GET /api/v1/device/dc/bypass/threshold", s.auth(s.getThreshold))
 	mux.HandleFunc("PUT /api/v1/device/dc/bypass/threshold", s.auth(s.putThreshold))
+	mux.HandleFunc("GET /api/v1/device/timers", s.auth(s.listTimers))
+	mux.HandleFunc("POST /api/v1/device/timers", s.auth(s.addTimer))
+	mux.HandleFunc("GET /api/v1/device/timers/{id}", s.auth(s.getTimer))
+	mux.HandleFunc("PUT /api/v1/device/timers/{id}", s.auth(s.putTimer))
+	mux.HandleFunc("DELETE /api/v1/device/timers/{id}", s.auth(s.deleteTimer))
+	mux.HandleFunc("GET /api/v1/device/clock", s.auth(s.getClock))
+	mux.HandleFunc("POST /api/v1/device/clock/sync", s.auth(s.syncClock))
+	mux.HandleFunc("POST /api/v1/device/restart", s.auth(s.restart))
+	mux.HandleFunc("POST /api/v1/device/shutdown", s.auth(s.shutdown))
+	mux.HandleFunc("GET /api/v1/device/ota", s.auth(s.otaInfo))
+	mux.HandleFunc("POST /api/v1/device/ota/enter", s.auth(s.enterOTA))
+	mux.HandleFunc("POST /api/v1/device/ota/exit", s.auth(s.exitOTA))
+	mux.HandleFunc("PUT /api/v1/device/advanced/running-mode", s.auth(s.putRunningMode))
+	mux.HandleFunc("GET /api/v1/device/advanced/barrier-free", s.auth(s.getBarrierFree))
+	mux.HandleFunc("PUT /api/v1/device/advanced/barrier-free", s.auth(s.putBarrierFree))
+	mux.HandleFunc("GET /api/v1/device/advanced/usb-fw-version", s.auth(s.getUSBFirmware))
+	mux.HandleFunc("PUT /api/v1/device/advanced/ble-pin", s.auth(s.putBLEPIN))
 	mux.HandleFunc("GET /api/v1/rules", s.auth(s.getRules))
 	mux.HandleFunc("POST /api/v1/rules", s.auth(s.postRule))
 	mux.HandleFunc("PUT /api/v1/rules/{name}", s.auth(s.putRule))

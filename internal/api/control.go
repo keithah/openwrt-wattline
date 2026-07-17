@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
+	controlpkg "github.com/keithah/openwrt-wattline/internal/control"
 	"github.com/keithah/openwrt-wattline/internal/proto"
 )
 
@@ -38,6 +39,14 @@ func (s *server) ctl(w http.ResponseWriter) Control {
 		return nil
 	}
 	return c
+}
+
+func (s *server) controlService(w http.ResponseWriter) *controlpkg.Service {
+	if s.d.DeviceControl == nil {
+		writeAPIError(w, "device_disconnected")
+		return nil
+	}
+	return s.d.DeviceControl
 }
 
 // getUSBCLimit returns every settable limit type as {level, watts}, plus the

@@ -23,10 +23,22 @@ type failingReader struct{ err error }
 func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
 
 type canonicalSession struct {
-	store     *state.Store
-	err       error
-	limits    map[int]int
-	threshold float64
+	store                                      *state.Store
+	err                                        error
+	limits                                     map[int]int
+	threshold                                  float64
+	timers                                     []proto.Timer
+	nextTimer                                  byte
+	clockTime                                  time.Time
+	clockOK                                    bool
+	clockReads                                 int
+	clockSyncReason                            byte
+	barrier                                    bool
+	runningMode                                byte
+	usbFirmware                                []byte
+	blePIN                                     uint32
+	otaInfo                                    proto.OTAInfo
+	restarted, shutdown, enteredOTA, exitedOTA bool
 }
 
 type orderedDCSession struct {
@@ -96,22 +108,80 @@ func (f *canonicalSession) PutBypassThreshold(v float64) (float64, error) {
 	f.threshold = v
 	return v, nil
 }
-func (*canonicalSession) ListTimers() ([]proto.Timer, error)                { return nil, nil }
-func (*canonicalSession) AddTimer(proto.Timer) ([]proto.Timer, byte, error) { return nil, 0, nil }
-func (*canonicalSession) PutTimer(byte, proto.Timer) ([]proto.Timer, error) { return nil, nil }
-func (*canonicalSession) DeleteTimer(byte) ([]proto.Timer, error)           { return nil, nil }
-func (*canonicalSession) BarrierFree() (bool, error)                        { return false, nil }
-func (*canonicalSession) SetBarrierFree(bool) (bool, error)                 { return false, nil }
-func (*canonicalSession) SetRunningMode(byte) error                         { return nil }
-func (*canonicalSession) USBFirmwareVersion() ([]byte, error)               { return nil, nil }
-func (*canonicalSession) SetBLEPIN(uint32) error                            { return nil }
-func (*canonicalSession) ReadClock() (time.Time, bool, error)               { return time.Time{}, false, nil }
-func (*canonicalSession) SyncClock(time.Time, byte) error                   { return nil }
-func (*canonicalSession) OTAInfo() (proto.OTAInfo, error)                   { return proto.OTAInfo{}, nil }
-func (*canonicalSession) EnterOTA(context.Context) error                    { return nil }
-func (*canonicalSession) ExitOTA(context.Context) error                     { return nil }
-func (*canonicalSession) Restart() error                                    { return nil }
-func (*canonicalSession) Shutdown() error                                   { return nil }
+func (f *canonicalSession) ListTimers() ([]proto.Timer, error) {
+	return append([]proto.Timer(nil), f.timers...), f.err
+}
+func (f *canonicalSession) AddTimer(timer proto.Timer) ([]proto.Timer, byte, error) {
+	if f.err != nil {
+		return nil, 0, f.err
+	}
+	timer.ID = f.nextTimer
+	f.nextTimer++
+	f.timers = append(f.timers, timer)
+	return append([]proto.Timer(nil), f.timers...), timer.ID, nil
+}
+func (f *canonicalSession) PutTimer(id byte, timer proto.Timer) ([]proto.Timer, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	for i := range f.timers {
+		if f.timers[i].ID == id {
+			timer.ID = id
+			f.timers[i] = timer
+		}
+	}
+	return append([]proto.Timer(nil), f.timers...), nil
+}
+func (f *canonicalSession) DeleteTimer(id byte) ([]proto.Timer, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := f.timers[:0]
+	for _, timer := range f.timers {
+		if timer.ID != id {
+			out = append(out, timer)
+		}
+	}
+	f.timers = out
+	return append([]proto.Timer(nil), f.timers...), nil
+}
+func (f *canonicalSession) BarrierFree() (bool, error)           { return f.barrier, f.err }
+func (f *canonicalSession) SetBarrierFree(on bool) (bool, error) { f.barrier = on; return on, f.err }
+func (f *canonicalSession) SetRunningMode(mode byte) error       { f.runningMode = mode; return f.err }
+func (f *canonicalSession) USBFirmwareVersion() ([]byte, error)  { return f.usbFirmware, f.err }
+func (f *canonicalSession) SetBLEPIN(pin uint32) error           { f.blePIN = pin; return f.err }
+func (f *canonicalSession) ReadClock() (time.Time, bool, error) {
+	if device := f.store.Snapshot().Device; device != nil && !device.Characteristics["current_time"] {
+		return time.Time{}, false, nil
+	}
+	f.clockReads++
+	return f.clockTime, f.clockOK, f.err
+}
+func (f *canonicalSession) SyncClock(_ time.Time, reason byte) error {
+	f.clockSyncReason = reason
+	return f.err
+}
+func (f *canonicalSession) OTAInfo() (proto.OTAInfo, error) { return f.otaInfo, f.err }
+func (f *canonicalSession) EnterOTA(context.Context) error {
+	f.enteredOTA = true
+	if f.err == nil {
+		device := *f.store.Snapshot().Device
+		device.Mode = "ota"
+		f.store.SetIdentity(device)
+	}
+	return f.err
+}
+func (f *canonicalSession) ExitOTA(context.Context) error {
+	f.exitedOTA = true
+	if f.err == nil {
+		device := *f.store.Snapshot().Device
+		device.Mode = "app"
+		f.store.SetIdentity(device)
+	}
+	return f.err
+}
+func (f *canonicalSession) Restart() error  { f.restarted = true; return f.err }
+func (f *canonicalSession) Shutdown() error { f.shutdown = true; return f.err }
 
 func canonicalServer(t *testing.T, connected, supported, advanced bool, sessionErr error) (http.Handler, *state.Store, *canonicalSession) {
 	t.Helper()
@@ -120,7 +190,7 @@ func canonicalServer(t *testing.T, connected, supported, advanced bool, sessionE
 		features := proto.FeatureSet{}
 		chars := map[string]bool{}
 		if supported {
-			features = proto.FeatureSet{FactoryMode: true, Shutdown: true, DCOutControl: true, USBPort: true,
+			features = proto.FeatureSet{FactoryMode: true, Shutdown: true, DCOutControl: true, DCOutScheduler: true, USBPort: true,
 				USBPowerLimit: true, USBOutputControl: true, DCBypass: true, DCBypassControl: true}
 			chars = map[string]bool{"command": true, "dc": true, "typec": true, "current_time": true, "ota": true, "factory": true}
 		}
@@ -135,7 +205,9 @@ func canonicalServer(t *testing.T, connected, supported, advanced bool, sessionE
 			Since: time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)})
 		d.Store.SetConnected(connected)
 		fake := &canonicalSession{store: d.Store, err: sessionErr,
-			limits: map[int]int{proto.LimitGlobal: 4, proto.LimitInput: 3, proto.LimitOutput: 4, proto.LimitRuntime: -1}, threshold: 20}
+			limits: map[int]int{proto.LimitGlobal: 4, proto.LimitInput: 3, proto.LimitOutput: 4, proto.LimitRuntime: -1}, threshold: 20,
+			nextTimer: 3, clockTime: time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC), clockOK: true,
+			usbFirmware: []byte{1, 4, 9}, otaInfo: proto.OTAInfo{Mode: 1, CID: 773, Revision: 3}}
 		resolve := func() controlpkg.Session {
 			if !connected {
 				return nil
@@ -145,6 +217,7 @@ func canonicalServer(t *testing.T, connected, supported, advanced bool, sessionE
 		fixtureSession = fake
 		d.DeviceControl = controlpkg.NewService(resolve, d.Store, nil, func() bool { return advanced })
 		d.MagicDNSName = func() string { return "wattline.example.ts.net" }
+		d.Now = func() time.Time { return time.Date(2026, 7, 17, 20, 0, 2, 0, time.UTC) }
 	})
 	return h, store, fixtureSession
 }
