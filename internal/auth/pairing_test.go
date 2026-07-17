@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -138,6 +139,9 @@ func TestPairingPerSourceAndGlobalLockoutsRecover(t *testing.T) {
 	if _, _, err := pairing.Exchange("source-a", "000042", "blocked-a"); !errors.Is(err, ErrInvalidOrExpiredPIN) {
 		t.Fatalf("per-source lockout error = %v", err)
 	}
+	if global, source := pairingFailureCounts(pairing, "source-a"); global != 2 || source != 2 {
+		t.Fatalf("per-source-limited attempt changed failures: global=%d source=%d", global, source)
+	}
 	_, _, _ = pairing.Exchange("source-b", "999999", "bad")
 	if _, _, err := pairing.Exchange("source-c", "000042", "blocked-global"); !errors.Is(err, ErrInvalidOrExpiredPIN) {
 		t.Fatalf("global lockout error = %v", err)
@@ -147,6 +151,87 @@ func TestPairingPerSourceAndGlobalLockoutsRecover(t *testing.T) {
 	secret, _, err := pairing.Exchange("source-a", "000042", "recovered")
 	if err != nil || secret == "" {
 		t.Fatalf("exchange after rate window = secret %q, err %v", secret, err)
+	}
+}
+
+func TestPairingInvalidLabelPrecedesPINPolicyAndDoesNotCount(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*Pairing, *time.Time)
+		pin   string
+	}{
+		{name: "correct PIN", pin: "000042"},
+		{name: "wrong PIN", pin: "999999"},
+		{name: "closed mode", pin: "000042", setup: func(pairing *Pairing, _ *time.Time) { pairing.Close() }},
+		{name: "expired PIN", pin: "000042", setup: func(_ *Pairing, now *time.Time) { *now = now.Add(time.Minute) }},
+		{name: "rate limited", pin: "000042", setup: func(pairing *Pairing, _ *time.Time) {
+			_, _, _ = pairing.Exchange("source", "999999", "valid")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+			pairing := NewPairing(pairingTestStore(t, &now), time.Minute, false,
+				withPairingClock(func() time.Time { return now }),
+				withPairingRandom(bytes.NewReader([]byte{0, 0, 42})),
+				withPairingRateLimits(1, 2, time.Minute),
+			)
+			pairing.Open()
+			if test.setup != nil {
+				test.setup(pairing, &now)
+			}
+			beforeGlobal, beforeSource := pairingFailureCounts(pairing, "source")
+
+			_, _, err := pairing.Exchange("source", test.pin, " invalid ")
+			if !errors.Is(err, ErrInvalidLabel) {
+				t.Fatalf("Exchange() error = %v, want ErrInvalidLabel", err)
+			}
+			afterGlobal, afterSource := pairingFailureCounts(pairing, "source")
+			if afterGlobal != beforeGlobal || afterSource != beforeSource {
+				t.Fatalf("invalid label changed failures: global %d -> %d, source %d -> %d",
+					beforeGlobal, afterGlobal, beforeSource, afterSource)
+			}
+		})
+	}
+}
+
+func TestPairingLimitedAttemptsDoNotGrowCountersOrSources(t *testing.T) {
+	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	pairing := NewPairing(pairingTestStore(t, &now), 10*time.Minute, false,
+		withPairingClock(func() time.Time { return now }),
+		withPairingRandom(bytes.NewReader([]byte{0, 0, 42})),
+		withPairingRateLimits(2, 3, time.Minute),
+	)
+	pairing.Open()
+	for i := 0; i < 3; i++ {
+		_, _, _ = pairing.Exchange(fmt.Sprintf("initial-%d", i), "999999", "valid")
+	}
+	for i := 0; i < 100; i++ {
+		_, _, err := pairing.Exchange(fmt.Sprintf("rotating-%d", i), "999999", "valid")
+		if !errors.Is(err, ErrInvalidOrExpiredPIN) {
+			t.Fatalf("limited rotating source %d error = %v", i, err)
+		}
+	}
+
+	pairing.mu.Lock()
+	globalCount, sourceCount := pairing.global.count, len(pairing.sources)
+	pairing.mu.Unlock()
+	if globalCount != 3 {
+		t.Fatalf("global count = %d, want bounded at limit 3", globalCount)
+	}
+	if sourceCount > 3 {
+		t.Fatalf("source map size = %d, want at most global limit 3", sourceCount)
+	}
+
+	now = now.Add(time.Minute)
+	secret, _, err := pairing.Exchange("recovered", "000042", "valid")
+	if err != nil || secret == "" {
+		t.Fatalf("exchange after rate window = secret %q, err %v", secret, err)
+	}
+	pairing.mu.Lock()
+	defer pairing.mu.Unlock()
+	if pairing.global.count != 0 || len(pairing.sources) != 0 {
+		t.Fatalf("expired counters retained after recovery: global=%d sources=%d", pairing.global.count, len(pairing.sources))
 	}
 }
 
@@ -189,4 +274,10 @@ func pairingTestStore(t *testing.T, now *time.Time) *Store {
 		t.Fatal(err)
 	}
 	return store
+}
+
+func pairingFailureCounts(pairing *Pairing, source string) (global, perSource int) {
+	pairing.mu.Lock()
+	defer pairing.mu.Unlock()
+	return pairing.global.count, pairing.sources[source].count
 }

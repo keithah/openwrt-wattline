@@ -133,12 +133,18 @@ func (p *Pairing) Close() {
 }
 
 func (p *Pairing) Exchange(source, pin, label string) (secret string, meta TokenMeta, err error) {
+	if err := validateLabel(label); err != nil {
+		return "", TokenMeta{}, err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	now := p.observeNowLocked()
 	p.refreshLocked(now)
-	if p.rateLimitedLocked(source, now) || !p.open || subtle.ConstantTimeCompare([]byte(pin), []byte(p.pin)) != 1 {
+	if p.rateLimitedLocked(source, now) {
+		return "", TokenMeta{}, ErrInvalidOrExpiredPIN
+	}
+	if !p.open || subtle.ConstantTimeCompare([]byte(pin), []byte(p.pin)) != 1 {
 		p.recordFailureLocked(source, now)
 		return "", TokenMeta{}, ErrInvalidOrExpiredPIN
 	}
@@ -204,23 +210,30 @@ func (p *Pairing) statusLocked(admin bool) PairingStatus {
 
 func (p *Pairing) rateLimitedLocked(source string, now time.Time) bool {
 	p.expireFailureWindowsLocked(now)
+	p.expireSourceWindowLocked(source, now)
 	return p.global.count >= p.globalLimit || p.sources[source].count >= p.sourceLimit
 }
 
 func (p *Pairing) recordFailureLocked(source string, now time.Time) {
 	p.expireFailureWindowsLocked(now)
+	p.expireSourceWindowLocked(source, now)
 	p.global = incrementFailureWindow(p.global, now)
+	if _, exists := p.sources[source]; !exists && len(p.sources) >= p.globalLimit {
+		return
+	}
 	p.sources[source] = incrementFailureWindow(p.sources[source], now)
 }
 
 func (p *Pairing) expireFailureWindowsLocked(now time.Time) {
 	if windowExpired(p.global, now, p.rateWindow) {
 		p.global = pairingFailureWindow{}
+		p.sources = make(map[string]pairingFailureWindow)
 	}
-	for source, failures := range p.sources {
-		if windowExpired(failures, now, p.rateWindow) {
-			delete(p.sources, source)
-		}
+}
+
+func (p *Pairing) expireSourceWindowLocked(source string, now time.Time) {
+	if windowExpired(p.sources[source], now, p.rateWindow) {
+		delete(p.sources, source)
 	}
 }
 
