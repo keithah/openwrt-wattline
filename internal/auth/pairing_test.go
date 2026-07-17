@@ -230,8 +230,67 @@ func TestPairingLimitedAttemptsDoNotGrowCountersOrSources(t *testing.T) {
 	}
 	pairing.mu.Lock()
 	defer pairing.mu.Unlock()
-	if pairing.global.count != 0 || len(pairing.sources) != 0 {
-		t.Fatalf("expired counters retained after recovery: global=%d sources=%d", pairing.global.count, len(pairing.sources))
+	if pairing.global.count != 0 || len(pairing.sources) > pairing.globalLimit {
+		t.Fatalf("recovery state is not bounded: global=%d sources=%d", pairing.global.count, len(pairing.sources))
+	}
+}
+
+func TestPairingGlobalExpiryPreservesLaterSourceLockout(t *testing.T) {
+	start := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	now := start
+	pairing := NewPairing(pairingTestStore(t, &now), 10*time.Minute, false,
+		withPairingClock(func() time.Time { return now }),
+		withPairingRandom(bytes.NewReader([]byte{0, 0, 42})),
+		withPairingRateLimits(2, 10, time.Minute),
+	)
+	pairing.Open()
+	_, _, _ = pairing.Exchange("source-a", "999999", "valid")
+
+	now = start.Add(59 * time.Second)
+	for range 2 {
+		_, _, _ = pairing.Exchange("source-b", "999999", "valid")
+	}
+	now = start.Add(time.Minute)
+	if _, _, err := pairing.Exchange("source-b", "000042", "blocked"); !errors.Is(err, ErrInvalidOrExpiredPIN) {
+		t.Fatalf("source B after global reset error = %v, want still locked", err)
+	}
+	if global, source := pairingFailureCounts(pairing, "source-b"); global != 0 || source != 2 {
+		t.Fatalf("staggered counts after global reset: global=%d source-b=%d", global, source)
+	}
+
+	now = start.Add(119 * time.Second)
+	secret, _, err := pairing.Exchange("source-b", "000042", "recovered")
+	if err != nil || secret == "" {
+		t.Fatalf("source B after its own window = secret %q, err %v", secret, err)
+	}
+}
+
+func TestPairingCapacityEvictsOnlyExpiredSources(t *testing.T) {
+	start := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	now := start
+	pairing := NewPairing(pairingTestStore(t, &now), 10*time.Minute, false,
+		withPairingClock(func() time.Time { return now }),
+		withPairingRandom(bytes.NewReader([]byte{0, 0, 42})),
+		withPairingRateLimits(2, 3, time.Minute),
+	)
+	pairing.Open()
+	_, _, _ = pairing.Exchange("expired-a", "999999", "valid")
+	now = start.Add(59 * time.Second)
+	_, _, _ = pairing.Exchange("live-b", "999999", "valid")
+	_, _, _ = pairing.Exchange("live-c", "999999", "valid")
+
+	now = start.Add(time.Minute)
+	_, _, _ = pairing.Exchange("new-d", "999999", "valid")
+	pairing.mu.Lock()
+	_, hasExpired := pairing.sources["expired-a"]
+	_, hasB := pairing.sources["live-b"]
+	_, hasC := pairing.sources["live-c"]
+	_, hasD := pairing.sources["new-d"]
+	sourceCount := len(pairing.sources)
+	pairing.mu.Unlock()
+	if hasExpired || !hasB || !hasC || !hasD || sourceCount != 3 {
+		t.Fatalf("capacity eviction: expired=%v live-b=%v live-c=%v new-d=%v count=%d",
+			hasExpired, hasB, hasC, hasD, sourceCount)
 	}
 }
 

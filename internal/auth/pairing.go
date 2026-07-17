@@ -219,7 +219,10 @@ func (p *Pairing) recordFailureLocked(source string, now time.Time) {
 	p.expireSourceWindowLocked(source, now)
 	p.global = incrementFailureWindow(p.global, now)
 	if _, exists := p.sources[source]; !exists && len(p.sources) >= p.globalLimit {
-		return
+		p.evictExpiredSourcesLocked(now)
+		if len(p.sources) >= p.globalLimit {
+			return
+		}
 	}
 	p.sources[source] = incrementFailureWindow(p.sources[source], now)
 }
@@ -227,13 +230,20 @@ func (p *Pairing) recordFailureLocked(source string, now time.Time) {
 func (p *Pairing) expireFailureWindowsLocked(now time.Time) {
 	if windowExpired(p.global, now, p.rateWindow) {
 		p.global = pairingFailureWindow{}
-		p.sources = make(map[string]pairingFailureWindow)
 	}
 }
 
 func (p *Pairing) expireSourceWindowLocked(source string, now time.Time) {
 	if windowExpired(p.sources[source], now, p.rateWindow) {
 		delete(p.sources, source)
+	}
+}
+
+func (p *Pairing) evictExpiredSourcesLocked(now time.Time) {
+	for source, failures := range p.sources {
+		if windowExpired(failures, now, p.rateWindow) {
+			delete(p.sources, source)
+		}
 	}
 }
 
