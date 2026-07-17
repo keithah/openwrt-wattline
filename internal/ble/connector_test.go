@@ -572,6 +572,62 @@ func TestConnectorStopDuringDialClosesReturnedTransport(t *testing.T) {
 	}
 }
 
+func TestConnectorInitiallyStoppedNeverInvokesDialer(t *testing.T) {
+	var dials int32
+	c := NewConnector(func() (Transport, error) {
+		atomic.AddInt32(&dials, 1)
+		return nil, errors.New("dial must not run")
+	}, state.NewStore(), nil)
+	stop := make(chan struct{})
+	close(stop)
+	done := make(chan struct{})
+	go func() { c.Run(stop); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("initially stopped connector did not return")
+	}
+	if got := atomic.LoadInt32(&dials); got != 0 {
+		t.Fatalf("initially stopped connector invoked dialer %d times", got)
+	}
+}
+
+func TestConnectorStopReadyWithReconnectTimerNeverInvokesDialer(t *testing.T) {
+	// Exercise the select boundary repeatedly: once stop and the reconnect
+	// timer are both ready, the mandatory pre-dial stop check must win even if
+	// waitForDial observed the timer case.
+	for attempt := 0; attempt < 100; attempt++ {
+		var dials int32
+		first := newFake()
+		scriptedHandshake(first)
+		c := NewConnector(func() (Transport, error) {
+			if atomic.AddInt32(&dials, 1) == 1 {
+				return first, nil
+			}
+			return nil, errors.New("dial after stop")
+		}, state.NewStore(), nil)
+		c.settle = 0
+		timers := controlledConnectorTimer(c)
+		stop, done := make(chan struct{}), make(chan struct{})
+		go func() { c.Run(stop); close(done) }()
+		waitForConnector(t, "initial connection", func() bool { return c.Session() != nil })
+		if err := first.Close(); err != nil {
+			t.Fatal(err)
+		}
+		timer := <-timers
+		close(stop)
+		timer.fire <- time.Now()
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatalf("attempt %d did not stop", attempt)
+		}
+		if got := atomic.LoadInt32(&dials); got != 1 {
+			t.Fatalf("attempt %d invoked dialer after stop: %d total dials", attempt, got)
+		}
+	}
+}
+
 func TestConnectorStopDuringHandshakeClosesFreshTransport(t *testing.T) {
 	bt := newBlockingHandshakeTransport()
 	store := state.NewStore()
@@ -596,5 +652,18 @@ func TestConnectorStopDuringHandshakeClosesFreshTransport(t *testing.T) {
 	if c.Session() != nil || store.Snapshot().Connected {
 		t.Fatalf("stop-during-handshake leaked live state: session=%v connected=%v",
 			c.Session(), store.Snapshot().Connected)
+	}
+	for _, uuid := range []string{CharBattery, CharDC, CharTypeC} {
+		if bt.subCalls[uuid] != 0 {
+			t.Fatalf("stop-during-handshake subscribed to %s", uuid)
+		}
+	}
+	if bt.writeCalls[CharTime] != 0 {
+		t.Fatal("stop-during-handshake wrote Current Time")
+	}
+	snap := store.Snapshot()
+	if snap.Battery != nil || snap.DC != nil || snap.TypeC != nil || snap.Device != nil ||
+		snap.Connection == nil || snap.Connection.Phase != state.ConnectionDisconnected {
+		t.Fatalf("stop-during-handshake published state: %+v", snap)
 	}
 }

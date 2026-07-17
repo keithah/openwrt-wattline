@@ -1,6 +1,7 @@
 package ble
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -26,19 +27,39 @@ type Identity struct {
 }
 
 type Session struct {
-	t      Transport
-	store  *state.Store
-	mu     sync.Mutex // serializes command transactions (API.md §3: one in flight)
-	settle time.Duration
-	mode   string
+	t         Transport
+	store     *state.Store
+	mu        sync.Mutex // serializes command transactions (API.md §3: one in flight)
+	contextMu sync.Mutex
+	cancel    context.CancelFunc
+	settle    time.Duration
+	mode      string
 }
 
 func NewSession(t Transport, store *state.Store) *Session {
 	return &Session{t: t, store: store, settle: 2 * time.Second}
 }
 
-// Close drops the underlying BLE connection.
-func (s *Session) Close() error { return s.t.Close() }
+func (s *Session) setCancel(cancel context.CancelFunc) {
+	s.contextMu.Lock()
+	s.cancel = cancel
+	s.contextMu.Unlock()
+}
+
+func (s *Session) cancelContext() {
+	s.contextMu.Lock()
+	cancel := s.cancel
+	s.contextMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// Close cancels session work, then drops the underlying BLE connection.
+func (s *Session) Close() error {
+	s.cancelContext()
+	return s.t.Close()
+}
 
 // HasChar reports whether uuid was present in the discovery inventory.
 func (s *Session) HasChar(uuid string) bool { return s.t.HasChar(strings.ToLower(uuid)) }
@@ -48,41 +69,111 @@ func (s *Session) Mode() string { return s.mode }
 
 // command performs the write-then-read transaction on 0x4302.
 func (s *Session) command(req []byte) (byte, []byte, error) {
+	return s.commandContext(context.Background(), req)
+}
+
+func (s *Session) commandContext(ctx context.Context, req []byte) (byte, []byte, error) {
 	if len(req) == 0 {
 		return 0, nil, fmt.Errorf("invalid command frame: empty request")
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, nil, err
+	}
 	if err := s.t.WriteChar(CharCmd, req); err != nil {
+		return 0, nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return 0, nil, err
 	}
 	reply, err := s.t.ReadChar(CharCmd)
 	if err != nil {
 		return 0, nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, nil, err
+	}
 	return proto.ValidateReply(req, reply)
 }
 
 func (s *Session) readString(uuid string) string {
+	value, _ := s.readStringContext(context.Background(), uuid)
+	return value
+}
+
+func (s *Session) readStringContext(ctx context.Context, uuid string) (string, error) {
 	if !s.HasChar(uuid) {
-		return ""
+		return "", ctx.Err()
+	}
+	b, err := s.readCharContext(ctx, uuid)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", nil
+	}
+	return strings.TrimRight(string(b), "\x00"), nil
+}
+
+func (s *Session) writeCharContext(ctx context.Context, uuid string, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.t.WriteChar(uuid, data); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+func (s *Session) readCharContext(ctx context.Context, uuid string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	b, err := s.t.ReadChar(uuid)
 	if err != nil {
-		return ""
+		return nil, err
 	}
-	return strings.TrimRight(string(b), "\x00")
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func waitContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ctx.Err()
+	}
 }
 
 // Handshake mirrors the PWA connect sequence (API.md §8).
 func (s *Session) Handshake() (Identity, error) {
-	time.Sleep(s.settle) // firmware settle time; PWA waits ~2s
-	var id Identity
+	return s.HandshakeContext(context.Background())
+}
 
-	if err := s.t.WriteChar(CharOTA, proto.OTAInfoQuery()); err != nil {
+// HandshakeContext performs the handshake while preventing any subsequent
+// GATT operation or state application once ctx is canceled.
+func (s *Session) HandshakeContext(ctx context.Context) (Identity, error) {
+	var id Identity
+	if err := waitContext(ctx, s.settle); err != nil {
+		return id, err
+	}
+
+	if err := s.writeCharContext(ctx, CharOTA, proto.OTAInfoQuery()); err != nil {
 		return id, fmt.Errorf("ota info write: %w", err)
 	}
-	info, err := s.t.ReadChar(CharOTA)
+	info, err := s.readCharContext(ctx, CharOTA)
 	if err != nil {
 		return id, fmt.Errorf("ota info read: %w", err)
 	}
@@ -99,24 +190,39 @@ func (s *Session) Handshake() (Identity, error) {
 	id.Mode = s.mode
 	id.CID = ota.CID
 
-	id.Model = s.readString(CharModel)
-	id.HWRev = s.readString(CharHWRev)
-	id.BootloaderFirmware = s.readString(CharFWRev)
-	id.Firmware = s.readString(CharSWRev)
+	if id.Model, err = s.readStringContext(ctx, CharModel); err != nil {
+		return id, err
+	}
+	if id.HWRev, err = s.readStringContext(ctx, CharHWRev); err != nil {
+		return id, err
+	}
+	if id.BootloaderFirmware, err = s.readStringContext(ctx, CharFWRev); err != nil {
+		return id, err
+	}
+	if id.Firmware, err = s.readStringContext(ctx, CharSWRev); err != nil {
+		return id, err
+	}
 	if s.mode == "ota" {
+		if err := ctx.Err(); err != nil {
+			return id, err
+		}
 		return id, nil
 	}
 
 	if s.HasChar(CharCmd) {
-		if _, payload, err := s.command(proto.DeviceIDQuery()); err == nil {
+		if _, payload, err := s.commandContext(ctx, proto.DeviceIDQuery()); err == nil {
 			if mac, err := proto.ParseDeviceID(payload); err == nil {
 				id.MAC = mac
 			}
+		} else if ctx.Err() != nil {
+			return id, ctx.Err()
 		}
-		if _, payload, err := s.command(proto.FeaturesQuery()); err == nil {
+		if _, payload, err := s.commandContext(ctx, proto.FeaturesQuery()); err == nil {
 			if f, err := proto.ParseFeatures(payload); err == nil {
 				id.Features = f
 			}
+		} else if ctx.Err() != nil {
+			return id, ctx.Err()
 		}
 	}
 
@@ -144,18 +250,43 @@ func (s *Session) Handshake() (Identity, error) {
 		if !s.HasChar(sub.uuid) {
 			continue
 		}
-		if err := s.t.Subscribe(sub.uuid, sub.apply); err != nil {
+		if err := ctx.Err(); err != nil {
+			return id, err
+		}
+		apply := func(b []byte) {
+			if ctx.Err() == nil {
+				sub.apply(b)
+			}
+		}
+		if err := s.t.Subscribe(sub.uuid, apply); err != nil {
 			return id, fmt.Errorf("subscribe %s: %w", sub.uuid, err)
 		}
-		if b, err := s.t.ReadChar(sub.uuid); err == nil {
-			sub.apply(b)
+		if err := ctx.Err(); err != nil {
+			return id, err
+		}
+		if b, err := s.readCharContext(ctx, sub.uuid); err == nil {
+			if err := ctx.Err(); err != nil {
+				return id, err
+			}
+			apply(b)
+		} else if ctx.Err() != nil {
+			return id, ctx.Err()
 		}
 	}
 
 	if s.HasChar(CharTime) {
-		if err := s.t.WriteChar(CharTime, proto.CurrentTimeAt(time.Now(), 1)); err != nil {
+		if err := ctx.Err(); err != nil {
+			return id, err
+		}
+		if err := s.writeCharContext(ctx, CharTime, proto.CurrentTimeAt(time.Now(), 1)); err != nil {
+			if ctx.Err() != nil {
+				return id, ctx.Err()
+			}
 			log.Printf("wattline: time sync failed (non-fatal): %v", err)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return id, err
 	}
 	return id, nil
 }

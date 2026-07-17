@@ -1,6 +1,7 @@
 package ble
 
 import (
+	"context"
 	"log"
 	"sync"
 	"time"
@@ -263,15 +264,18 @@ type handshakeResult struct {
 // the transport aborts a blocked operation; joining done ensures no handshake
 // goroutine or watcher outlives the connection attempt.
 func (c *Connector) handshake(sess *Session, stop <-chan struct{}) (Identity, error, bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sess.setCancel(cancel)
 	done := make(chan handshakeResult, 1)
 	go func() {
-		id, err := sess.Handshake()
+		id, err := sess.HandshakeContext(ctx)
 		done <- handshakeResult{id: id, err: err}
 	}()
 	select {
 	case result := <-done:
 		return result.id, result.err, false
 	case <-stop:
+		cancel()
 		sess.Close()
 		result := <-done
 		return result.id, result.err, true
@@ -299,6 +303,12 @@ func (c *Connector) Run(stop <-chan struct{}) {
 		if !c.policyCurrent(policy) {
 			reconnect = true
 			continue
+		}
+		// stop may become ready after waitForDial selected a simultaneous timer.
+		// Check at the final boundary so a stopped connector never enters dial.
+		if stopped(stop) {
+			c.closeSession(c.Session())
+			return
 		}
 		t, err := c.dial()
 		if stopped(stop) {
@@ -346,7 +356,7 @@ func (c *Connector) Run(stop <-chan struct{}) {
 		if err != nil {
 			// Close, or the device stays occupied (it stops advertising while
 			// connected) and every retry — and any pairing scan — finds nothing.
-			t.Close()
+			sess.Close()
 			c.fails++
 			if logFailure(c.fails) {
 				log.Printf("wattline: handshake failed: %v", err)
@@ -381,6 +391,7 @@ func (c *Connector) Run(stop <-chan struct{}) {
 			c.closeSession(sess)
 			return
 		case <-t.Disconnected():
+			sess.cancelContext()
 			c.store.SetConnected(false)
 			c.mu.Lock()
 			c.sess = nil

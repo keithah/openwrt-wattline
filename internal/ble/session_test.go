@@ -1,6 +1,7 @@
 package ble
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -199,6 +200,44 @@ func TestHandshakeSkipsMissingCharacteristics(t *testing.T) {
 		if f.readCalls[uuid] != 0 || f.writeCalls[uuid] != 0 || f.subCalls[uuid] != 0 {
 			t.Fatalf("missing characteristic %s was touched", uuid)
 		}
+	}
+}
+
+type cancelAfterOTAReadTransport struct {
+	*fakeTransport
+	cancel context.CancelFunc
+}
+
+func (t *cancelAfterOTAReadTransport) ReadChar(uuid string) ([]byte, error) {
+	b, err := t.fakeTransport.ReadChar(uuid)
+	if uuid == CharOTA {
+		t.cancel()
+	}
+	return b, err
+}
+
+func TestHandshakeContextCancellationAfterReadStopsSubsequentIO(t *testing.T) {
+	f := newFake()
+	scriptedHandshake(f)
+	ctx, cancel := context.WithCancel(context.Background())
+	tr := &cancelAfterOTAReadTransport{fakeTransport: f, cancel: cancel}
+	store := state.NewStore()
+	s := NewSession(tr, store)
+	s.settle = 0
+	_, err := s.HandshakeContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("HandshakeContext error = %v, want context.Canceled", err)
+	}
+	for _, uuid := range []string{CharModel, CharHWRev, CharFWRev, CharSWRev, CharCmd,
+		CharBattery, CharDC, CharTypeC, CharTime} {
+		if f.readCalls[uuid] != 0 || f.writeCalls[uuid] != 0 || f.subCalls[uuid] != 0 {
+			t.Fatalf("canceled handshake touched %s: reads=%d writes=%d subs=%d",
+				uuid, f.readCalls[uuid], f.writeCalls[uuid], f.subCalls[uuid])
+		}
+	}
+	snap := store.Snapshot()
+	if snap.Battery != nil || snap.DC != nil || snap.TypeC != nil {
+		t.Fatalf("canceled handshake applied telemetry: %+v", snap)
 	}
 }
 
