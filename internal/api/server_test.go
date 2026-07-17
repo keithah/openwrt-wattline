@@ -77,6 +77,28 @@ func TestAuth(t *testing.T) {
 	}
 }
 
+func TestCanonicalErrorCompatibilityRoutes(t *testing.T) {
+	h, _, _ := testServer(t)
+	tests := []struct {
+		name, method, path, body string
+		status                   int
+		want                     string
+	}{
+		{"invalid action", "POST", "/api/v1/device/action", `{"action":"bogus"}`, 400, `{"error":{"code":"invalid_request","message":"Request is invalid","details":{}}}`},
+		{"missing rule", "DELETE", "/api/v1/rules/missing", "", 404, `{"error":{"code":"not_found","message":"Resource was not found","details":{}}}`},
+		{"disconnected alias", "GET", "/api/v1/device/usbc-limit", "", 503, `{"error":{"code":"device_disconnected","message":"Link-Power is not connected","details":{}}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := do(t, h, tt.method, tt.path, "tok", tt.body)
+			if rr.Code != tt.status {
+				t.Fatalf("status %d, want %d: %s", rr.Code, tt.status, rr.Body.String())
+			}
+			exactBody(t, rr, tt.want)
+		})
+	}
+}
+
 func TestCORS(t *testing.T) {
 	h, _, _ := testServer(t)
 	// Preflight OPTIONS must be answered (mux only registers GET/POST/etc)

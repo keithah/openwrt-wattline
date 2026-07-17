@@ -11,21 +11,24 @@ import (
 	"github.com/keithah/openwrt-wattline/internal/actions"
 	"github.com/keithah/openwrt-wattline/internal/ble"
 	"github.com/keithah/openwrt-wattline/internal/config"
+	"github.com/keithah/openwrt-wattline/internal/control"
 	"github.com/keithah/openwrt-wattline/internal/rules"
 	"github.com/keithah/openwrt-wattline/internal/state"
 )
 
 type Deps struct {
-	Store     *state.Store
-	Engine    *rules.Engine
-	Exec      *actions.Executor
-	Token     string
-	Identity  func() ble.Identity
-	Connected func() bool
-	SaveRules func([]config.Rule) error
-	LoadRules func() []config.Rule
-	Pairing   *ble.Pairing   // nil when the platform has no pairing support
-	Control   func() Control // returns nil when no device is connected
+	Store         *state.Store
+	Engine        *rules.Engine
+	Exec          *actions.Executor
+	Token         string
+	Identity      func() ble.Identity
+	Connected     func() bool
+	SaveRules     func([]config.Rule) error
+	LoadRules     func() []config.Rule
+	Pairing       *ble.Pairing   // nil when the platform has no pairing support
+	Control       func() Control // returns nil when no device is connected
+	DeviceControl *control.Service
+	MagicDNSName  func() string
 }
 
 type server struct{ d Deps }
@@ -37,6 +40,15 @@ func NewServer(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/v1/telemetry", s.auth(s.telemetry))
 	mux.HandleFunc("GET /api/v1/history", s.auth(s.history))
 	mux.HandleFunc("GET /api/v1/events", s.auth(s.events))
+	mux.HandleFunc("GET /api/v1/device", s.auth(s.device))
+	mux.HandleFunc("POST /api/v1/device/dc", s.auth(s.setDC))
+	mux.HandleFunc("POST /api/v1/device/usbc/output", s.auth(s.setTypeCOutput))
+	mux.HandleFunc("GET /api/v1/device/usbc/limit/{type}", s.auth(s.getLimit))
+	mux.HandleFunc("PUT /api/v1/device/usbc/limit/{type}", s.auth(s.putLimit))
+	mux.HandleFunc("DELETE /api/v1/device/usbc/limit/{type}", s.auth(s.deleteLimit))
+	mux.HandleFunc("POST /api/v1/device/dc/bypass", s.auth(s.setBypass))
+	mux.HandleFunc("GET /api/v1/device/dc/bypass/threshold", s.auth(s.getThreshold))
+	mux.HandleFunc("PUT /api/v1/device/dc/bypass/threshold", s.auth(s.putThreshold))
 	mux.HandleFunc("GET /api/v1/rules", s.auth(s.getRules))
 	mux.HandleFunc("POST /api/v1/rules", s.auth(s.postRule))
 	mux.HandleFunc("PUT /api/v1/rules/{name}", s.auth(s.putRule))
@@ -77,12 +89,12 @@ func cors(next http.Handler) http.Handler {
 func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.d.Token == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeAPIError(w, "unauthorized")
 			return
 		}
 		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.d.Token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeAPIError(w, "unauthorized")
 			return
 		}
 		next(w, r)
@@ -104,7 +116,7 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) telemetry(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, s.d.Store.Snapshot())
+	writeJSON(w, 200, snapshotResponse(s.d.Store.Snapshot()))
 }
 
 func (s *server) history(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +144,7 @@ func (s *server) upsert(w http.ResponseWriter, rule config.Rule, name string) {
 		rule.HysteresisMargin = 5
 	}
 	if err := s.validate(rule); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	rulesList := s.d.LoadRules()
@@ -147,7 +159,7 @@ func (s *server) upsert(w http.ResponseWriter, rule config.Rule, name string) {
 		rulesList = append(rulesList, rule)
 	}
 	if err := s.d.SaveRules(rulesList); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, "internal_error")
 		return
 	}
 	writeJSON(w, 200, rule)
@@ -155,8 +167,8 @@ func (s *server) upsert(w http.ResponseWriter, rule config.Rule, name string) {
 
 func (s *server) postRule(w http.ResponseWriter, r *http.Request) {
 	var rule config.Rule
-	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := decodeJSON(r, &rule); err != nil {
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	s.upsert(w, rule, "")
@@ -164,8 +176,8 @@ func (s *server) postRule(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) putRule(w http.ResponseWriter, r *http.Request) {
 	var rule config.Rule
-	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := decodeJSON(r, &rule); err != nil {
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	s.upsert(w, rule, r.PathValue("name"))
@@ -184,11 +196,11 @@ func (s *server) deleteRule(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !found {
-		http.Error(w, "no such rule", http.StatusNotFound)
+		writeAPIError(w, "not_found")
 		return
 	}
 	if err := s.d.SaveRules(out); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, "internal_error")
 		return
 	}
 	writeJSON(w, 200, map[string]string{"deleted": name})
@@ -198,18 +210,18 @@ func (s *server) deviceAction(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Action string `json:"action"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := decodeJSON(r, &body); err != nil {
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	if err := actions.ValidateAction(body.Action); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	snap := s.d.Store.Snapshot()
 	errs := s.d.Exec.Execute([]string{body.Action}, snap, "manual", snap.UpdatedAt)
 	if len(errs) > 0 {
-		writeJSON(w, 502, map[string]string{"error": fmt.Sprint(errs[0])})
+		writeAPIError(w, "ble_operation_failed")
 		return
 	}
 	writeJSON(w, 200, map[string]string{"ok": body.Action})
@@ -218,7 +230,7 @@ func (s *server) deviceAction(w http.ResponseWriter, r *http.Request) {
 func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		writeAPIError(w, "internal_error")
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -234,14 +246,14 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	ch, cancel := s.d.Store.Subscribe()
 	defer cancel()
 
-	send(s.d.Store.Snapshot()) // initial frame, flushed before blocking on subscription
+	send(snapshotResponse(s.d.Store.Snapshot())) // initial frame, flushed before blocking on subscription
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case snap := <-ch:
-			send(snap)
+			send(snapshotResponse(snap))
 		}
 	}
 }

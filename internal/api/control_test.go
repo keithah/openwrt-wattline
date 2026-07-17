@@ -139,3 +139,34 @@ func TestControlUnavailable503(t *testing.T) {
 		}
 	}
 }
+
+func TestLimitCompatibilityAliasesUseControlService(t *testing.T) {
+	h, _, _ := canonicalServer(t, true, true, true, nil)
+	if w := do(t, h, "GET", "/api/v1/device/usbc-limit", "tok", ""); w.Code != 200 {
+		t.Fatalf("GET alias: %d %s", w.Code, w.Body.String())
+	}
+	w := do(t, h, "POST", "/api/v1/device/usbc-limit", "tok", `{"type":"output","watts":140}`)
+	if w.Code != 200 {
+		t.Fatalf("PUT alias: %d %s", w.Code, w.Body.String())
+	}
+	var got map[string]int
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["level"] != 5 || got["watts"] != 140 {
+		t.Fatalf("alias response: %+v", got)
+	}
+	if w = do(t, h, "POST", "/api/v1/device/usbc-limit", "tok", `{"type":"output","clear":true}`); w.Code != 200 {
+		t.Fatalf("DELETE alias: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBypassCompatibilityAliasUsesControlService(t *testing.T) {
+	h, _, _ := canonicalServer(t, true, true, true, nil)
+	if w := do(t, h, "GET", "/api/v1/device/bypass-threshold", "tok", ""); w.Code != 200 {
+		t.Fatalf("GET alias: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, "POST", "/api/v1/device/bypass-threshold", "tok", `{"volts":19.6}`); w.Code != 200 {
+		t.Fatalf("POST alias: %d %s", w.Code, w.Body.String())
+	}
+}

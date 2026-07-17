@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -30,12 +29,12 @@ var limitTypes = map[string]int{
 // ctl resolves the live device or writes 503 and returns nil.
 func (s *server) ctl(w http.ResponseWriter) Control {
 	if s.d.Control == nil {
-		http.Error(w, "device control unavailable on this platform", http.StatusServiceUnavailable)
+		writeAPIError(w, "device_disconnected")
 		return nil
 	}
 	c := s.d.Control()
 	if c == nil {
-		http.Error(w, "device not connected", http.StatusServiceUnavailable)
+		writeAPIError(w, "device_disconnected")
 		return nil
 	}
 	return c
@@ -44,6 +43,19 @@ func (s *server) ctl(w http.ResponseWriter) Control {
 // getUSBCLimit returns every settable limit type as {level, watts}, plus the
 // read-only runtime limit.
 func (s *server) getUSBCLimit(w http.ResponseWriter, r *http.Request) {
+	if s.d.DeviceControl != nil {
+		out := map[string]any{}
+		for name, typ := range canonicalLimitTypes {
+			level, err := s.d.DeviceControl.GetUSBCLimit(r.Context(), typ)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			out[name] = map[string]int{"level": level, "watts": proto.LevelToWatts(level)}
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
 	c := s.ctl(w)
 	if c == nil {
 		return
@@ -53,7 +65,7 @@ func (s *server) getUSBCLimit(w http.ResponseWriter, r *http.Request) {
 		"output": proto.LimitOutput, "runtime": proto.LimitRuntime} {
 		lvl, err := c.USBCLimit(typ)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			writeAPIError(w, "ble_operation_failed")
 			return
 		}
 		out[name] = map[string]int{"level": lvl, "watts": proto.LevelToWatts(lvl)}
@@ -67,13 +79,35 @@ func (s *server) setUSBCLimit(w http.ResponseWriter, r *http.Request) {
 		Watts int    `json:"watts"`
 		Clear bool   `json:"clear"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := decodeJSON(r, &req); err != nil {
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	typ, ok := limitTypes[req.Type]
 	if !ok {
-		http.Error(w, "type must be global|input|output", http.StatusBadRequest)
+		writeAPIError(w, "invalid_request")
+		return
+	}
+	if req.Clear && s.d.DeviceControl != nil {
+		if _, err := s.d.DeviceControl.DeleteUSBCLimit(r.Context(), typ); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
+		return
+	}
+	level := proto.WattsToLevel(req.Watts)
+	if !req.Clear && level < 0 {
+		writeAPIError(w, "invalid_request")
+		return
+	}
+	if !req.Clear && s.d.DeviceControl != nil {
+		observed, err := s.d.DeviceControl.PutUSBCLimit(r.Context(), typ, level)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int{"watts": proto.LevelToWatts(observed), "level": observed})
 		return
 	}
 	c := s.ctl(w)
@@ -82,32 +116,40 @@ func (s *server) setUSBCLimit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Clear {
 		if err := c.ClearUSBCLimit(typ); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			writeAPIError(w, "ble_operation_failed")
 			return
 		}
 		writeJSON(w, 200, map[string]string{"status": "cleared"})
 		return
 	}
-	level := proto.WattsToLevel(req.Watts)
 	if level < 0 {
-		http.Error(w, "watts must be one of 30, 45, 60, 65, 100, 140", http.StatusBadRequest)
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	if err := c.SetUSBCLimit(typ, level); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeAPIError(w, "ble_operation_failed")
 		return
 	}
 	writeJSON(w, 200, map[string]int{"watts": req.Watts, "level": level})
 }
 
 func (s *server) getBypassThreshold(w http.ResponseWriter, r *http.Request) {
+	if s.d.DeviceControl != nil {
+		v, err := s.d.DeviceControl.GetBypassThreshold(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]float64{"volts": v})
+		return
+	}
 	c := s.ctl(w)
 	if c == nil {
 		return
 	}
 	v, err := c.BypassThreshold()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeAPIError(w, "ble_operation_failed")
 		return
 	}
 	writeJSON(w, 200, map[string]float64{"volts": v})
@@ -117,12 +159,21 @@ func (s *server) setBypassThreshold(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Volts float64 `json:"volts"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := decodeJSON(r, &req); err != nil {
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	if req.Volts <= 0 || req.Volts > 60 {
-		http.Error(w, "volts must be between 0 and 60", http.StatusBadRequest)
+		writeAPIError(w, "invalid_request")
+		return
+	}
+	if s.d.DeviceControl != nil {
+		v, err := s.d.DeviceControl.PutBypassThreshold(r.Context(), req.Volts)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]float64{"volts": v})
 		return
 	}
 	c := s.ctl(w)
@@ -130,7 +181,7 @@ func (s *server) setBypassThreshold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := c.SetBypassThreshold(req.Volts); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeAPIError(w, "ble_operation_failed")
 		return
 	}
 	writeJSON(w, 200, map[string]float64{"volts": req.Volts})
@@ -143,7 +194,7 @@ func (s *server) getSchedules(w http.ResponseWriter, r *http.Request) {
 	}
 	list, err := c.Schedules()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeAPIError(w, "ble_operation_failed")
 		return
 	}
 	if list == nil {
@@ -162,12 +213,12 @@ func (s *server) postSchedule(w http.ResponseWriter, r *http.Request) {
 		Repeat uint32 `json:"repeat"`
 		Action byte   `json:"action"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := decodeJSON(r, &req); err != nil {
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	if req.Type > proto.TimerMonthly || req.Hour > 23 || req.Minute > 59 || req.Action > 1 {
-		http.Error(w, "invalid timer: type 0-3, hour 0-23, minute 0-59, action 0-1", http.StatusBadRequest)
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	status := int8(1) // default enabled
@@ -179,7 +230,7 @@ func (s *server) postSchedule(w http.ResponseWriter, r *http.Request) {
 	id := byte(0xFF) // add
 	if req.ID != nil {
 		if *req.ID < 0 || *req.ID > 254 {
-			http.Error(w, "id out of range", http.StatusBadRequest)
+			writeAPIError(w, "invalid_request")
 			return
 		}
 		id = byte(*req.ID)
@@ -190,7 +241,7 @@ func (s *server) postSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	newID, err := c.UpsertSchedule(id, t)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeAPIError(w, "ble_operation_failed")
 		return
 	}
 	t.ID = newID
@@ -200,7 +251,7 @@ func (s *server) postSchedule(w http.ResponseWriter, r *http.Request) {
 func (s *server) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil || id < 0 || id > 254 {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeAPIError(w, "invalid_request")
 		return
 	}
 	c := s.ctl(w)
@@ -208,7 +259,7 @@ func (s *server) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := c.DeleteSchedule(byte(id)); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeAPIError(w, "ble_operation_failed")
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
