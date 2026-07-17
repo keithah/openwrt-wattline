@@ -265,20 +265,24 @@ func commandError(err error) *state.CommandError {
 	if err == nil {
 		return nil
 	}
-	code := "ble_operation_failed"
 	switch {
+	case errors.Is(err, ErrInternal):
+		return &state.CommandError{Code: "internal_error", Message: "Internal server error"}
+	case errors.Is(err, ErrBLE):
+		return &state.CommandError{Code: "ble_operation_failed", Message: "BLE operation failed"}
 	case errors.Is(err, ErrDisconnected):
-		code = "device_disconnected"
+		return &state.CommandError{Code: "device_disconnected", Message: "Link-Power is not connected"}
 	case errors.Is(err, ErrUnsupported):
-		code = "capability_unsupported"
+		return &state.CommandError{Code: "capability_unsupported", Message: "Operation is not supported"}
 	case errors.Is(err, ErrAdvancedDisabled):
-		code = "advanced_disabled"
+		return &state.CommandError{Code: "advanced_disabled", Message: "Advanced operations are disabled"}
 	case errors.Is(err, ErrTimeout):
-		code = "command_timeout"
+		return &state.CommandError{Code: "command_timeout", Message: "Device telemetry did not confirm the command"}
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		code = "canceled"
+		return &state.CommandError{Code: "canceled", Message: "Command was canceled"}
+	default:
+		return &state.CommandError{Code: "internal_error", Message: "Internal server error"}
 	}
-	return &state.CommandError{Code: code, Message: err.Error()}
 }
 
 func identity(sn state.Snapshot) (state.Identity, bool) {

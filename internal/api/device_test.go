@@ -223,6 +223,81 @@ func TestDCCommandIDGenerationFailureIsInternalError(t *testing.T) {
 		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
 	}
 	exactBody(t, rr, `{"error":{"code":"internal_error","message":"Internal server error","details":{}}}`)
+	for _, path := range []string{"/api/v1/device", "/api/v1/telemetry"} {
+		cached := do(t, h, http.MethodGet, path, "tok", "")
+		if strings.Contains(cached.Body.String(), "secret entropy detail") {
+			t.Fatalf("%s leaked entropy failure: %s", path, cached.Body.String())
+		}
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/events", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		if strings.HasPrefix(scanner.Text(), "data: ") {
+			if strings.Contains(scanner.Text(), "secret entropy detail") {
+				t.Fatalf("SSE leaked entropy failure: %s", scanner.Text())
+			}
+			return
+		}
+	}
+	t.Fatalf("SSE ended without data frame: %v", scanner.Err())
+}
+
+func TestDCBLEFailureNeverLeaksThroughCommandState(t *testing.T) {
+	const secret = "SECRET-GATT-/org/bluez/hci0/dev"
+	h, _, _ := canonicalServer(t, true, true, true, errors.New(secret))
+	immediate := do(t, h, http.MethodPost, "/api/v1/device/dc", "tok", `{"on":true}`)
+	if immediate.Code != 502 {
+		t.Fatalf("status %d: %s", immediate.Code, immediate.Body.String())
+	}
+	exactBody(t, immediate, `{"error":{"code":"ble_operation_failed","message":"BLE operation failed","details":{}}}`)
+	wantCommandError := `"error":{"code":"ble_operation_failed","message":"BLE operation failed"}`
+	for _, path := range []string{"/api/v1/device", "/api/v1/telemetry"} {
+		cached := do(t, h, http.MethodGet, path, "tok", "")
+		body := cached.Body.String()
+		if strings.Contains(body, secret) || strings.Contains(body, "GATT") {
+			t.Fatalf("%s leaked transport error: %s", path, body)
+		}
+		if !strings.Contains(body, wantCommandError) {
+			t.Fatalf("%s missing canonical command error: %s", path, body)
+		}
+	}
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/events", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		if strings.Contains(line, secret) || strings.Contains(line, "GATT") {
+			t.Fatalf("SSE leaked transport error: %s", line)
+		}
+		if !strings.Contains(line, wantCommandError) {
+			t.Fatalf("SSE missing canonical command error: %s", line)
+		}
+		return
+	}
+	t.Fatalf("SSE ended without data frame: %v", scanner.Err())
 }
 
 func TestCanonicalErrorResponses(t *testing.T) {

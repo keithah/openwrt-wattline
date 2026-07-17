@@ -3,6 +3,8 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -484,6 +486,36 @@ func TestSessionFailureIsTypedBLEAndPreservesCause(t *testing.T) {
 	svc := testService(st, &fakeSession{dcErr: want})
 	if _, err := svc.SetDC(context.Background(), true); !errors.Is(err, ErrBLE) || !errors.Is(err, want) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCommandErrorUsesCanonicalPublicMessage(t *testing.T) {
+	tests := []struct {
+		name          string
+		err           error
+		code, message string
+	}{
+		{"internal", fmt.Errorf("%w: secret entropy", ErrInternal), "internal_error", "Internal server error"},
+		{"BLE", fmt.Errorf("%w: secret GATT path", ErrBLE), "ble_operation_failed", "BLE operation failed"},
+		{"BLE precedence", fmt.Errorf("%w: %w", ErrBLE, ErrDisconnected), "ble_operation_failed", "BLE operation failed"},
+		{"disconnected", ErrDisconnected, "device_disconnected", "Link-Power is not connected"},
+		{"unsupported", ErrUnsupported, "capability_unsupported", "Operation is not supported"},
+		{"advanced", ErrAdvancedDisabled, "advanced_disabled", "Advanced operations are disabled"},
+		{"timeout", ErrTimeout, "command_timeout", "Device telemetry did not confirm the command"},
+		{"canceled", context.Canceled, "canceled", "Command was canceled"},
+		{"deadline", context.DeadlineExceeded, "canceled", "Command was canceled"},
+		{"unknown", errors.New("secret unknown"), "internal_error", "Internal server error"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := commandError(tc.err)
+			if got.Code != tc.code || got.Message != tc.message {
+				t.Fatalf("got %+v", got)
+			}
+			if strings.Contains(got.Message, "secret") {
+				t.Fatalf("leaked message %q", got.Message)
+			}
+		})
 	}
 }
 
