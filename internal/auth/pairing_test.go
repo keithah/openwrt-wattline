@@ -292,6 +292,17 @@ func TestPairingCapacityEvictsOnlyExpiredSources(t *testing.T) {
 		t.Fatalf("capacity eviction: expired=%v live-b=%v live-c=%v new-d=%v count=%d",
 			hasExpired, hasB, hasC, hasD, sourceCount)
 	}
+	if secret, _, err := pairing.Exchange("live-b", "000042", "tracked client"); err != nil || secret == "" {
+		t.Fatalf("tracked source at capacity = secret %q, err %v", secret, err)
+	}
+	if _, _, err := pairing.Exchange("untracked-e", "000042", "new client"); !errors.Is(err, ErrInvalidOrExpiredPIN) {
+		t.Fatalf("untracked source at capacity error = %v, want fail-closed sentinel", err)
+	}
+
+	now = start.Add(119 * time.Second)
+	if secret, _, err := pairing.Exchange("untracked-e", "000042", "new client"); err != nil || secret == "" {
+		t.Fatalf("untracked source after capacity recovery = secret %q, err %v", secret, err)
+	}
 }
 
 func TestPairingBackwardClockDoesNotKeepStalePINOpen(t *testing.T) {

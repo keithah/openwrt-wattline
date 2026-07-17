@@ -211,18 +211,15 @@ func (p *Pairing) statusLocked(admin bool) PairingStatus {
 func (p *Pairing) rateLimitedLocked(source string, now time.Time) bool {
 	p.expireFailureWindowsLocked(now)
 	p.expireSourceWindowLocked(source, now)
-	return p.global.count >= p.globalLimit || p.sources[source].count >= p.sourceLimit
+	return p.global.count >= p.globalLimit || p.sources[source].count >= p.sourceLimit || !p.sourceCapacityAvailableLocked(source, now)
 }
 
 func (p *Pairing) recordFailureLocked(source string, now time.Time) {
 	p.expireFailureWindowsLocked(now)
 	p.expireSourceWindowLocked(source, now)
 	p.global = incrementFailureWindow(p.global, now)
-	if _, exists := p.sources[source]; !exists && len(p.sources) >= p.globalLimit {
-		p.evictExpiredSourcesLocked(now)
-		if len(p.sources) >= p.globalLimit {
-			return
-		}
+	if !p.sourceCapacityAvailableLocked(source, now) {
+		return
 	}
 	p.sources[source] = incrementFailureWindow(p.sources[source], now)
 }
@@ -245,6 +242,14 @@ func (p *Pairing) evictExpiredSourcesLocked(now time.Time) {
 			delete(p.sources, source)
 		}
 	}
+}
+
+func (p *Pairing) sourceCapacityAvailableLocked(source string, now time.Time) bool {
+	if _, exists := p.sources[source]; exists || len(p.sources) < p.globalLimit {
+		return true
+	}
+	p.evictExpiredSourcesLocked(now)
+	return len(p.sources) < p.globalLimit
 }
 
 func incrementFailureWindow(window pairingFailureWindow, now time.Time) pairingFailureWindow {
