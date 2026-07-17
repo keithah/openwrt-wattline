@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/keithah/openwrt-wattline/internal/state"
 )
@@ -273,14 +274,18 @@ func TestCommandsAndDisconnectAsSuccess(t *testing.T) {
 	if err := s.BypassControl(false); err != nil {
 		t.Fatal(err)
 	}
-	// Restart: write fails with disconnect-ish error → success.
+	// Restart: write fails while the transport actually disconnects → success.
 	f.failWrites[CharCmd] = errors.New("disconnected")
+	go func() { time.Sleep(time.Millisecond); f.Close() }()
 	if err := s.Restart(); err != nil {
-		t.Fatalf("restart must treat write error as success: %v", err)
+		t.Fatalf("restart must treat observed disconnect as success: %v", err)
 	}
-	// Shutdown: same on the factory char.
-	f.failWrites[CharFactory] = errors.New("disconnected")
-	if err := s.Shutdown(); err != nil {
-		t.Fatalf("shutdown must treat write error as success: %v", err)
+	// Shutdown has the same rule on the factory characteristic.
+	f2 := newFake()
+	s2 := NewSession(f2, store)
+	f2.failWrites[CharFactory] = errors.New("disconnected")
+	go func() { time.Sleep(time.Millisecond); f2.Close() }()
+	if err := s2.Shutdown(); err != nil {
+		t.Fatalf("shutdown must treat observed disconnect as success: %v", err)
 	}
 }

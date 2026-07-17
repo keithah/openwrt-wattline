@@ -14,14 +14,45 @@ import (
 // (proto.LimitGlobal/Input/Output/Runtime), or -1 when unset (the device
 // answers 0xFF, seen for runtime with no PD sink attached).
 func (s *Session) USBCLimit(typ int) (int, error) {
-	result, payload, err := s.command(proto.TypeCLimitGet(byte(typ)))
+	return s.GetUSBCLimit(typ)
+}
+
+func (s *Session) getUSBCLimitLocked(typ int) (int, error) {
+	result, payload, err := s.commandLocked(proto.TypeCLimitGet(byte(typ)))
 	if result == 0xFF {
-		return -1, nil
+		if typ == proto.LimitRuntime {
+			return -1, nil
+		}
+		return 0, err
 	}
 	if err != nil {
 		return 0, err
 	}
 	return proto.ParseTypeCLimit(payload)
+}
+
+func (s *Session) GetUSBCLimit(typ int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getUSBCLimitLocked(typ)
+}
+
+func (s *Session) PutUSBCLimit(typ, level int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, _, err := s.commandLocked(proto.TypeCLimitSet(byte(typ), level)); err != nil {
+		return 0, err
+	}
+	return s.getUSBCLimitLocked(typ)
+}
+
+func (s *Session) DeleteUSBCLimit(typ int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, _, err := s.commandLocked(proto.TypeCLimitClear(byte(typ))); err != nil {
+		return 0, err
+	}
+	return s.getUSBCLimitLocked(typ)
 }
 
 // SetUSBCLimit sets a mutable limit type to a level (0..5). Invalid types,
@@ -54,14 +85,18 @@ func (s *Session) SetBypassThreshold(volts float64) error {
 
 // Schedules lists all on-device timers with their settings.
 func (s *Session) Schedules() ([]proto.Timer, error) {
-	_, payload, err := s.command(proto.ScheduleList())
+	return s.ListTimers()
+}
+
+func (s *Session) listTimersLocked() ([]proto.Timer, error) {
+	_, payload, err := s.commandLocked(proto.ScheduleList())
 	if err != nil {
 		return nil, err
 	}
 	ids := proto.ParseScheduleIDs(payload)
 	out := make([]proto.Timer, 0, len(ids))
 	for _, id := range ids {
-		_, p, err := s.command(proto.ScheduleGet(id))
+		_, p, err := s.commandLocked(proto.ScheduleGet(id))
 		if err != nil {
 			return nil, err
 		}
@@ -79,6 +114,42 @@ func (s *Session) Schedules() ([]proto.Timer, error) {
 		out = append(out, tm)
 	}
 	return out, nil
+}
+
+func (s *Session) ListTimers() ([]proto.Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listTimersLocked()
+}
+
+func (s *Session) AddTimer(t proto.Timer) ([]proto.Timer, byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, payload, err := s.commandLocked(proto.ScheduleUpsert(0xff, t))
+	if err != nil {
+		return nil, 0, err
+	}
+	id := proto.ParsedUpsertID(payload, 0xff)
+	timers, err := s.listTimersLocked()
+	return timers, id, err
+}
+
+func (s *Session) PutTimer(id byte, t proto.Timer) ([]proto.Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, _, err := s.commandLocked(proto.ScheduleUpsert(id, t)); err != nil {
+		return nil, err
+	}
+	return s.listTimersLocked()
+}
+
+func (s *Session) DeleteTimer(id byte) ([]proto.Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, _, err := s.commandLocked(proto.ScheduleDelete(id)); err != nil {
+		return nil, err
+	}
+	return s.listTimersLocked()
 }
 
 // UpsertSchedule adds (id 0xFF) or edits a timer, returning its id.

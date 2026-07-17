@@ -343,6 +343,7 @@ func (c *Connector) Run(stop <-chan struct{}) {
 			continue
 		}
 		sess := NewSession(t, c.store)
+		sess.lifecycle = c
 		sess.settle = c.settle
 		id, err, stoppedDuringHandshake := c.handshake(sess, stop)
 		if stoppedDuringHandshake {

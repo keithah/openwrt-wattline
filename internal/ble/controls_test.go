@@ -1,11 +1,89 @@
 package ble
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/keithah/openwrt-wattline/internal/proto"
 	"github.com/keithah/openwrt-wattline/internal/state"
 )
+
+func writeFrames(f *fakeTransport) []string {
+	frames := make([]string, len(f.writes))
+	for i, write := range f.writes {
+		frames[i] = write[1]
+	}
+	return frames
+}
+
+func TestAtomicLimitPutDeleteAndRuntimeUnset(t *testing.T) {
+	s, f := newCtlSession()
+	f.push(CharCmd, "028100")
+	f.push(CharCmd, "02800005")
+	f.push(CharCmd, "028200")
+	f.push(CharCmd, "02800003")
+	f.push(CharCmd, "0280ff")
+
+	if got, err := s.PutUSBCLimit(proto.LimitOutput, 5); err != nil || got != 5 {
+		t.Fatalf("PutUSBCLimit = %d, %v", got, err)
+	}
+	if got, err := s.DeleteUSBCLimit(proto.LimitOutput); err != nil || got != 3 {
+		t.Fatalf("DeleteUSBCLimit = %d, %v", got, err)
+	}
+	if got, err := s.GetUSBCLimit(proto.LimitRuntime); err != nil || got != -1 {
+		t.Fatalf("GetUSBCLimit(runtime) = %d, %v", got, err)
+	}
+	want := []string{"02010305", "020003", "020203", "020003", "020004"}
+	if got := writeFrames(f); !reflect.DeepEqual(got, want) {
+		t.Fatalf("limit frames = %v, want %v", got, want)
+	}
+}
+
+func pushOneTimerList(f *fakeTransport, id byte, hour byte) {
+	f.push(CharCmd, "06800001"+hexByte(id))
+	f.push(CharCmd, "068000"+hexByte(id)+"0101"+hexByte(hour)+"1e0000000001")
+}
+
+func hexByte(v byte) string {
+	const digits = "0123456789abcdef"
+	return string([]byte{digits[v>>4], digits[v&0xf]})
+}
+
+func TestAtomicTimerMutationsAdoptIDAndRelist(t *testing.T) {
+	s, f := newCtlSession()
+	timer := proto.Timer{Status: 1, Type: proto.TimerDaily, Hour: 6, Minute: 30, Action: 1}
+
+	f.push(CharCmd, "06810007")
+	pushOneTimerList(f, 7, 6)
+	list, id, err := s.AddTimer(timer)
+	if err != nil || id != 7 || len(list) != 1 || list[0].ID != 7 {
+		t.Fatalf("AddTimer = %+v, %d, %v", list, id, err)
+	}
+
+	f.push(CharCmd, "068100")
+	pushOneTimerList(f, 7, 8)
+	timer.Hour = 8
+	if list, err = s.PutTimer(7, timer); err != nil || len(list) != 1 || list[0].Hour != 8 {
+		t.Fatalf("PutTimer = %+v, %v", list, err)
+	}
+
+	f.push(CharCmd, "068100")
+	f.push(CharCmd, "06800000")
+	if list, err = s.DeleteTimer(7); err != nil || len(list) != 0 {
+		t.Fatalf("DeleteTimer = %+v, %v", list, err)
+	}
+
+	got := writeFrames(f)
+	wantPrefixes := []string{"060102ff", "060000", "06000107", "06010207", "060000", "06000107", "06010407", "060000"}
+	if len(got) != len(wantPrefixes) {
+		t.Fatalf("timer frame count = %d (%v), want %d", len(got), got, len(wantPrefixes))
+	}
+	for i, prefix := range wantPrefixes {
+		if len(got[i]) < len(prefix) || got[i][:len(prefix)] != prefix {
+			t.Fatalf("timer frame %d = %s, want prefix %s", i, got[i], prefix)
+		}
+	}
+}
 
 func newCtlSession() (*Session, *fakeTransport) {
 	f := newFake()

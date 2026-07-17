@@ -27,17 +27,19 @@ type Identity struct {
 }
 
 type Session struct {
-	t         Transport
-	store     *state.Store
-	mu        sync.Mutex // serializes command transactions (API.md §3: one in flight)
-	contextMu sync.Mutex
-	cancel    context.CancelFunc
-	settle    time.Duration
-	mode      string
+	t               Transport
+	store           *state.Store
+	mu              sync.Mutex // serializes command transactions (API.md §3: one in flight)
+	contextMu       sync.Mutex
+	cancel          context.CancelFunc
+	settle          time.Duration
+	mode            string
+	lifecycle       lifecyclePolicy
+	disconnectGrace time.Duration
 }
 
 func NewSession(t Transport, store *state.Store) *Session {
-	return &Session{t: t, store: store, settle: 2 * time.Second}
+	return &Session{t: t, store: store, settle: 2 * time.Second, disconnectGrace: 2 * time.Second}
 }
 
 func (s *Session) setCancel(cancel context.CancelFunc) {
@@ -73,14 +75,19 @@ func (s *Session) command(req []byte) (byte, []byte, error) {
 }
 
 func (s *Session) commandContext(ctx context.Context, req []byte) (byte, []byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commandContextLocked(ctx, req)
+}
+
+func (s *Session) commandLocked(req []byte) (byte, []byte, error) {
+	return s.commandContextLocked(context.Background(), req)
+}
+
+func (s *Session) commandContextLocked(ctx context.Context, req []byte) (byte, []byte, error) {
 	if len(req) == 0 {
 		return 0, nil, fmt.Errorf("invalid command frame: empty request")
 	}
-	if err := ctx.Err(); err != nil {
-		return 0, nil, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return 0, nil, err
 	}
@@ -306,26 +313,4 @@ func (s *Session) TypeCOutput(on bool) error {
 func (s *Session) BypassControl(on bool) error {
 	_, _, err := s.command(proto.BypassControl(on))
 	return err
-}
-
-// Restart succeeds by disconnecting (API.md §3.4) — write errors are success.
-func (s *Session) Restart() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.t.WriteChar(CharCmd, proto.Restart()); err != nil {
-		log.Printf("wattline: restart write ended with %v (expected: disconnect-as-success)", err)
-	}
-	s.store.SetConnected(false)
-	return nil
-}
-
-// Shutdown writes the "FM" magic to 0x4310 (API.md §3.5) — disconnect-as-success.
-func (s *Session) Shutdown() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.t.WriteChar(CharFactory, proto.ShutdownMagic()); err != nil {
-		log.Printf("wattline: shutdown write ended with %v (expected: disconnect-as-success)", err)
-	}
-	s.store.SetConnected(false)
-	return nil
 }
