@@ -55,6 +55,7 @@ type Session interface {
 	SetBypassThreshold(float64) error
 	PutBypassThreshold(float64) (float64, error)
 	ListTimers() ([]proto.Timer, error)
+	GetTimer(byte) (proto.Timer, error)
 	AddTimer(proto.Timer) ([]proto.Timer, byte, error)
 	PutTimer(byte, proto.Timer) ([]proto.Timer, error)
 	DeleteTimer(byte) ([]proto.Timer, error)
@@ -322,15 +323,20 @@ func (s *Service) sessionFor(ctx context.Context, supported func(state.Snapshot)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if advanced {
+		if !supported(s.store.Snapshot()) {
+			return nil, ErrUnsupported
+		}
+		if !s.advanced() {
+			return nil, ErrAdvancedDisabled
+		}
+	}
 	session := s.resolve()
 	if session == nil {
 		return nil, ErrDisconnected
 	}
-	if !supported(s.store.Snapshot()) {
+	if !advanced && !supported(s.store.Snapshot()) {
 		return nil, ErrUnsupported
-	}
-	if advanced && !s.advanced() {
-		return nil, ErrAdvancedDisabled
 	}
 	return session, nil
 }

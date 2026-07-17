@@ -1,6 +1,7 @@
 package ble
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/keithah/openwrt-wattline/internal/proto"
@@ -106,6 +107,22 @@ func (s *Session) Schedules() ([]proto.Timer, error) {
 }
 
 func (s *Session) listTimersLocked() ([]proto.Timer, error) {
+	ids, err := s.timerIDsLocked()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]proto.Timer, 0, len(ids))
+	for _, id := range ids {
+		timer, err := s.getTimerLocked(id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, timer)
+	}
+	return out, nil
+}
+
+func (s *Session) timerIDsLocked() ([]byte, error) {
 	_, payload, err := s.commandLocked(proto.ScheduleList())
 	if err != nil {
 		return nil, err
@@ -114,29 +131,44 @@ func (s *Session) listTimersLocked() ([]proto.Timer, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]proto.Timer, 0, len(ids))
-	for _, id := range ids {
-		_, p, err := s.commandLocked(proto.ScheduleGet(id))
-		if err != nil {
-			return nil, err
+	return ids, nil
+}
+
+func (s *Session) getTimerLocked(id byte) (proto.Timer, error) {
+	_, payload, err := s.commandLocked(proto.ScheduleGet(id))
+	if err != nil {
+		if errors.Is(err, proto.ErrResult) {
+			return proto.Timer{}, fmt.Errorf("%w: %v", proto.ErrTimerNotFound, err)
 		}
-		// The get reply carries the timer id at payload[0]; the 9-byte
-		// TIMER_SETTINGS struct starts at payload[1] (API.md §3.4:
-		// "struct starting at byte 4" of the reply frame).
-		if len(p) < 10 {
-			return nil, fmt.Errorf("schedule %d: GET payload too short: % x", id, p)
-		}
-		if p[0] != id {
-			return nil, fmt.Errorf("schedule %d: GET reply ID mismatch: got %d", id, p[0])
-		}
-		tm, err := proto.ParseTimer(p[1:10])
-		if err != nil {
-			return nil, err
-		}
-		tm.ID = id
-		out = append(out, tm)
+		return proto.Timer{}, err
 	}
-	return out, nil
+	if len(payload) < 10 {
+		return proto.Timer{}, fmt.Errorf("schedule %d: GET payload too short: % x", id, payload)
+	}
+	if payload[0] != id {
+		return proto.Timer{}, fmt.Errorf("schedule %d: GET reply ID mismatch: got %d", id, payload[0])
+	}
+	timer, err := proto.ParseTimer(payload[1:10])
+	if err != nil {
+		return proto.Timer{}, err
+	}
+	timer.ID = id
+	return timer, nil
+}
+
+func (s *Session) GetTimer(id byte) (proto.Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getTimerLocked(id)
+}
+
+func hasTimerID(ids []byte, id byte) bool {
+	for _, candidate := range ids {
+		if candidate == id {
+			return true
+		}
+	}
+	return false
 }
 
 func strictScheduleIDs(payload []byte) ([]byte, error) {
@@ -184,6 +216,13 @@ func (s *Session) AddTimer(t proto.Timer) ([]proto.Timer, byte, error) {
 func (s *Session) PutTimer(id byte, t proto.Timer) ([]proto.Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ids, err := s.timerIDsLocked()
+	if err != nil {
+		return nil, err
+	}
+	if !hasTimerID(ids, id) {
+		return nil, proto.ErrTimerNotFound
+	}
 	if _, _, err := s.commandLocked(proto.ScheduleUpsert(id, t)); err != nil {
 		return nil, err
 	}
@@ -193,6 +232,13 @@ func (s *Session) PutTimer(id byte, t proto.Timer) ([]proto.Timer, error) {
 func (s *Session) DeleteTimer(id byte) ([]proto.Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ids, err := s.timerIDsLocked()
+	if err != nil {
+		return nil, err
+	}
+	if !hasTimerID(ids, id) {
+		return nil, proto.ErrTimerNotFound
+	}
 	if _, _, err := s.commandLocked(proto.ScheduleDelete(id)); err != nil {
 		return nil, err
 	}

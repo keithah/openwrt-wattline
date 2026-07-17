@@ -1,7 +1,9 @@
 package api
 
 import (
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -39,7 +41,7 @@ func TestClockAbsentIsAvailableFalseAndZeroIO(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("clock: %d %s", rr.Code, rr.Body.String())
 	}
-	exactBody(t, rr, `{"available":false,"device_time":null,"system_time":null,"drift_seconds":null}`)
+	exactBody(t, rr, `{"available":false,"device_time":null,"system_time":"2026-07-17T20:00:02Z","drift_seconds":null}`)
 	if session.clockReads != 0 {
 		t.Fatalf("absent clock did %d reads", session.clockReads)
 	}
@@ -49,7 +51,7 @@ func TestLifecycleAndOTARequestBodies(t *testing.T) {
 	h, _, session := canonicalServer(t, true, true, true, nil)
 	tests := []struct{ method, path, body, want string }{
 		{http.MethodPost, "/api/v1/device/restart", "", `{"status":"restarting","reconnect":"armed"}`},
-		{http.MethodPost, "/api/v1/device/shutdown", "", `{"status":"shutdown","reconnect":"disarmed"}`},
+		{http.MethodPost, "/api/v1/device/shutdown", `{"confirm":true}`, `{"status":"shutdown","reconnect":"disarmed"}`},
 		{http.MethodPost, "/api/v1/device/ota/enter", `{"confirm":true}`, `{"mode":"ota","reconnect":"bootloader"}`},
 		{http.MethodPost, "/api/v1/device/ota/exit", "", `{"mode":"app","reconnect":"armed"}`},
 	}
@@ -63,10 +65,19 @@ func TestLifecycleAndOTARequestBodies(t *testing.T) {
 	if !session.restarted || !session.shutdown || !session.enteredOTA || !session.exitedOTA {
 		t.Fatalf("lifecycle not invoked: %+v", session)
 	}
-	for _, path := range []string{"/api/v1/device/restart", "/api/v1/device/shutdown", "/api/v1/device/ota/exit"} {
+	for _, path := range []string{"/api/v1/device/restart", "/api/v1/device/ota/exit"} {
 		if rr := do(t, h, http.MethodPost, path, "tok", `{}`); rr.Code != 400 {
 			t.Fatalf("body accepted by %s: %d", path, rr.Code)
 		}
+	}
+	before := session.shutdownCalls
+	for _, body := range []string{"", `{}`, `{"confirm":false}`, `{"confirm":true,"extra":1}`, `{"confirm":true} {}`} {
+		if rr := do(t, h, http.MethodPost, "/api/v1/device/shutdown", "tok", body); rr.Code != 400 {
+			t.Fatalf("shutdown accepted %q: %d", body, rr.Code)
+		}
+	}
+	if session.shutdownCalls != before {
+		t.Fatalf("invalid shutdown invoked lifecycle %d times", session.shutdownCalls-before)
 	}
 	for _, body := range []string{"", `{}`, `{"confirm":false}`, `{"confirm":true,"extra":1}`} {
 		if rr := do(t, h, http.MethodPost, "/api/v1/device/ota/enter", "tok", body); rr.Code != 400 {
@@ -108,6 +119,9 @@ func TestAdvancedRoutesExactShapes(t *testing.T) {
 	if session.runningMode != 1 || session.blePIN != 20555 {
 		t.Fatalf("mode=%d pin=%d", session.runningMode, session.blePIN)
 	}
+	if session.savedPIN != "020555" || strings.Join(session.pinOrder, ",") != "ble,save" {
+		t.Fatalf("PIN persistence value=%q order=%v", session.savedPIN, session.pinOrder)
+	}
 	if rr := do(t, h, http.MethodGet, "/api/v1/device/advanced/running-mode", "tok", ""); rr.Code != 405 {
 		t.Fatalf("running GET: %d", rr.Code)
 	}
@@ -120,6 +134,40 @@ func TestAdvancedRoutesExactShapes(t *testing.T) {
 		if rr := do(t, h, http.MethodPut, "/api/v1/device/advanced/ble-pin", "tok", body); rr.Code != 400 {
 			t.Fatalf("pin %s: %d", body, rr.Code)
 		}
+	}
+}
+
+func TestBLEPINRequiresPersistenceBeforeDeviceWrite(t *testing.T) {
+	h, _, session := canonicalServer(t, true, true, true, nil, nil)
+	rr := do(t, h, http.MethodPut, "/api/v1/device/advanced/ble-pin", "tok", `{"pin":"020555"}`)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	if len(session.pinOrder) != 0 {
+		t.Fatalf("device/persistence touched: %v", session.pinOrder)
+	}
+}
+
+func TestBLEPINDoesNotPersistAfterBLEFailure(t *testing.T) {
+	h, _, session := canonicalServer(t, true, true, true, errors.New("gatt"))
+	rr := do(t, h, http.MethodPut, "/api/v1/device/advanced/ble-pin", "tok", `{"pin":"020555"}`)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	if strings.Join(session.pinOrder, ",") != "ble" || session.savedPIN != "" {
+		t.Fatalf("order=%v saved=%q", session.pinOrder, session.savedPIN)
+	}
+}
+
+func TestBLEPINPersistenceFailureIsInternal(t *testing.T) {
+	h, _, session := canonicalServer(t, true, true, true, nil)
+	session.savePINError = errors.New("disk")
+	rr := do(t, h, http.MethodPut, "/api/v1/device/advanced/ble-pin", "tok", `{"pin":"020555"}`)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	if strings.Join(session.pinOrder, ",") != "ble,save" {
+		t.Fatalf("order=%v", session.pinOrder)
 	}
 }
 

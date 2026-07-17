@@ -14,25 +14,25 @@ import (
 )
 
 type fakeSession struct {
-	mu                                                      sync.Mutex
-	dcErr, typeCErr, bypassErr                              error
-	dcCalls, typeCCalls, bypassCalls                        []bool
-	getLimit                                                int
-	putLimit                                                int
-	deleteLimit                                             int
-	threshold                                               float64
-	getThresholdCalls, setThresholdCalls, putThresholdCalls int
-	timers                                                  []proto.Timer
-	listTimerCalls, putTimerCalls, deleteTimerCalls         int
-	assigned                                                byte
-	barrier                                                 bool
-	firmware                                                []byte
-	clock                                                   time.Time
-	clockAvailable                                          bool
-	readClockCalls, runningModeCalls                        int
-	ota                                                     proto.OTAInfo
-	err                                                     error
-	restartCalls, shutdownCalls, enterCalls, exitCalls      int
+	mu                                                             sync.Mutex
+	dcErr, typeCErr, bypassErr                                     error
+	dcCalls, typeCCalls, bypassCalls                               []bool
+	getLimit                                                       int
+	putLimit                                                       int
+	deleteLimit                                                    int
+	threshold                                                      float64
+	getThresholdCalls, setThresholdCalls, putThresholdCalls        int
+	timers                                                         []proto.Timer
+	listTimerCalls, getTimerCalls, putTimerCalls, deleteTimerCalls int
+	assigned                                                       byte
+	barrier                                                        bool
+	firmware                                                       []byte
+	clock                                                          time.Time
+	clockAvailable                                                 bool
+	readClockCalls, runningModeCalls                               int
+	ota                                                            proto.OTAInfo
+	err                                                            error
+	restartCalls, shutdownCalls, enterCalls, exitCalls             int
 }
 
 func (f *fakeSession) DCControl(v bool) error {
@@ -68,6 +68,18 @@ func (f *fakeSession) PutBypassThreshold(float64) (float64, error) {
 func (f *fakeSession) ListTimers() ([]proto.Timer, error) {
 	f.listTimerCalls++
 	return append([]proto.Timer(nil), f.timers...), f.err
+}
+func (f *fakeSession) GetTimer(id byte) (proto.Timer, error) {
+	f.getTimerCalls++
+	if f.err != nil {
+		return proto.Timer{}, f.err
+	}
+	for _, timer := range f.timers {
+		if timer.ID == id {
+			return timer, nil
+		}
+	}
+	return proto.Timer{}, proto.ErrTimerNotFound
 }
 func (f *fakeSession) AddTimer(proto.Timer) ([]proto.Timer, byte, error) {
 	return append([]proto.Timer(nil), f.timers...), f.assigned, f.err
@@ -412,7 +424,7 @@ func TestReadClockDelegatesWhenCharacteristicIsAbsent(t *testing.T) {
 	}
 }
 
-func TestDisconnectedPrecedesUnsupported(t *testing.T) {
+func TestDisconnectedPrecedesUnsupportedForOrdinaryControlsOnly(t *testing.T) {
 	st := fullyCapableStore()
 	st.SetIdentity(stateIdentityWithoutFeatures())
 	svc := testService(st, nil)
@@ -420,7 +432,7 @@ func TestDisconnectedPrecedesUnsupported(t *testing.T) {
 		t.Fatalf("pass-through err=%v", err)
 	}
 	svc.advanced = func() bool { return false }
-	if _, err := svc.BarrierFree(context.Background()); !errors.Is(err, ErrDisconnected) {
+	if _, err := svc.BarrierFree(context.Background()); !errors.Is(err, ErrAdvancedDisabled) {
 		t.Fatalf("advanced err=%v", err)
 	}
 	st.SetDC(proto.DCPort{})
@@ -563,6 +575,40 @@ func TestPassThroughSessionFailuresAreTypedBLE(t *testing.T) {
 			err := tc.call()
 			if !errors.Is(err, ErrBLE) || !errors.Is(err, want) {
 				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestAdvancedPrecedenceSupportThenPolicyThenConnection(t *testing.T) {
+	operations := []struct {
+		name string
+		call func(*Service) error
+	}{
+		{"threshold", func(s *Service) error { _, err := s.GetBypassThreshold(context.Background()); return err }},
+		{"clock", func(s *Service) error { _, _, err := s.ReadClock(context.Background()); return err }},
+		{"OTA", func(s *Service) error { _, err := s.OTAInfo(context.Background()); return err }},
+		{"advanced", func(s *Service) error { _, err := s.BarrierFree(context.Background()); return err }},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			unsupported := fullyCapableStore()
+			unsupported.SetIdentity(state.Identity{Mode: "unknown", Characteristics: map[string]bool{}})
+			svc := testService(unsupported, nil)
+			svc.advanced = func() bool { return false }
+			if err := operation.call(svc); !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("unsupported+disabled+disconnected err=%v", err)
+			}
+
+			svc = testService(fullyCapableStore(), nil)
+			svc.advanced = func() bool { return false }
+			if err := operation.call(svc); !errors.Is(err, ErrAdvancedDisabled) {
+				t.Fatalf("disabled+disconnected err=%v", err)
+			}
+
+			svc = testService(fullyCapableStore(), nil)
+			if err := operation.call(svc); !errors.Is(err, ErrDisconnected) {
+				t.Fatalf("disconnected err=%v", err)
 			}
 		})
 	}

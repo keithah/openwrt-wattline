@@ -2,6 +2,7 @@ package ble
 
 import (
 	"encoding/hex"
+	"errors"
 	"reflect"
 	"sync"
 	"testing"
@@ -16,6 +17,53 @@ type thresholdAtomicTransport struct {
 	reads     int
 	firstRead chan struct{}
 	release   chan struct{}
+}
+
+type timerAtomicTransport struct {
+	mu        sync.Mutex
+	writes    []string
+	reads     int
+	firstRead chan struct{}
+	release   chan struct{}
+}
+
+func newTimerAtomicTransport() *timerAtomicTransport {
+	return &timerAtomicTransport{firstRead: make(chan struct{}), release: make(chan struct{})}
+}
+func (f *timerAtomicTransport) WriteChar(_ string, data []byte) error {
+	f.mu.Lock()
+	f.writes = append(f.writes, hex.EncodeToString(data))
+	f.mu.Unlock()
+	return nil
+}
+func (f *timerAtomicTransport) ReadChar(string) ([]byte, error) {
+	f.mu.Lock()
+	f.reads++
+	read := f.reads
+	f.mu.Unlock()
+	switch read {
+	case 1:
+		close(f.firstRead)
+		<-f.release
+		return []byte{0x06, 0x80, 0x00, 0x01, 0x07}, nil
+	case 2:
+		return []byte{0x06, 0x81, 0x00}, nil
+	case 3:
+		return []byte{0x06, 0x80, 0x00, 0x01, 0x07}, nil
+	case 4:
+		return []byte{0x06, 0x80, 0x00, 0x07, 0x01, 0x01, 0x06, 0x1e, 0, 0, 0, 0, 1}, nil
+	default:
+		return []byte{0x01, 0x81, 0x00}, nil
+	}
+}
+func (*timerAtomicTransport) Subscribe(string, func([]byte)) error { return nil }
+func (*timerAtomicTransport) HasChar(string) bool                  { return true }
+func (*timerAtomicTransport) Disconnected() <-chan struct{}        { return make(chan struct{}) }
+func (*timerAtomicTransport) Close() error                         { return nil }
+func (f *timerAtomicTransport) frames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.writes...)
 }
 
 func newThresholdAtomicTransport() *thresholdAtomicTransport {
@@ -83,6 +131,35 @@ func TestAtomicBypassThresholdPutOwnsSetAndGet(t *testing.T) {
 	}
 }
 
+func TestAtomicTimerPutOwnsExistenceMutationAndRelist(t *testing.T) {
+	f := newTimerAtomicTransport()
+	s := NewSession(f, state.NewStore())
+	timer := proto.Timer{Status: 1, Type: proto.TimerDaily, Hour: 6, Minute: 30, Action: 1}
+	putDone := make(chan error, 1)
+	go func() { _, err := s.PutTimer(7, timer); putDone <- err }()
+	<-f.firstRead
+	if s.mu.TryLock() {
+		s.mu.Unlock()
+		t.Fatal("timer PUT released ownership after existence list")
+	}
+	dcDone := make(chan error, 1)
+	go func() { dcDone <- s.DCControl(true) }()
+	if got := f.frames(); !reflect.DeepEqual(got, []string{"060000"}) {
+		t.Fatalf("interleaved before mutation: %v", got)
+	}
+	close(f.release)
+	if err := <-putDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-dcDone; err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"060000", "060102070101061e0000000001", "060000", "06000107", "010101"}
+	if got := f.frames(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("frames=%v want=%v", got, want)
+	}
+}
+
 func writeFrames(f *fakeTransport) []string {
 	frames := make([]string, len(f.writes))
 	for i, write := range f.writes {
@@ -135,6 +212,7 @@ func TestAtomicTimerMutationsAdoptIDAndRelist(t *testing.T) {
 		t.Fatalf("AddTimer = %+v, %d, %v", list, id, err)
 	}
 
+	f.push(CharCmd, "0680000107")
 	f.push(CharCmd, "068100")
 	pushOneTimerList(f, 7, 8)
 	timer.Hour = 8
@@ -142,6 +220,7 @@ func TestAtomicTimerMutationsAdoptIDAndRelist(t *testing.T) {
 		t.Fatalf("PutTimer = %+v, %v", list, err)
 	}
 
+	f.push(CharCmd, "0680000107")
 	f.push(CharCmd, "068100")
 	f.push(CharCmd, "06800000")
 	if list, err = s.DeleteTimer(7); err != nil || len(list) != 0 {
@@ -150,11 +229,67 @@ func TestAtomicTimerMutationsAdoptIDAndRelist(t *testing.T) {
 
 	want := []string{
 		"060102ff0101061e0000000001", "060000", "06000107",
-		"060102070101081e0000000001", "060000", "06000107",
-		"06010407", "060000",
+		"060000", "060102070101081e0000000001", "060000", "06000107",
+		"060000", "06010407", "060000",
 	}
 	if got := writeFrames(f); !reflect.DeepEqual(got, want) {
 		t.Fatalf("timer frames = %v, want %v", got, want)
+	}
+}
+
+func TestGetTimerUsesOneGetAndValidatesEchoedID(t *testing.T) {
+	s, f := newCtlSession()
+	f.push(CharCmd, "068000070101061e0000000001")
+	timer, err := s.GetTimer(7)
+	if err != nil || timer.ID != 7 || timer.Hour != 6 || timer.Minute != 30 {
+		t.Fatalf("GetTimer=(%+v,%v)", timer, err)
+	}
+	if got := writeFrames(f); !reflect.DeepEqual(got, []string{"06000107"}) {
+		t.Fatalf("frames=%v", got)
+	}
+
+	for _, reply := range []string{
+		"068000080101061e0000000001",
+		"068000070101061e00000000",
+	} {
+		s, f = newCtlSession()
+		f.push(CharCmd, reply)
+		if _, err := s.GetTimer(7); err == nil {
+			t.Fatalf("accepted reply %s", reply)
+		}
+	}
+}
+
+func TestGetTimerMapsDeviceResultToTimerNotFound(t *testing.T) {
+	s, f := newCtlSession()
+	f.push(CharCmd, "0680ff")
+	if _, err := s.GetTimer(7); !errors.Is(err, proto.ErrTimerNotFound) {
+		t.Fatalf("err=%v", err)
+	}
+	if got := writeFrames(f); !reflect.DeepEqual(got, []string{"06000107"}) {
+		t.Fatalf("frames=%v", got)
+	}
+}
+
+func TestTimerMutationRejectsMissingBeforeWrite(t *testing.T) {
+	timer := proto.Timer{Status: 1, Type: proto.TimerDaily}
+	for _, test := range []struct {
+		name string
+		call func(*Session) error
+	}{
+		{"put", func(s *Session) error { _, err := s.PutTimer(7, timer); return err }},
+		{"delete", func(s *Session) error { _, err := s.DeleteTimer(7); return err }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, f := newCtlSession()
+			f.push(CharCmd, "06800000")
+			if err := test.call(s); !errors.Is(err, proto.ErrTimerNotFound) {
+				t.Fatalf("err=%v", err)
+			}
+			if got := writeFrames(f); !reflect.DeepEqual(got, []string{"060000"}) {
+				t.Fatalf("mutation occurred: %v", got)
+			}
+		})
 	}
 }
 

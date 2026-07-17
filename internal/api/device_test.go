@@ -28,6 +28,7 @@ type canonicalSession struct {
 	limits                                     map[int]int
 	threshold                                  float64
 	timers                                     []proto.Timer
+	getTimerCalls                              int
 	nextTimer                                  byte
 	clockTime                                  time.Time
 	clockOK                                    bool
@@ -37,6 +38,10 @@ type canonicalSession struct {
 	runningMode                                byte
 	usbFirmware                                []byte
 	blePIN                                     uint32
+	shutdownCalls                              int
+	savedPIN                                   string
+	pinOrder                                   []string
+	savePINError                               error
 	otaInfo                                    proto.OTAInfo
 	restarted, shutdown, enteredOTA, exitedOTA bool
 }
@@ -111,6 +116,18 @@ func (f *canonicalSession) PutBypassThreshold(v float64) (float64, error) {
 func (f *canonicalSession) ListTimers() ([]proto.Timer, error) {
 	return append([]proto.Timer(nil), f.timers...), f.err
 }
+func (f *canonicalSession) GetTimer(id byte) (proto.Timer, error) {
+	f.getTimerCalls++
+	if f.err != nil {
+		return proto.Timer{}, f.err
+	}
+	for _, timer := range f.timers {
+		if timer.ID == id {
+			return timer, nil
+		}
+	}
+	return proto.Timer{}, proto.ErrTimerNotFound
+}
 func (f *canonicalSession) AddTimer(timer proto.Timer) ([]proto.Timer, byte, error) {
 	if f.err != nil {
 		return nil, 0, f.err
@@ -124,11 +141,16 @@ func (f *canonicalSession) PutTimer(id byte, timer proto.Timer) ([]proto.Timer, 
 	if f.err != nil {
 		return nil, f.err
 	}
+	found := false
 	for i := range f.timers {
 		if f.timers[i].ID == id {
+			found = true
 			timer.ID = id
 			f.timers[i] = timer
 		}
+	}
+	if !found {
+		return nil, proto.ErrTimerNotFound
 	}
 	return append([]proto.Timer(nil), f.timers...), nil
 }
@@ -137,10 +159,16 @@ func (f *canonicalSession) DeleteTimer(id byte) ([]proto.Timer, error) {
 		return nil, f.err
 	}
 	out := f.timers[:0]
+	found := false
 	for _, timer := range f.timers {
 		if timer.ID != id {
 			out = append(out, timer)
+		} else {
+			found = true
 		}
+	}
+	if !found {
+		return nil, proto.ErrTimerNotFound
 	}
 	f.timers = out
 	return append([]proto.Timer(nil), f.timers...), nil
@@ -149,7 +177,11 @@ func (f *canonicalSession) BarrierFree() (bool, error)           { return f.barr
 func (f *canonicalSession) SetBarrierFree(on bool) (bool, error) { f.barrier = on; return on, f.err }
 func (f *canonicalSession) SetRunningMode(mode byte) error       { f.runningMode = mode; return f.err }
 func (f *canonicalSession) USBFirmwareVersion() ([]byte, error)  { return f.usbFirmware, f.err }
-func (f *canonicalSession) SetBLEPIN(pin uint32) error           { f.blePIN = pin; return f.err }
+func (f *canonicalSession) SetBLEPIN(pin uint32) error {
+	f.pinOrder = append(f.pinOrder, "ble")
+	f.blePIN = pin
+	return f.err
+}
 func (f *canonicalSession) ReadClock() (time.Time, bool, error) {
 	if device := f.store.Snapshot().Device; device != nil && !device.Characteristics["current_time"] {
 		return time.Time{}, false, nil
@@ -180,10 +212,14 @@ func (f *canonicalSession) ExitOTA(context.Context) error {
 	}
 	return f.err
 }
-func (f *canonicalSession) Restart() error  { f.restarted = true; return f.err }
-func (f *canonicalSession) Shutdown() error { f.shutdown = true; return f.err }
+func (f *canonicalSession) Restart() error { f.restarted = true; return f.err }
+func (f *canonicalSession) Shutdown() error {
+	f.shutdown = true
+	f.shutdownCalls++
+	return f.err
+}
 
-func canonicalServer(t *testing.T, connected, supported, advanced bool, sessionErr error) (http.Handler, *state.Store, *canonicalSession) {
+func canonicalServer(t *testing.T, connected, supported, advanced bool, sessionErr error, saveOverride ...func(string) error) (http.Handler, *state.Store, *canonicalSession) {
 	t.Helper()
 	var fixtureSession *canonicalSession
 	h, store, _ := testServerWith(t, func(d *Deps) {
@@ -216,6 +252,15 @@ func canonicalServer(t *testing.T, connected, supported, advanced bool, sessionE
 		}
 		fixtureSession = fake
 		d.DeviceControl = controlpkg.NewService(resolve, d.Store, nil, func() bool { return advanced })
+		if len(saveOverride) > 0 {
+			d.SaveBLEPIN = saveOverride[0]
+		} else {
+			d.SaveBLEPIN = func(pin string) error {
+				fake.pinOrder = append(fake.pinOrder, "save")
+				fake.savedPIN = pin
+				return fake.savePINError
+			}
+		}
 		d.MagicDNSName = func() string { return "wattline.example.ts.net" }
 		d.Now = func() time.Time { return time.Date(2026, 7, 17, 20, 0, 2, 0, time.UTC) }
 	})

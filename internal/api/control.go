@@ -197,6 +197,22 @@ func (s *server) setBypassThreshold(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getSchedules(w http.ResponseWriter, r *http.Request) {
+	if requireNoBody(r) != nil {
+		writeAPIError(w, "invalid_request")
+		return
+	}
+	if s.d.DeviceControl != nil {
+		list, err := s.d.DeviceControl.ListTimers(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if list == nil {
+			list = []proto.Timer{}
+		}
+		writeJSON(w, http.StatusOK, list)
+		return
+	}
 	c := s.ctl(w)
 	if c == nil {
 		return
@@ -214,28 +230,23 @@ func (s *server) getSchedules(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) postSchedule(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID     *int   `json:"id"`
-		Status *int8  `json:"status"`
-		Type   byte   `json:"type"`
-		Hour   byte   `json:"hour"`
-		Minute byte   `json:"minute"`
-		Repeat uint32 `json:"repeat"`
-		Action byte   `json:"action"`
+		ID     *int    `json:"id"`
+		Status *int8   `json:"status"`
+		Type   *byte   `json:"type"`
+		Hour   *byte   `json:"hour"`
+		Minute *byte   `json:"minute"`
+		Repeat *uint32 `json:"repeat"`
+		Action *byte   `json:"action"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeAPIError(w, "invalid_request")
 		return
 	}
-	if req.Type > proto.TimerMonthly || req.Hour > 23 || req.Minute > 59 || req.Action > 1 {
+	timer, err := (timerRequest{Status: req.Status, Type: req.Type, Hour: req.Hour, Minute: req.Minute, Repeat: req.Repeat, Action: req.Action}).timer()
+	if err != nil {
 		writeAPIError(w, "invalid_request")
 		return
 	}
-	status := int8(1) // default enabled
-	if req.Status != nil {
-		status = *req.Status
-	}
-	t := proto.Timer{Status: status, Type: req.Type, Hour: req.Hour,
-		Minute: req.Minute, Repeat: req.Repeat, Action: req.Action}
 	id := byte(0xFF) // add
 	if req.ID != nil {
 		if *req.ID < 0 || *req.ID > 254 {
@@ -244,23 +255,57 @@ func (s *server) postSchedule(w http.ResponseWriter, r *http.Request) {
 		}
 		id = byte(*req.ID)
 	}
+	if s.d.DeviceControl != nil {
+		var list []proto.Timer
+		var observedID byte
+		if id == 0xff {
+			list, observedID, err = s.d.DeviceControl.AddTimer(r.Context(), timer)
+		} else {
+			observedID = id
+			list, err = s.d.DeviceControl.PutTimer(r.Context(), id, timer)
+		}
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		for _, observed := range list {
+			if observed.ID == observedID {
+				writeJSON(w, http.StatusOK, observed)
+				return
+			}
+		}
+		writeAPIError(w, "ble_operation_failed")
+		return
+	}
 	c := s.ctl(w)
 	if c == nil {
 		return
 	}
-	newID, err := c.UpsertSchedule(id, t)
+	newID, err := c.UpsertSchedule(id, timer)
 	if err != nil {
 		writeAPIError(w, "ble_operation_failed")
 		return
 	}
-	t.ID = newID
-	writeJSON(w, 200, t)
+	timer.ID = newID
+	writeJSON(w, 200, timer)
 }
 
 func (s *server) deleteSchedule(w http.ResponseWriter, r *http.Request) {
+	if requireNoBody(r) != nil {
+		writeAPIError(w, "invalid_request")
+		return
+	}
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil || id < 0 || id > 254 {
 		writeAPIError(w, "invalid_request")
+		return
+	}
+	if s.d.DeviceControl != nil {
+		if _, err := s.d.DeviceControl.DeleteTimer(r.Context(), byte(id)); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 		return
 	}
 	c := s.ctl(w)

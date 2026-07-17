@@ -22,12 +22,13 @@ func (s *server) getClock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !available {
+		now := s.now().UTC().Truncate(time.Second)
 		writeJSON(w, http.StatusOK, struct {
-			Available  bool `json:"available"`
-			DeviceTime any  `json:"device_time"`
-			SystemTime any  `json:"system_time"`
-			Drift      any  `json:"drift_seconds"`
-		}{false, nil, nil, nil})
+			Available  bool      `json:"available"`
+			DeviceTime any       `json:"device_time"`
+			SystemTime time.Time `json:"system_time"`
+			Drift      any       `json:"drift_seconds"`
+		}{false, nil, now, nil})
 		return
 	}
 	now := s.now().UTC().Truncate(time.Second)
@@ -79,7 +80,10 @@ func (s *server) restart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) shutdown(w http.ResponseWriter, r *http.Request) {
-	if err := requireNoBody(r); err != nil {
+	var request struct {
+		Confirm *bool `json:"confirm"`
+	}
+	if err := decodeJSON(r, &request); err != nil || request.Confirm == nil || !*request.Confirm {
 		writeAPIError(w, "invalid_request")
 		return
 	}
@@ -277,12 +281,20 @@ func (s *server) putBLEPIN(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	if s.d.SaveBLEPIN == nil {
+		writeAPIError(w, "internal_error")
+		return
+	}
 	service := s.controlService(w)
 	if service == nil {
 		return
 	}
 	if err := service.SetBLEPIN(r.Context(), uint32(pin)); err != nil {
 		writeError(w, err)
+		return
+	}
+	if err := s.d.SaveBLEPIN(*request.PIN); err != nil {
+		writeAPIError(w, "internal_error")
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {

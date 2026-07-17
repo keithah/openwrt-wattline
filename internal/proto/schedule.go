@@ -2,9 +2,12 @@ package proto
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 )
+
+var ErrTimerNotFound = errors.New("timer not found")
 
 // Timer types (API.md §3.4 TIMER_SETTINGS).
 const (

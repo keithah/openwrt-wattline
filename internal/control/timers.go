@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/keithah/openwrt-wattline/internal/proto"
@@ -59,16 +60,19 @@ func (s *Service) GetTimer(ctx context.Context, id byte) (proto.Timer, error) {
 	if id == 0xff {
 		return proto.Timer{}, fmt.Errorf("timer ID 255 is reserved for add")
 	}
-	timers, err := s.ListTimers(ctx)
+	session, err := s.sessionFor(ctx, supportsTimers, false)
 	if err != nil {
 		return proto.Timer{}, err
 	}
-	for _, timer := range timers {
-		if timer.ID == id {
-			return timer, nil
-		}
+	timer, err := session.GetTimer(id)
+	return timer, timerError(err)
+}
+
+func timerError(err error) error {
+	if errors.Is(err, proto.ErrTimerNotFound) {
+		return ErrNotFound
 	}
-	return proto.Timer{}, ErrNotFound
+	return wrapBLE(err)
 }
 
 func (s *Service) AddTimer(ctx context.Context, timer proto.Timer) ([]proto.Timer, byte, error) {
@@ -95,7 +99,7 @@ func (s *Service) PutTimer(ctx context.Context, id byte, timer proto.Timer) ([]p
 		return nil, err
 	}
 	timers, err := session.PutTimer(id, timer)
-	return timers, wrapBLE(err)
+	return timers, timerError(err)
 }
 
 func (s *Service) DeleteTimer(ctx context.Context, id byte) ([]proto.Timer, error) {
@@ -107,5 +111,5 @@ func (s *Service) DeleteTimer(ctx context.Context, id byte) ([]proto.Timer, erro
 		return nil, err
 	}
 	timers, err := session.DeleteTimer(id)
-	return timers, wrapBLE(err)
+	return timers, timerError(err)
 }

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -105,7 +106,7 @@ func TestScheduleAPI(t *testing.T) {
 		t.Fatalf("list %+v", list)
 	}
 	// add (no id) -> assigned nextID 3
-	w = do(t, h, "POST", "/api/v1/device/schedules", "tok", `{"type":1,"hour":6,"minute":30,"action":1}`)
+	w = do(t, h, "POST", "/api/v1/device/schedules", "tok", `{"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`)
 	if w.Code != 200 {
 		t.Fatalf("add %d", w.Code)
 	}
@@ -124,6 +125,71 @@ func TestScheduleAPI(t *testing.T) {
 	}
 	if w = do(t, h, "DELETE", "/api/v1/device/schedules/abc", "tok", ""); w.Code != 400 {
 		t.Fatalf("bad id delete %d", w.Code)
+	}
+}
+
+func TestScheduleAliasesStrictBodiesAndRecurrenceValidation(t *testing.T) {
+	fc := &fakeControl{nextID: 3, timers: []proto.Timer{{ID: 4, Status: 1, Type: proto.TimerDaily}}}
+	h := ctlServer(t, fc)
+	if rr := do(t, h, http.MethodGet, "/api/v1/device/schedules", "tok", `{}`); rr.Code != 400 {
+		t.Fatalf("GET body: %d", rr.Code)
+	}
+	if rr := do(t, h, http.MethodDelete, "/api/v1/device/schedules/4", "tok", `{}`); rr.Code != 400 {
+		t.Fatalf("DELETE body: %d", rr.Code)
+	}
+	invalid := []string{
+		`{"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`,
+		`{"status":-2,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`,
+		`{"status":1,"type":1,"hour":6,"minute":30,"repeat":1,"action":1}`,
+		`{"status":1,"type":2,"hour":6,"minute":30,"repeat":1,"action":1}`,
+		`{"status":1,"type":3,"hour":6,"minute":30,"repeat":1,"action":1}`,
+		`{"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1,"extra":true}`,
+	}
+	for _, body := range invalid {
+		if rr := do(t, h, http.MethodPost, "/api/v1/device/schedules", "tok", body); rr.Code != 400 {
+			t.Fatalf("accepted %s: %d", body, rr.Code)
+		}
+	}
+	if fc.lastUpsert != (proto.Timer{}) || len(fc.deleted) != 0 {
+		t.Fatalf("invalid aliases touched BLE: upsert=%+v deleted=%v", fc.lastUpsert, fc.deleted)
+	}
+}
+
+func TestScheduleAliasesUseControlServiceAndCanonicalErrors(t *testing.T) {
+	h, _, session := canonicalServer(t, true, true, true, nil)
+	session.timers = []proto.Timer{{ID: 4, Status: 1, Type: proto.TimerDaily, Hour: 3}}
+	if rr := do(t, h, http.MethodGet, "/api/v1/device/schedules", "tok", ""); rr.Code != 200 {
+		t.Fatalf("GET: %d %s", rr.Code, rr.Body.String())
+	}
+	add := do(t, h, http.MethodPost, "/api/v1/device/schedules", "tok", `{"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`)
+	if add.Code != 200 {
+		t.Fatalf("add: %d %s", add.Code, add.Body.String())
+	}
+	exactBody(t, add, `{"id":3,"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`)
+	missing := do(t, h, http.MethodPost, "/api/v1/device/schedules", "tok", `{"id":9,"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`)
+	if missing.Code != 404 {
+		t.Fatalf("missing put: %d %s", missing.Code, missing.Body.String())
+	}
+	if rr := do(t, h, http.MethodDelete, "/api/v1/device/schedules/9", "tok", ""); rr.Code != 404 {
+		t.Fatalf("missing delete: %d %s", rr.Code, rr.Body.String())
+	}
+
+	for _, tc := range []struct {
+		name                 string
+		connected, supported bool
+		err                  error
+		want                 int
+	}{
+		{"unsupported", true, false, nil, 409},
+		{"disconnected", false, true, nil, 503},
+		{"BLE", true, true, errors.New("gatt"), 502},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, _ := canonicalServer(t, tc.connected, tc.supported, true, tc.err)
+			if rr := do(t, h, http.MethodGet, "/api/v1/device/schedules", "tok", ""); rr.Code != tc.want {
+				t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+			}
+		})
 	}
 }
 

@@ -60,6 +60,39 @@ func TestTimerMutationsReturnAuthoritativeRelist(t *testing.T) {
 	}
 }
 
+func TestGetTimerDelegatesDirectlyAndMapsOnlyTimerNotFound(t *testing.T) {
+	want := proto.Timer{ID: 7, Status: 1, Type: proto.TimerDaily}
+	sess := &fakeSession{timers: []proto.Timer{want}}
+	svc := testService(fullyCapableStore(), sess)
+	got, err := svc.GetTimer(context.Background(), 7)
+	if err != nil || got != want || sess.getTimerCalls != 1 || sess.listTimerCalls != 0 {
+		t.Fatalf("got=%+v err=%v get=%d list=%d", got, err, sess.getTimerCalls, sess.listTimerCalls)
+	}
+
+	sess.err = proto.ErrTimerNotFound
+	if _, err := svc.GetTimer(context.Background(), 8); !errors.Is(err, ErrNotFound) || errors.Is(err, ErrBLE) {
+		t.Fatalf("not-found err=%v", err)
+	}
+	sess.err = errors.New("transport")
+	if _, err := svc.GetTimer(context.Background(), 8); !errors.Is(err, ErrBLE) || errors.Is(err, ErrNotFound) {
+		t.Fatalf("transport err=%v", err)
+	}
+}
+
+func TestTimerMutationMapsAtomicNotFound(t *testing.T) {
+	timer := proto.Timer{Status: 1, Type: proto.TimerDaily}
+	for _, call := range []func(*Service) error{
+		func(s *Service) error { _, err := s.PutTimer(context.Background(), 7, timer); return err },
+		func(s *Service) error { _, err := s.DeleteTimer(context.Background(), 7); return err },
+	} {
+		sess := &fakeSession{err: proto.ErrTimerNotFound}
+		svc := testService(fullyCapableStore(), sess)
+		if err := call(svc); !errors.Is(err, ErrNotFound) || errors.Is(err, ErrBLE) {
+			t.Fatalf("err=%v", err)
+		}
+	}
+}
+
 func TestTimerValidationHappensBeforeBLE(t *testing.T) {
 	sess := &fakeSession{}
 	svc := testService(fullyCapableStore(), sess)

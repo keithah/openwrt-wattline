@@ -127,10 +127,6 @@ func (s *server) putTimer(w http.ResponseWriter, r *http.Request) {
 	if service == nil {
 		return
 	}
-	if _, err := service.GetTimer(r.Context(), id); err != nil {
-		writeError(w, err)
-		return
-	}
 	timers, err := service.PutTimer(r.Context(), id, timer)
 	if err != nil {
 		writeError(w, err)
@@ -157,10 +153,6 @@ func (s *server) deleteTimer(w http.ResponseWriter, r *http.Request) {
 	}
 	service := s.controlService(w)
 	if service == nil {
-		return
-	}
-	if _, err := service.GetTimer(r.Context(), id); err != nil {
-		writeError(w, err)
 		return
 	}
 	timers, err := service.DeleteTimer(r.Context(), id)

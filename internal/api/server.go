@@ -31,6 +31,7 @@ type Deps struct {
 	DeviceControl *control.Service
 	MagicDNSName  func() string
 	Now           func() time.Time
+	SaveBLEPIN    func(string) error
 }
 
 type server struct{ d Deps }

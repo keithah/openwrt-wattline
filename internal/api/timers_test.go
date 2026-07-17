@@ -26,12 +26,18 @@ func TestTimerCRUDUsesAssignedIDAndAuthoritativeCollections(t *testing.T) {
 		t.Fatalf("put: %d %s", put.Code, put.Body.String())
 	}
 	exactBody(t, put, `{"id":3,"status":-1,"type":3,"hour":8,"minute":5,"repeat":2147483650,"action":0}`)
+	if session.getTimerCalls != 0 {
+		t.Fatalf("PUT performed non-atomic API preflight GET %d times", session.getTimerCalls)
+	}
 
 	del := do(t, h, http.MethodDelete, "/api/v1/device/timers/3", "tok", "")
 	if del.Code != 200 {
 		t.Fatalf("delete: %d %s", del.Code, del.Body.String())
 	}
 	exactBody(t, del, `{"deleted":3,"timers":[{"id":2,"status":1,"type":2,"hour":6,"minute":30,"repeat":62,"action":1}]}`)
+	if session.getTimerCalls != 0 {
+		t.Fatalf("DELETE performed non-atomic API preflight GET %d times", session.getTimerCalls)
+	}
 }
 
 func TestTimerRecurrenceValidationAndExactJSON(t *testing.T) {
