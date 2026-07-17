@@ -402,3 +402,110 @@ func TestSecurityConfigSettingsViewRendersClearedInterfacesAsArray(t *testing.T)
 		t.Fatalf("cleared interfaces must render as an empty array: %s", b)
 	}
 }
+
+func TestSecurityConfigSaveMainRoundTripsClearedMDNSInterfaces(t *testing.T) {
+	path := writeTemp(t, `config wattline 'main'
+	option mdns_enabled '1'
+	list mdns_interface 'br-lan'
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MDNSEnabled = false
+	cfg.MDNSInterfaces = []string{}
+	if err := cfg.SaveMain(path); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.MDNSEnabled || len(saved.MDNSInterfaces) != 0 {
+		t.Fatalf("cleared mDNS settings did not round-trip: enabled=%v interfaces=%#v", saved.MDNSEnabled, saved.MDNSInterfaces)
+	}
+}
+
+func TestSecurityConfigSaveMainPreservesFreshOnDiskToken(t *testing.T) {
+	path := writeTemp(t, `config wattline 'main'
+	option token 'old-bootstrap'
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated := strings.Replace(string(raw), "old-bootstrap", "fresh-bootstrap", 1)
+	if err := os.WriteFile(path, []byte(rotated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Token = "stale-in-memory"
+	cfg.Advanced = true
+	if err := cfg.SaveMain(path); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Token != "fresh-bootstrap" {
+		t.Fatalf("SaveMain rewrote freshly rotated token: %q", saved.Token)
+	}
+}
+
+func TestSecurityConfigSaveMainPreservesFileMode(t *testing.T) {
+	path := writeTemp(t, "config wattline 'main'\n")
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Advanced = true
+	if err := cfg.SaveMain(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config mode after SaveMain = %04o, want 0600", got)
+	}
+}
+
+func TestSecurityConfigAtomicWriteCleansTempAfterRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "wattline")
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfigAtomic(destination, []byte("secret")); err == nil {
+		t.Fatal("expected rename over directory to fail")
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".wattline.tmp-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("atomic write left temporary files: %#v", matches)
+	}
+}
+
+func TestSecurityConfigAtomicWriteUsesPrivateCreateMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wattline")
+	if err := writeConfigAtomic(path, []byte("config wattline 'main'\n\toption token 'secret'\n")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("new secret-bearing config mode = %04o, want 0600", got)
+	}
+}

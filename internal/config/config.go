@@ -449,6 +449,12 @@ func Load(path string) (*Config, error) {
 				return nil, err
 			}
 		}
+		// Legacy configs have neither key and retain the br-lan default. Once
+		// mdns_enabled is explicitly configured, an absent list means the user
+		// deliberately cleared the interfaces (valid while mDNS is disabled).
+		if _, configured := main.Options["mdns_enabled"]; configured {
+			cfg.MDNSInterfaces = []string{}
+		}
 		if interfaces, ok := main.Lists["mdns_interface"]; ok {
 			cfg.MDNSInterfaces = append([]string(nil), interfaces...)
 		}
@@ -474,6 +480,35 @@ func Load(path string) (*Config, error) {
 // goroutine) and SaveRules (HTTP handlers) so concurrent saves can't clobber
 // each other's changes through a stale read.
 var saveMu sync.Mutex
+
+// writeConfigAtomic writes beside path so the final rename is atomic. Existing
+// permissions are retained; a newly created secret-bearing config is private.
+func writeConfigAtomic(path string, data []byte) error {
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
 
 func boolOption(v bool) string {
 	if v {
@@ -509,7 +544,6 @@ func (c *Config) SaveMain(path string) error {
 	}
 	main.Options["device_mac"] = c.DeviceMAC
 	main.Options["pin"] = pin
-	main.Options["token"] = c.Token
 	main.Options["port"] = strconv.Itoa(c.HTTPPort)
 	main.Options["lan_api"] = boolOption(c.LANAPI)
 	main.Options["http_enabled"] = boolOption(c.HTTPEnabled)
@@ -528,11 +562,7 @@ func (c *Config) SaveMain(path string) error {
 	main.Options["mdns_enabled"] = boolOption(c.MDNSEnabled)
 	main.Options["wan_access"] = boolOption(c.WANAccess)
 	main.Lists["mdns_interface"] = append([]string(nil), c.MDNSInterfaces...)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(doc.Serialize()), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeConfigAtomic(path, []byte(doc.Serialize()))
 }
 
 // SavePairing records the paired device in the main section, preserving the
@@ -557,11 +587,7 @@ func SavePairing(path, mac, pin string) error {
 	if pin != "" {
 		main.Options["pin"] = pin
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(doc.Serialize()), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeConfigAtomic(path, []byte(doc.Serialize()))
 }
 
 // SaveRules rewrites the config file, replacing all rule sections while
@@ -587,9 +613,5 @@ func (c *Config) SaveRules(path string) error {
 	for _, r := range c.Rules {
 		doc.Sections = append(doc.Sections, ruleToSection(r))
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(doc.Serialize()), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeConfigAtomic(path, []byte(doc.Serialize()))
 }
