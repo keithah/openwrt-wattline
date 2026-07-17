@@ -65,18 +65,80 @@ func TestSubscribeSaturationRetainsFinalTerminalState(t *testing.T) {
 	s.FinishCommand("cmd-1", CommandConfirmed, map[string]any{"on": true}, nil)
 
 	foundTerminal := false
-	for {
+	for i := 0; i < 66; i++ {
 		select {
 		case snap := <-ch:
 			if len(snap.RecentCommands) == 1 && snap.RecentCommands[0].Phase == CommandConfirmed {
 				foundTerminal = true
 			}
-		default:
-			if !foundTerminal {
-				t.Fatal("final terminal command state was dropped from saturated subscriber")
-			}
-			return
+		case <-time.After(time.Second):
+			t.Fatalf("timed out after %d saturated publications", i)
 		}
+	}
+	if !foundTerminal {
+		t.Fatal("final terminal command state was dropped from saturated subscriber")
+	}
+}
+
+func TestSubscribeDeliversEveryCommandTransitionInOrderWhenConsumerBlocked(t *testing.T) {
+	s := NewStore()
+	ch, cancel := s.Subscribe()
+	defer cancel()
+	const commandCount = 20
+	for i := 0; i < commandCount; i++ {
+		id := fmt.Sprintf("cmd-%02d", i)
+		s.BeginCommand(Command{ID: id, Operation: "dc", Phase: CommandPending})
+		s.FinishCommand(id, CommandConfirmed, map[string]any{"on": true}, nil)
+	}
+
+	for transition := 0; transition < commandCount*2; transition++ {
+		id := fmt.Sprintf("cmd-%02d", transition/2)
+		select {
+		case snap := <-ch:
+			if transition%2 == 0 {
+				command, ok := snap.PendingCommands[id]
+				if !ok || command.Phase != CommandPending {
+					t.Fatalf("transition %d: want pending %s, got pending=%+v recent=%+v", transition, id, snap.PendingCommands, snap.RecentCommands)
+				}
+				continue
+			}
+			if _, ok := snap.PendingCommands[id]; ok {
+				t.Fatalf("transition %d: terminal %s remained pending", transition, id)
+			}
+			if len(snap.RecentCommands) == 0 || snap.RecentCommands[len(snap.RecentCommands)-1].ID != id {
+				t.Fatalf("transition %d: want terminal %s, got recent=%+v", transition, id, snap.RecentCommands)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for command transition %d", transition)
+		}
+	}
+}
+
+func TestSubscribeCancelInterruptsBlockedDelivery(t *testing.T) {
+	s := NewStore()
+	_, cancel := s.Subscribe()
+	s.SetConnected(true) // pump blocks until a consumer receives or cancellation wins
+	done := make(chan struct{})
+	go func() {
+		cancel()
+		cancel() // cancellation remains safe and idempotent
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancel did not stop a subscriber blocked on delivery")
+	}
+
+	mutationDone := make(chan struct{})
+	go func() {
+		s.SetConnected(false)
+		close(mutationDone)
+	}()
+	select {
+	case <-mutationDone:
+	case <-time.After(time.Second):
+		t.Fatal("store mutation blocked after subscriber cancellation")
 	}
 }
 

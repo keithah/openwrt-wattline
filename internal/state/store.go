@@ -35,14 +35,14 @@ type Store struct {
 	snap    Snapshot
 	history []HistoryPoint
 	lastMin time.Time
-	subs    map[chan Snapshot]struct{}
+	subs    map[*snapshotSubscriber]struct{}
 	waiters map[*snapshotWaiter]struct{}
 	now     func() time.Time // test hook
 }
 
 func NewStore() *Store {
 	return &Store{
-		subs:    make(map[chan Snapshot]struct{}),
+		subs:    make(map[*snapshotSubscriber]struct{}),
 		waiters: make(map[*snapshotWaiter]struct{}),
 		now:     time.Now,
 	}
@@ -68,23 +68,8 @@ func (s *Store) publishLocked(recordHistory bool) {
 	if recordHistory {
 		s.record()
 	}
-	for ch := range s.subs {
-		snap := cloneSnapshot(s.snap)
-		select {
-		case ch <- snap:
-		default:
-			// A complete snapshot supersedes older queued snapshots. Replace
-			// the oldest item so a saturated subscriber always progresses
-			// toward the latest (including terminal command state).
-			select {
-			case <-ch:
-			default:
-			}
-			select {
-			case ch <- snap:
-			default:
-			}
-		}
+	for subscriber := range s.subs {
+		subscriber.enqueue(cloneSnapshot(s.snap))
 	}
 	for waiter := range s.waiters {
 		waiter.enqueue(cloneSnapshot(s.snap))
@@ -170,13 +155,94 @@ func (s *Store) History() []HistoryPoint {
 }
 
 func (s *Store) Subscribe() (<-chan Snapshot, func()) {
-	ch := make(chan Snapshot, 16)
+	subscriber := newSnapshotSubscriber()
 	s.mu.Lock()
-	s.subs[ch] = struct{}{}
+	s.subs[subscriber] = struct{}{}
 	s.mu.Unlock()
-	return ch, func() {
+	return subscriber.out, func() {
 		s.mu.Lock()
-		delete(s.subs, ch)
+		delete(s.subs, subscriber)
 		s.mu.Unlock()
+		subscriber.stop()
 	}
+}
+
+type snapshotSubscriber struct {
+	mu       sync.Mutex
+	queue    []Snapshot
+	ready    chan struct{}
+	out      chan Snapshot
+	done     chan struct{}
+	stopped  chan struct{}
+	stopOnce sync.Once
+}
+
+func newSnapshotSubscriber() *snapshotSubscriber {
+	subscriber := &snapshotSubscriber{
+		ready:   make(chan struct{}, 1),
+		out:     make(chan Snapshot),
+		done:    make(chan struct{}),
+		stopped: make(chan struct{}),
+	}
+	go subscriber.pump()
+	return subscriber
+}
+
+func (s *snapshotSubscriber) enqueue(snap Snapshot) {
+	s.mu.Lock()
+	s.queue = append(s.queue, snap)
+	select {
+	case s.ready <- struct{}{}:
+	default:
+	}
+	s.mu.Unlock()
+}
+
+func (s *snapshotSubscriber) pump() {
+	defer close(s.stopped)
+	for {
+		snap, ok := s.next()
+		if !ok {
+			return
+		}
+		select {
+		case s.out <- snap:
+		case <-s.done:
+			return
+		}
+	}
+}
+
+func (s *snapshotSubscriber) next() (Snapshot, bool) {
+	select {
+	case <-s.done:
+		return Snapshot{}, false
+	default:
+	}
+	select {
+	case <-s.done:
+		return Snapshot{}, false
+	case <-s.ready:
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.queue) == 0 {
+		return Snapshot{}, true
+	}
+	snap := s.queue[0]
+	s.queue[0] = Snapshot{}
+	s.queue = s.queue[1:]
+	if len(s.queue) > 0 {
+		select {
+		case s.ready <- struct{}{}:
+		default:
+		}
+	}
+	return snap, true
+}
+
+func (s *snapshotSubscriber) stop() {
+	s.stopOnce.Do(func() { close(s.done) })
+	<-s.stopped
 }
