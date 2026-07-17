@@ -41,6 +41,11 @@ func ShutdownMagic() []byte        { return []byte{'F', 'M'} }
 
 // CurrentTime encodes the 10-byte Current Time write (API.md §5).
 func CurrentTime(t time.Time) []byte {
+	return CurrentTimeAt(t, 0)
+}
+
+// CurrentTimeAt encodes Current Time with the caller-supplied adjust reason.
+func CurrentTimeAt(t time.Time, reason byte) []byte {
 	dow := byte(t.Weekday()) // Sunday=0
 	if dow == 0 {
 		dow = 7 // BLE: Mon=1..Sun=7
@@ -49,6 +54,8 @@ func CurrentTime(t time.Time) []byte {
 	binary.LittleEndian.PutUint16(b, uint16(t.Year()))
 	b[2], b[3], b[4], b[5], b[6] = byte(t.Month()), byte(t.Day()), byte(t.Hour()), byte(t.Minute()), byte(t.Second())
 	b[7] = dow
+	b[8] = byte(uint64(t.Nanosecond()) * 256 / uint64(time.Second))
+	b[9] = reason
 	return b
 }
 

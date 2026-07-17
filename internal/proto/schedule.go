@@ -3,6 +3,7 @@ package proto
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
 )
 
 // Timer types (API.md §3.4 TIMER_SETTINGS).
@@ -70,7 +71,51 @@ func ScheduleGet(id byte) []byte { return []byte{CmdScheduledOnOff, ActGet, sche
 
 // ScheduleUpsert builds an add/edit; pass id 0xFF to add a new timer.
 func ScheduleUpsert(id byte, t Timer) []byte {
+	if ValidateTimerWrite(t) != nil {
+		return nil
+	}
 	return append([]byte{CmdScheduledOnOff, ActSet, schedUpsert, id}, t.Encode()...)
+}
+
+// ValidateTimerWrite enforces the writable status values and recurrence layouts.
+func ValidateTimerWrite(t Timer) error {
+	if t.Status != 1 && t.Status != -1 {
+		return fmt.Errorf("timer status %d is not writable", t.Status)
+	}
+	if t.Hour > 23 || t.Minute > 59 {
+		return fmt.Errorf("invalid timer time %02d:%02d", t.Hour, t.Minute)
+	}
+	if t.Action > 1 {
+		return fmt.Errorf("invalid timer action %d", t.Action)
+	}
+	switch t.Type {
+	case TimerOneShot:
+		year := int(t.Repeat & 0xffff)
+		month := time.Month(t.Repeat >> 16 & 0xff)
+		day := int(t.Repeat >> 24)
+		if year == 0 || month < 1 || month > 12 || day < 1 || day > 31 {
+			return fmt.Errorf("invalid one-shot date %04d-%02d-%02d", year, month, day)
+		}
+		date := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+		if date.Year() != year || date.Month() != month || date.Day() != day {
+			return fmt.Errorf("invalid one-shot date %04d-%02d-%02d", year, month, day)
+		}
+	case TimerDaily:
+		if t.Repeat != 0 {
+			return fmt.Errorf("daily timer recurrence must be zero")
+		}
+	case TimerWeekly:
+		if t.Repeat == 0 || t.Repeat&0xffffff01 != 0 {
+			return fmt.Errorf("invalid weekly recurrence mask %#x", t.Repeat)
+		}
+	case TimerMonthly:
+		if t.Repeat == 0 || t.Repeat&1 != 0 {
+			return fmt.Errorf("invalid monthly recurrence mask %#x", t.Repeat)
+		}
+	default:
+		return fmt.Errorf("invalid timer type %d", t.Type)
+	}
+	return nil
 }
 
 // ScheduleDelete builds a delete for a timer id.

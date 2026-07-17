@@ -26,12 +26,32 @@ func TestTypeCLimitFrames(t *testing.T) {
 	if got := TypeCLimitSet(1, 4); string(got) != string([]byte{0x02, 0x01, 0x01, 0x04}) {
 		t.Errorf("set = % x", got)
 	}
-	// level -1 encodes as 0xFF
-	if got := TypeCLimitSet(3, -1); got[3] != 0xFF {
-		t.Errorf("set(-1) level byte = %#02x", got[3])
-	}
 	if got := TypeCLimitClear(2); string(got) != string([]byte{0x02, 0x02, 0x02}) {
 		t.Errorf("clear = % x", got)
+	}
+}
+
+func TestLimitValidation(t *testing.T) {
+	for _, typ := range []byte{LimitGlobal, LimitInput, LimitOutput} {
+		for level := 0; level <= 5; level++ {
+			if err := ValidateLimitWrite(typ, level); err != nil {
+				t.Errorf("type %d level %d: %v", typ, level, err)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		typ   byte
+		level int
+	}{{0, 3}, {LimitRuntime, 3}, {5, 3}, {LimitGlobal, -1}, {LimitGlobal, 6}} {
+		if err := ValidateLimitWrite(tc.typ, tc.level); err == nil {
+			t.Errorf("accepted type %d level %d", tc.typ, tc.level)
+		}
+		if got := TypeCLimitSet(tc.typ, tc.level); got != nil {
+			t.Errorf("invalid set emitted % x", got)
+		}
+	}
+	if got := TypeCLimitClear(LimitRuntime); got != nil {
+		t.Errorf("runtime clear emitted % x", got)
 	}
 }
 

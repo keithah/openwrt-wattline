@@ -34,6 +34,10 @@ func TestCurrentTime(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Errorf("CurrentTime = % x, want % x", got, want)
 	}
+	want[9] = 1
+	if got := CurrentTimeAt(ts, 1); !bytes.Equal(got, want) {
+		t.Errorf("CurrentTimeAt(reason=1) = % x, want % x", got, want)
+	}
 }
 
 func TestValidateReply(t *testing.T) {
@@ -60,6 +64,9 @@ func TestValidateReply(t *testing.T) {
 	res, _, err = ValidateReply([]byte{0x14, 0x01, 0x00}, []byte{0x14, 0x81, 0xFF})
 	if err != nil || res != 0xFF {
 		t.Fatalf("bypass exemption: res=%#x err=%v", res, err)
+	}
+	if _, _, err := ValidateReply(RunningModeSet(1), []byte{0xe0, 0x81, 0x00}); err != nil {
+		t.Fatalf("running-mode SET reply rejected: %v", err)
 	}
 }
 

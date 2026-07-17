@@ -80,3 +80,47 @@ func TestScheduleUpsertFrame(t *testing.T) {
 		t.Errorf("add len = %d, want 13", len(add))
 	}
 }
+
+func TestTimerValidation(t *testing.T) {
+	valid := []Timer{
+		{Status: 1, Type: TimerOneShot, Hour: 12, Minute: 15, Repeat: uint32(2028) | 2<<16 | 29<<24, Action: 1},
+		{Status: -1, Type: TimerDaily, Hour: 0, Minute: 0, Repeat: 0, Action: 0},
+		{Status: 1, Type: TimerWeekly, Hour: 23, Minute: 59, Repeat: 1 << 1, Action: 1},
+		{Status: 1, Type: TimerWeekly, Repeat: 1 << 7},
+		{Status: 1, Type: TimerMonthly, Repeat: 1 << 1},
+		{Status: 1, Type: TimerMonthly, Repeat: 1 << 31},
+	}
+	for _, timer := range valid {
+		if err := ValidateTimerWrite(timer); err != nil {
+			t.Errorf("valid timer %+v: %v", timer, err)
+		}
+		if got := ScheduleUpsert(0xff, timer); got == nil {
+			t.Errorf("valid timer %+v was not encoded", timer)
+		}
+	}
+	base := Timer{Status: 1, Type: TimerDaily, Action: 1}
+	invalid := []Timer{
+		{Status: 0, Type: TimerDaily}, {Status: -2, Type: TimerDaily},
+		{Status: 1, Type: 4},
+		{Status: 1, Type: TimerDaily, Hour: 24},
+		{Status: 1, Type: TimerDaily, Minute: 60},
+		{Status: 1, Type: TimerDaily, Action: 2},
+		{Status: 1, Type: TimerDaily, Repeat: 1},
+		{Status: 1, Type: TimerWeekly, Repeat: 0},
+		{Status: 1, Type: TimerWeekly, Repeat: 1},
+		{Status: 1, Type: TimerWeekly, Repeat: 1 << 8},
+		{Status: 1, Type: TimerMonthly, Repeat: 0},
+		{Status: 1, Type: TimerMonthly, Repeat: 1},
+		{Status: 1, Type: TimerOneShot, Repeat: uint32(2027) | 2<<16 | 29<<24},
+		{Status: 1, Type: TimerOneShot, Repeat: uint32(2026) | 13<<16 | 1<<24},
+	}
+	invalid = append(invalid, func() Timer { t := base; t.Repeat = 1; return t }())
+	for _, timer := range invalid {
+		if err := ValidateTimerWrite(timer); err == nil {
+			t.Errorf("invalid timer accepted: %+v", timer)
+		}
+		if got := ScheduleUpsert(0xff, timer); got != nil {
+			t.Errorf("invalid timer emitted % x", got)
+		}
+	}
+}

@@ -44,13 +44,33 @@ func WattsToLevel(watts int) int {
 // TypeCLimitGet builds a get for a limit type (1=global,2=input,3=output,4=runtime).
 func TypeCLimitGet(typ byte) []byte { return []byte{CmdTypeCLimit, ActGet, typ} }
 
-// TypeCLimitSet builds a set; level -1 is encoded as 0xFF.
+// TypeCLimitSet builds a set for a mutable limit at level 0..5.
+// Invalid writes emit no frame.
 func TypeCLimitSet(typ byte, level int) []byte {
+	if ValidateLimitWrite(typ, level) != nil {
+		return nil
+	}
 	return []byte{CmdTypeCLimit, ActSet, typ, byte(level)}
 }
 
 // TypeCLimitClear resets a limit type to the device default.
-func TypeCLimitClear(typ byte) []byte { return []byte{CmdTypeCLimit, ActDel, typ} }
+func TypeCLimitClear(typ byte) []byte {
+	if typ < LimitGlobal || typ > LimitOutput {
+		return nil
+	}
+	return []byte{CmdTypeCLimit, ActDel, typ}
+}
+
+// ValidateLimitWrite checks that a mutable limit and documented level were selected.
+func ValidateLimitWrite(typ byte, level int) error {
+	if typ < LimitGlobal || typ > LimitOutput {
+		return fmt.Errorf("limit type %d is not writable", typ)
+	}
+	if level < 0 || level >= len(levelWatts) {
+		return fmt.Errorf("limit level %d is outside 0..5", level)
+	}
+	return nil
+}
 
 // ParseTypeCLimit reads the level from a get reply payload (post-ValidateReply).
 func ParseTypeCLimit(payload []byte) (level int, err error) {
