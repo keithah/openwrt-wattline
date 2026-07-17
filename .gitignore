@@ -9,6 +9,7 @@ Packages.gz
 # go
 /bin/
 /.worktrees/
+/.superpowers/
 
 # os
 .DS_Store
