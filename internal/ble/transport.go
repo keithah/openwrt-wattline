@@ -11,6 +11,7 @@ const (
 	CharTypeC   = "00004305-0000-1000-8000-00805f9b34fb"
 	CharFactory = "00004310-0000-1000-8000-00805f9b34fb"
 	CharModel   = "00002a24-0000-1000-8000-00805f9b34fb"
+	CharFWRev   = "00002a26-0000-1000-8000-00805f9b34fb"
 	CharHWRev   = "00002a27-0000-1000-8000-00805f9b34fb"
 	CharSWRev   = "00002a28-0000-1000-8000-00805f9b34fb"
 	CharTime    = "00002a2b-0000-1000-8000-00805f9b34fb"
@@ -25,6 +26,9 @@ type Transport interface {
 	WriteChar(uuid string, data []byte) error
 	ReadChar(uuid string) ([]byte, error)
 	Subscribe(uuid string, fn func([]byte)) error
+	// HasChar consults the characteristic inventory discovered at connect time.
+	// It must not perform GATT I/O.
+	HasChar(uuid string) bool
 	Disconnected() <-chan struct{}
 	// Close drops the connection, freeing the device (which accepts a single
 	// central) for pairing or other clients. Disconnected() fires afterwards.

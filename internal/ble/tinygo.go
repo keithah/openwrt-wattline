@@ -23,10 +23,23 @@ type tinygoTransport struct {
 
 func normUUID(u string) string { return strings.ToLower(u) }
 
-// ScanAndConnect scans for a device whose advertised local name starts with
-// namePrefix (API.md §12: match adv name, not cached name), connects, and
-// discovers the Link-Power + DIS characteristics.
+func matchesAdvertisementLocalName(localName string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(localName, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ScanAndConnect preserves the single-prefix API for existing callers.
 func ScanAndConnect(namePrefix string) (Transport, error) {
+	return ScanAndConnectPrefixes([]string{namePrefix})
+}
+
+// ScanAndConnectPrefixes scans for a device whose fresh advertisement local
+// name starts with one of prefixes, connects, and discovers its GATT map.
+func ScanAndConnectPrefixes(prefixes []string) (Transport, error) {
 	if err := adapter.Enable(); err != nil {
 		return nil, fmt.Errorf("enable adapter: %w", err)
 	}
@@ -44,7 +57,7 @@ func ScanAndConnect(namePrefix string) (Transport, error) {
 		}
 	}()
 	err := adapter.Scan(func(a *bluetooth.Adapter, res bluetooth.ScanResult) {
-		if strings.HasPrefix(res.LocalName(), namePrefix) {
+		if matchesAdvertisementLocalName(res.LocalName(), prefixes) {
 			found, ok = res, true
 			a.StopScan()
 		}
@@ -54,7 +67,7 @@ func ScanAndConnect(namePrefix string) (Transport, error) {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("no device advertising %q found", namePrefix)
+		return nil, fmt.Errorf("no device advertising prefixes %q found", prefixes)
 	}
 	dev, err := adapter.Connect(found.Address, bluetooth.ConnectionParams{})
 	if err != nil {
@@ -85,6 +98,11 @@ func ScanAndConnect(namePrefix string) (Transport, error) {
 		}
 	}
 	return t, nil
+}
+
+func (t *tinygoTransport) HasChar(uuid string) bool {
+	_, ok := t.chars[normUUID(uuid)]
+	return ok
 }
 
 func (t *tinygoTransport) char(uuid string) (bluetooth.DeviceCharacteristic, error) {

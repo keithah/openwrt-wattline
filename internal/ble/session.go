@@ -15,12 +15,14 @@ import (
 var _ actions.Device = (*Session)(nil)
 
 type Identity struct {
-	Model    string `json:"model"`
-	HWRev    string `json:"hw_rev"`
-	Firmware string `json:"firmware"`
-	MAC      string `json:"mac"`
-	CID      uint16 `json:"cid"`
-	Features uint32 `json:"features"`
+	Model              string `json:"model"`
+	HWRev              string `json:"hw_rev"`
+	Firmware           string `json:"firmware"`
+	BootloaderFirmware string `json:"bootloader_firmware"`
+	MAC                string `json:"mac"`
+	CID                uint16 `json:"cid"`
+	Features           uint32 `json:"features"`
+	Mode               string `json:"mode"`
 }
 
 type Session struct {
@@ -28,6 +30,7 @@ type Session struct {
 	store  *state.Store
 	mu     sync.Mutex // serializes command transactions (API.md §3: one in flight)
 	settle time.Duration
+	mode   string
 }
 
 func NewSession(t Transport, store *state.Store) *Session {
@@ -36,6 +39,12 @@ func NewSession(t Transport, store *state.Store) *Session {
 
 // Close drops the underlying BLE connection.
 func (s *Session) Close() error { return s.t.Close() }
+
+// HasChar reports whether uuid was present in the discovery inventory.
+func (s *Session) HasChar(uuid string) bool { return s.t.HasChar(strings.ToLower(uuid)) }
+
+// Mode is "app" for the normal firmware and "ota" for the bootloader.
+func (s *Session) Mode() string { return s.mode }
 
 // command performs the write-then-read transaction on 0x4302.
 func (s *Session) command(req []byte) (byte, []byte, error) {
@@ -55,6 +64,9 @@ func (s *Session) command(req []byte) (byte, []byte, error) {
 }
 
 func (s *Session) readString(uuid string) string {
+	if !s.HasChar(uuid) {
+		return ""
+	}
 	b, err := s.t.ReadChar(uuid)
 	if err != nil {
 		return ""
@@ -74,27 +86,37 @@ func (s *Session) Handshake() (Identity, error) {
 	if err != nil {
 		return id, fmt.Errorf("ota info read: %w", err)
 	}
-	mode, cid, err := proto.ParseOTAMode(info)
+	ota, err := proto.ParseOTAInfo(info)
 	if err != nil {
 		return id, err
 	}
-	if mode == 2 {
-		return id, ErrBootloader
+	switch ota.Mode {
+	case 1:
+		s.mode = "app"
+	case 2:
+		s.mode = "ota"
 	}
-	id.CID = cid
+	id.Mode = s.mode
+	id.CID = ota.CID
 
 	id.Model = s.readString(CharModel)
 	id.HWRev = s.readString(CharHWRev)
+	id.BootloaderFirmware = s.readString(CharFWRev)
 	id.Firmware = s.readString(CharSWRev)
-
-	if _, payload, err := s.command(proto.DeviceIDQuery()); err == nil {
-		if mac, err := proto.ParseDeviceID(payload); err == nil {
-			id.MAC = mac
-		}
+	if s.mode == "ota" {
+		return id, nil
 	}
-	if _, payload, err := s.command(proto.FeaturesQuery()); err == nil {
-		if f, err := proto.ParseFeatures(payload); err == nil {
-			id.Features = f
+
+	if s.HasChar(CharCmd) {
+		if _, payload, err := s.command(proto.DeviceIDQuery()); err == nil {
+			if mac, err := proto.ParseDeviceID(payload); err == nil {
+				id.MAC = mac
+			}
+		}
+		if _, payload, err := s.command(proto.FeaturesQuery()); err == nil {
+			if f, err := proto.ParseFeatures(payload); err == nil {
+				id.Features = f
+			}
 		}
 	}
 
@@ -119,6 +141,9 @@ func (s *Session) Handshake() (Identity, error) {
 		}},
 	}
 	for _, sub := range subs {
+		if !s.HasChar(sub.uuid) {
+			continue
+		}
 		if err := s.t.Subscribe(sub.uuid, sub.apply); err != nil {
 			return id, fmt.Errorf("subscribe %s: %w", sub.uuid, err)
 		}
@@ -127,8 +152,10 @@ func (s *Session) Handshake() (Identity, error) {
 		}
 	}
 
-	if err := s.t.WriteChar(CharTime, proto.CurrentTime(time.Now())); err != nil {
-		log.Printf("wattline: time sync failed (non-fatal): %v", err)
+	if s.HasChar(CharTime) {
+		if err := s.t.WriteChar(CharTime, proto.CurrentTimeAt(time.Now(), 1)); err != nil {
+			log.Printf("wattline: time sync failed (non-fatal): %v", err)
+		}
 	}
 	return id, nil
 }

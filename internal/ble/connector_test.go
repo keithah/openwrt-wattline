@@ -193,3 +193,113 @@ func TestPauseDuringDialDropsFreshConnection(t *testing.T) {
 		t.Fatal("store reports connected while paused")
 	}
 }
+
+func waitForConnector(t *testing.T, message string, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !fn() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !fn() {
+		t.Fatal(message)
+	}
+}
+
+func TestConnectorPublishesAppAndBootloaderSessions(t *testing.T) {
+	var dials int32
+	dial := func() (Transport, error) {
+		n := atomic.AddInt32(&dials, 1)
+		f := newFake()
+		if n == 1 {
+			scriptedHandshake(f)
+			go func() {
+				time.Sleep(15 * time.Millisecond)
+				f.Close()
+			}()
+		} else {
+			f.available(CharOTA, CharModel, CharHWRev, CharFWRev, CharSWRev)
+			f.push(CharOTA, "0200100000001083000000040005030100000000")
+			f.push(CharModel, "425034534c335632")
+			f.push(CharHWRev, "56352330333035")
+			f.push(CharFWRev, "322e302e32")
+			f.push(CharSWRev, "312e342e39")
+		}
+		return f, nil
+	}
+	modes := make(chan string, 2)
+	store := state.NewStore()
+	c := NewConnector(dial, store, func(s *Session, _ Identity) { modes <- s.Mode() })
+	c.retryDelay, c.settle = time.Millisecond, 0
+	stop := make(chan struct{})
+	defer close(stop)
+	go c.Run(stop)
+
+	for _, want := range []string{"app", "ota"} {
+		select {
+		case got := <-modes:
+			if got != want {
+				t.Fatalf("session mode = %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s session", want)
+		}
+	}
+	waitForConnector(t, "bootloader connection state", func() bool {
+		snap := store.Snapshot()
+		return snap.Connection != nil && snap.Connection.Phase == state.ConnectionBootloader &&
+			snap.Device != nil && snap.Device.Mode == "ota" && snap.Device.BootloaderFirmware == "2.0.2"
+	})
+}
+
+func TestConnectorArmReconnectDelaysRestartRedial(t *testing.T) {
+	var dials int32
+	dial := func() (Transport, error) {
+		atomic.AddInt32(&dials, 1)
+		f := newFake()
+		scriptedHandshake(f)
+		return f, nil
+	}
+	c := NewConnector(dial, state.NewStore(), nil)
+	c.retryDelay, c.settle = time.Millisecond, 0
+	stop := make(chan struct{})
+	defer close(stop)
+	go c.Run(stop)
+	waitForConnector(t, "initial connection", func() bool { return c.Session() != nil })
+
+	c.ArmReconnect(80 * time.Millisecond)
+	if err := c.Session().Close(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := atomic.LoadInt32(&dials); got != 1 {
+		t.Fatalf("restart redialed before armed delay: %d dials", got)
+	}
+	waitForConnector(t, "restart reconnect", func() bool { return atomic.LoadInt32(&dials) >= 2 })
+}
+
+func TestConnectorDisarmReconnectBlocksShutdownUntilResume(t *testing.T) {
+	var dials int32
+	dial := func() (Transport, error) {
+		atomic.AddInt32(&dials, 1)
+		f := newFake()
+		scriptedHandshake(f)
+		return f, nil
+	}
+	c := NewConnector(dial, state.NewStore(), nil)
+	c.retryDelay, c.settle = time.Millisecond, 0
+	stop := make(chan struct{})
+	defer close(stop)
+	go c.Run(stop)
+	waitForConnector(t, "initial connection", func() bool { return c.Session() != nil })
+
+	c.DisarmReconnect()
+	if err := c.Session().Close(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if got := atomic.LoadInt32(&dials); got != 1 {
+		t.Fatalf("shutdown redialed while disarmed: %d dials", got)
+	}
+	c.ResumeReconnect()
+	waitForConnector(t, "reconnect after resume", func() bool { return atomic.LoadInt32(&dials) >= 2 })
+}

@@ -14,8 +14,12 @@ import (
 type fakeTransport struct {
 	writes     [][2]string // (uuid, hex)
 	reads      int
+	readCalls  map[string]int
+	writeCalls map[string]int
+	subCalls   map[string]int
 	replies    map[string][][]byte // uuid -> FIFO of read replies
 	subs       map[string]func([]byte)
+	chars      map[string]bool
 	failWrites map[string]error // uuid -> error to return on write
 	disc       chan struct{}
 	closeOnce  sync.Once
@@ -28,19 +32,28 @@ func (f *fakeTransport) Close() error {
 
 func newFake() *fakeTransport {
 	return &fakeTransport{replies: map[string][][]byte{},
-		subs: map[string]func([]byte){}, failWrites: map[string]error{},
+		readCalls: map[string]int{}, writeCalls: map[string]int{}, subCalls: map[string]int{},
+		subs: map[string]func([]byte){}, chars: map[string]bool{}, failWrites: map[string]error{},
 		disc: make(chan struct{})}
 }
+func (f *fakeTransport) available(uuids ...string) {
+	for _, uuid := range uuids {
+		f.chars[uuid] = true
+	}
+}
+func (f *fakeTransport) HasChar(uuid string) bool { return f.chars[uuid] }
 func (f *fakeTransport) push(uuid, hexStr string) {
 	b, _ := hex.DecodeString(hexStr)
 	f.replies[uuid] = append(f.replies[uuid], b)
 }
 func (f *fakeTransport) WriteChar(uuid string, data []byte) error {
+	f.writeCalls[uuid]++
 	f.writes = append(f.writes, [2]string{uuid, hex.EncodeToString(data)})
 	return f.failWrites[uuid]
 }
 func (f *fakeTransport) ReadChar(uuid string) ([]byte, error) {
 	f.reads++
+	f.readCalls[uuid]++
 	q := f.replies[uuid]
 	if len(q) == 0 {
 		return nil, errors.New("no scripted reply for " + uuid)
@@ -62,15 +75,19 @@ func TestCommandRejectsEmptyFrameWithoutTransportIO(t *testing.T) {
 	}
 }
 func (f *fakeTransport) Subscribe(uuid string, fn func([]byte)) error {
+	f.subCalls[uuid]++
 	f.subs[uuid] = fn
 	return nil
 }
 func (f *fakeTransport) Disconnected() <-chan struct{} { return f.disc }
 
 func scriptedHandshake(f *fakeTransport) {
+	f.available(CharOTA, CharModel, CharHWRev, CharFWRev, CharSWRev, CharCmd,
+		CharBattery, CharDC, CharTypeC, CharTime)
 	f.push(CharOTA, "010000000000000000000000000503") // mode 1, CID 0x0305
 	f.push(CharModel, hex.EncodeToString([]byte("BP4SL3V2")))
 	f.push(CharHWRev, hex.EncodeToString([]byte("V5#0305")))
+	f.push(CharFWRev, hex.EncodeToString([]byte("2.0.2")))
 	f.push(CharSWRev, hex.EncodeToString([]byte("1.4.9")))
 	f.push(CharCmd, "1080002b72eb5a04dc") // DEVICE_ID reply
 	f.push(CharCmd, "fe8000ff7f0000")     // FEATURES reply
@@ -89,7 +106,8 @@ func TestHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id.Model != "BP4SL3V2" || id.Firmware != "1.4.9" || id.CID != 0x0305 ||
+	if id.Model != "BP4SL3V2" || id.Firmware != "1.4.9" || id.BootloaderFirmware != "2.0.2" ||
+		id.Mode != "app" || id.CID != 0x0305 ||
 		id.Features != 0x7FFF || id.MAC != "DC:04:5A:EB:72:2B" {
 		t.Fatalf("identity: %+v", id)
 	}
@@ -113,6 +131,9 @@ func TestHandshake(t *testing.T) {
 	for _, w := range f.writes {
 		if w[0] == CharTime {
 			found = true
+			if got := mustHexB(t, w[1]); len(got) != 10 || got[9] != 1 {
+				t.Fatalf("handshake Current Time = % x, want adjustment reason 1", got)
+			}
 		}
 	}
 	if !found {
@@ -131,12 +152,72 @@ func mustHexB(t *testing.T, s string) []byte {
 
 func TestHandshakeBootloader(t *testing.T) {
 	f := newFake()
-	// f.push(CharOTA, "0200100000001083000000040005 0301000000") // mode 2 (spaces stripped below)
-	f.replies[CharOTA] = [][]byte{mustHexB(t, "020010000000108300000004000503010000")}
+	f.available(CharOTA, CharModel, CharHWRev, CharFWRev, CharSWRev)
+	f.push(CharOTA, "0200100000001083000000040005030100000000")
+	f.push(CharModel, hex.EncodeToString([]byte("BP4SL3V2")))
+	f.push(CharHWRev, hex.EncodeToString([]byte("V5#0305")))
+	f.push(CharFWRev, hex.EncodeToString([]byte("2.0.2")))
+	f.push(CharSWRev, hex.EncodeToString([]byte("1.4.9")))
 	s := NewSession(f, state.NewStore())
 	s.settle = 0
-	if _, err := s.Handshake(); !errors.Is(err, ErrBootloader) {
-		t.Fatalf("want ErrBootloader, got %v", err)
+	id, err := s.Handshake()
+	if err != nil {
+		t.Fatalf("bootloader handshake: %v", err)
+	}
+	if id.Mode != "ota" || s.Mode() != "ota" || id.CID != 0x0305 || id.BootloaderFirmware != "2.0.2" {
+		t.Fatalf("bootloader identity: %+v, session mode %q", id, s.Mode())
+	}
+	for _, uuid := range []string{CharCmd, CharBattery, CharDC, CharTypeC, CharTime} {
+		if f.readCalls[uuid] != 0 || f.writeCalls[uuid] != 0 || f.subCalls[uuid] != 0 {
+			t.Fatalf("bootloader touched app characteristic %s: reads=%d writes=%d subs=%d",
+				uuid, f.readCalls[uuid], f.writeCalls[uuid], f.subCalls[uuid])
+		}
+	}
+}
+
+func TestHandshakeSkipsMissingCharacteristics(t *testing.T) {
+	f := newFake()
+	f.available(CharOTA, CharModel, CharHWRev, CharFWRev, CharSWRev, CharCmd, CharDC)
+	f.push(CharOTA, "010000000000000000000000000503")
+	f.push(CharModel, hex.EncodeToString([]byte("BP4SL3V2")))
+	f.push(CharHWRev, hex.EncodeToString([]byte("V5#0305")))
+	f.push(CharFWRev, hex.EncodeToString([]byte("2.0.2")))
+	f.push(CharSWRev, hex.EncodeToString([]byte("1.4.9")))
+	f.push(CharCmd, "1080002b72eb5a04dc")
+	f.push(CharCmd, "fe8000ff7f0000")
+	f.push(CharDC, "0100a7e713b11bc201007f")
+
+	s := NewSession(f, state.NewStore())
+	s.settle = 0
+	if _, err := s.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	if f.subCalls[CharDC] != 1 {
+		t.Fatalf("DC subscriptions = %d, want 1", f.subCalls[CharDC])
+	}
+	for _, uuid := range []string{CharBattery, CharTypeC, CharTime} {
+		if f.readCalls[uuid] != 0 || f.writeCalls[uuid] != 0 || f.subCalls[uuid] != 0 {
+			t.Fatalf("missing characteristic %s was touched", uuid)
+		}
+	}
+}
+
+func TestCharacteristicLookupAndAdvertisementPrefixMatching(t *testing.T) {
+	f := newFake()
+	f.available(CharOTA, CharTime)
+	s := NewSession(f, state.NewStore())
+	if !s.HasChar(CharOTA) || !s.HasChar(strings.ToUpper(CharTime)) || s.HasChar(CharCmd) {
+		t.Fatalf("unexpected characteristic inventory: ota=%v time=%v cmd=%v",
+			s.HasChar(CharOTA), s.HasChar(strings.ToUpper(CharTime)), s.HasChar(CharCmd))
+	}
+	prefixes := []string{"Link-Power", "PeakDo-OTA"}
+	for _, localName := range []string{"Link-Power-2", "PeakDo-OTA"} {
+		if !matchesAdvertisementLocalName(localName, prefixes) {
+			t.Fatalf("fresh advertisement local name %q did not match", localName)
+		}
+	}
+	if matchesAdvertisementLocalName("Cached-Link-Power", prefixes) {
+		t.Fatal("non-matching fresh advertisement local name was accepted")
 	}
 }
 

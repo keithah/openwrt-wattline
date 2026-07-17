@@ -14,6 +14,11 @@ import (
 
 // ScanAndConnect is unsupported off Linux; production uses the BlueZ backend.
 func ScanAndConnect(namePrefix string) (Transport, error) {
+	return ScanAndConnectPrefixes([]string{namePrefix})
+}
+
+// ScanAndConnectPrefixes is unsupported off Linux; production uses BlueZ.
+func ScanAndConnectPrefixes(prefixes []string) (Transport, error) {
 	return nil, fmt.Errorf("wattline: BLE transport is Linux/BlueZ only, not %s", runtime.GOOS)
 }
 
