@@ -11,13 +11,23 @@ import (
 
 type Dialer func() (Transport, error)
 
+type connectorTimer interface {
+	C() <-chan time.Time
+	Stop() bool
+}
+
+type realConnectorTimer struct{ timer *time.Timer }
+
+func (t realConnectorTimer) C() <-chan time.Time { return t.timer.C }
+func (t realConnectorTimer) Stop() bool          { return t.timer.Stop() }
+
 type Connector struct {
 	dial       Dialer
 	store      *state.Store
 	onSession  func(*Session, Identity)
 	retryDelay time.Duration
 	settle     time.Duration
-	after      func(time.Duration) <-chan time.Time
+	newTimer   func(time.Duration) connectorTimer
 
 	mu     sync.Mutex
 	sess   *Session
@@ -37,7 +47,8 @@ func logFailure(n int) bool { return n == 1 || n%30 == 0 }
 
 func NewConnector(dial Dialer, store *state.Store, onSession func(*Session, Identity)) *Connector {
 	return &Connector{dial: dial, store: store, onSession: onSession,
-		retryDelay: 2 * time.Second, settle: 2 * time.Second, after: time.After,
+		retryDelay: 2 * time.Second, settle: 2 * time.Second,
+		newTimer:       func(delay time.Duration) connectorTimer { return realConnectorTimer{time.NewTimer(delay)} },
 		reconnectArmed: true, policyChanged: make(chan struct{})}
 }
 
@@ -166,13 +177,16 @@ func (c *Connector) waitForDial(stop <-chan struct{}, reconnect bool) (<-chan st
 			}
 			continue
 		}
-		timer := c.after(delay)
+		timer := c.newTimer(delay)
 		select {
 		case <-stop:
+			timer.Stop()
 			return nil, false
 		case <-changed:
+			timer.Stop()
 			continue
-		case <-timer:
+		case <-timer.C():
+			timer.Stop()
 			if c.claimReconnect(changed, pending) {
 				return changed, true
 			}
@@ -227,6 +241,10 @@ func (c *Connector) closeSession(sess *Session) {
 	if sess != nil {
 		sess.Close()
 	}
+	c.clearSession(sess)
+}
+
+func (c *Connector) clearSession(sess *Session) {
 	c.mu.Lock()
 	if c.sess == sess {
 		c.sess = nil
@@ -234,6 +252,30 @@ func (c *Connector) closeSession(sess *Session) {
 	c.mu.Unlock()
 	c.store.SetConnected(false)
 	c.publishConnection(state.ConnectionDisconnected)
+}
+
+type handshakeResult struct {
+	id  Identity
+	err error
+}
+
+// handshake watches stop while synchronous GATT calls are in flight. Closing
+// the transport aborts a blocked operation; joining done ensures no handshake
+// goroutine or watcher outlives the connection attempt.
+func (c *Connector) handshake(sess *Session, stop <-chan struct{}) (Identity, error, bool) {
+	done := make(chan handshakeResult, 1)
+	go func() {
+		id, err := sess.Handshake()
+		done <- handshakeResult{id: id, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.id, result.err, false
+	case <-stop:
+		sess.Close()
+		result := <-done
+		return result.id, result.err, true
+	}
 }
 
 func (c *Connector) Run(stop <-chan struct{}) {
@@ -292,7 +334,11 @@ func (c *Connector) Run(stop <-chan struct{}) {
 		}
 		sess := NewSession(t, c.store)
 		sess.settle = c.settle
-		id, err := sess.Handshake()
+		id, err, stoppedDuringHandshake := c.handshake(sess, stop)
+		if stoppedDuringHandshake {
+			c.clearSession(sess)
+			return
+		}
 		if stopped(stop) {
 			c.closeSession(sess)
 			return

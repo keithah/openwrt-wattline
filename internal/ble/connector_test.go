@@ -310,12 +310,17 @@ type connectorTimerRequest struct {
 	fire  chan time.Time
 }
 
+type controlledTimer struct{ fire chan time.Time }
+
+func (t controlledTimer) C() <-chan time.Time { return t.fire }
+func (controlledTimer) Stop() bool            { return true }
+
 func controlledConnectorTimer(c *Connector) <-chan connectorTimerRequest {
 	requests := make(chan connectorTimerRequest, 8)
-	c.after = func(delay time.Duration) <-chan time.Time {
+	c.newTimer = func(delay time.Duration) connectorTimer {
 		fire := make(chan time.Time, 1)
 		requests <- connectorTimerRequest{delay: delay, fire: fire}
-		return fire
+		return controlledTimer{fire: fire}
 	}
 	return requests
 }
@@ -400,19 +405,72 @@ func TestConnectorArmReplacesActiveDefaultReconnectDelay(t *testing.T) {
 	}
 }
 
+type trackedConnectorTimer struct {
+	fire    chan time.Time
+	stopped chan struct{}
+	once    sync.Once
+}
+
+func (t *trackedConnectorTimer) C() <-chan time.Time { return t.fire }
+func (t *trackedConnectorTimer) Stop() bool {
+	t.once.Do(func() { close(t.stopped) })
+	return true
+}
+
+func TestConnectorPolicyChangeStopsAbandonedTimer(t *testing.T) {
+	timers := make(chan *trackedConnectorTimer, 1)
+	dial := func() (Transport, error) {
+		f := newFake()
+		scriptedHandshake(f)
+		return f, nil
+	}
+	c := NewConnector(dial, state.NewStore(), nil)
+	c.retryDelay, c.settle = time.Minute, 0
+	c.newTimer = func(time.Duration) connectorTimer {
+		timer := &trackedConnectorTimer{fire: make(chan time.Time, 1), stopped: make(chan struct{})}
+		timers <- timer
+		return timer
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go c.Run(stop)
+	waitForConnector(t, "initial connection", func() bool { return c.Session() != nil })
+	if err := c.Session().Close(); err != nil {
+		t.Fatal(err)
+	}
+	active := <-timers
+	c.DisarmReconnect()
+	select {
+	case <-active.stopped:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("policy change abandoned the active reconnect timer without stopping it")
+	}
+}
+
 type blockingHandshakeTransport struct {
 	*fakeTransport
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
+	entered     chan struct{}
+	release     chan struct{}
+	enterOnce   sync.Once
+	releaseOnce sync.Once
 }
 
 func (t *blockingHandshakeTransport) ReadChar(uuid string) ([]byte, error) {
 	if uuid == CharOTA {
-		t.once.Do(func() { close(t.entered) })
+		t.enterOnce.Do(func() { close(t.entered) })
 		<-t.release
 	}
 	return t.fakeTransport.ReadChar(uuid)
+}
+
+func (t *blockingHandshakeTransport) releaseHandshake() {
+	t.releaseOnce.Do(func() { close(t.release) })
+}
+
+func (t *blockingHandshakeTransport) Close() error {
+	// A real transport close aborts the blocked GATT operation.
+	t.releaseHandshake()
+	return t.fakeTransport.Close()
 }
 
 func newBlockingHandshakeTransport() *blockingHandshakeTransport {
@@ -440,7 +498,7 @@ func TestConnectorDisarmDuringHandshakeRemainsAuthoritative(t *testing.T) {
 	go c.Run(stop)
 	<-bt.entered
 	c.DisarmReconnect()
-	close(bt.release)
+	bt.releaseHandshake()
 	waitForConnector(t, "handshake did not publish session", func() bool { return c.Session() != nil })
 	if conn := store.Snapshot().Connection; conn == nil || conn.ReconnectArmed {
 		t.Fatalf("ready state overwrote disarm: %+v", conn)
@@ -523,8 +581,13 @@ func TestConnectorStopDuringHandshakeClosesFreshTransport(t *testing.T) {
 	go func() { c.Run(stop); close(done) }()
 	<-bt.entered
 	close(stop)
-	close(bt.release)
-	<-done
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		bt.Close() // prevent a leaked test goroutine after recording failure
+		<-done
+		t.Fatal("stop did not promptly abort the blocked handshake")
+	}
 	select {
 	case <-bt.Disconnected():
 	default:
