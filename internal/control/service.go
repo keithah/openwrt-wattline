@@ -155,6 +155,11 @@ func (s *Service) reconcile(
 		return observedTelemetry(s.store.Snapshot(), kind), errors.New("generate command ID: empty ID")
 	}
 	s.store.BeginCommand(state.Command{ID: id, Operation: operation, Requested: requested, StartedAt: started, UpdatedAt: started})
+	if err := ctx.Err(); err != nil {
+		observed := observedTelemetry(s.store.Snapshot(), kind)
+		s.store.FinishCommand(id, state.CommandFailed, observed, commandError(err))
+		return observed, err
+	}
 
 	finish := func(phase string, observed any, err error) (any, error) {
 		s.store.FinishCommand(id, phase, observed, commandError(err))

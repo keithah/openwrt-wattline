@@ -278,6 +278,66 @@ func TestReconciledResolvesBeforeIDAndCapability(t *testing.T) {
 	}
 }
 
+func TestCancellationDuringIDGenerationFinishesWithoutSessionCall(t *testing.T) {
+	st := fullyCapableStore()
+	st.SetDC(proto.DCPort{})
+	sess := &fakeSession{}
+	svc := testService(st, sess)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	svc.newID = func() (string, error) {
+		close(entered)
+		<-release
+		return "cmd-canceled-id", nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := svc.SetDC(ctx, true); done <- err }()
+	<-entered
+	cancel()
+	close(release)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+	cmd := terminal(t, st)
+	if cmd.Phase != state.CommandFailed || cmd.Error == nil || cmd.Error.Code != "canceled" {
+		t.Fatalf("terminal=%+v", cmd)
+	}
+	if len(sess.dcCalls) != 0 {
+		t.Fatalf("DC calls=%v", sess.dcCalls)
+	}
+}
+
+func TestCancellationDuringResolutionFinishesWithoutSessionCall(t *testing.T) {
+	st := fullyCapableStore()
+	st.SetDC(proto.DCPort{})
+	sess := &fakeSession{}
+	svc := testService(st, sess)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	svc.resolve = func() Session {
+		close(entered)
+		<-release
+		return sess
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := svc.SetDC(ctx, true); done <- err }()
+	<-entered
+	cancel()
+	close(release)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+	cmd := terminal(t, st)
+	if cmd.Phase != state.CommandFailed || cmd.Error == nil || cmd.Error.Code != "canceled" {
+		t.Fatalf("terminal=%+v", cmd)
+	}
+	if len(sess.dcCalls) != 0 {
+		t.Fatalf("DC calls=%v", sess.dcCalls)
+	}
+}
+
 func TestReconciledFailureAndDisconnectedAreTerminal(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

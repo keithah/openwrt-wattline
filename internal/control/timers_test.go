@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/keithah/openwrt-wattline/internal/proto"
@@ -20,6 +21,23 @@ func TestLimitsReturnAtomicSessionReadback(t *testing.T) {
 	}
 	if got, err := svc.DeleteUSBCLimit(context.Background(), proto.LimitOutput); err != nil || got != 0 {
 		t.Fatalf("delete=(%d,%v)", got, err)
+	}
+}
+
+func TestPutUSBCLimitRejectsInvalidIntTypeBeforeResolution(t *testing.T) {
+	for _, typ := range []int{257, -255, 0, proto.LimitRuntime, 5, -1} {
+		t.Run(fmt.Sprintf("type_%d", typ), func(t *testing.T) {
+			sess := &fakeSession{}
+			resolveCalls := 0
+			svc := testService(fullyCapableStore(), sess)
+			svc.resolve = func() Session { resolveCalls++; return sess }
+			if _, err := svc.PutUSBCLimit(context.Background(), typ, 3); err == nil {
+				t.Fatalf("type %d accepted", typ)
+			}
+			if resolveCalls != 0 {
+				t.Fatalf("type %d resolved session %d times", typ, resolveCalls)
+			}
+		})
 	}
 }
 

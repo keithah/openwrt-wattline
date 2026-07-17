@@ -19,6 +19,9 @@ func (s *Service) GetUSBCLimit(ctx context.Context, typ int) (int, error) {
 }
 
 func (s *Service) PutUSBCLimit(ctx context.Context, typ, level int) (int, error) {
+	if typ < proto.LimitGlobal || typ > proto.LimitOutput {
+		return 0, fmt.Errorf("invalid mutable USB-C limit type %d", typ)
+	}
 	if err := proto.ValidateLimitWrite(byte(typ), level); err != nil {
 		return 0, err
 	}
