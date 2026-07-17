@@ -73,15 +73,55 @@ func TestAtomicTimerMutationsAdoptIDAndRelist(t *testing.T) {
 		t.Fatalf("DeleteTimer = %+v, %v", list, err)
 	}
 
-	got := writeFrames(f)
-	wantPrefixes := []string{"060102ff", "060000", "06000107", "06010207", "060000", "06000107", "06010407", "060000"}
-	if len(got) != len(wantPrefixes) {
-		t.Fatalf("timer frame count = %d (%v), want %d", len(got), got, len(wantPrefixes))
+	want := []string{
+		"060102ff0101061e0000000001", "060000", "06000107",
+		"060102070101081e0000000001", "060000", "06000107",
+		"06010407", "060000",
 	}
-	for i, prefix := range wantPrefixes {
-		if len(got[i]) < len(prefix) || got[i][:len(prefix)] != prefix {
-			t.Fatalf("timer frame %d = %s, want prefix %s", i, got[i], prefix)
-		}
+	if got := writeFrames(f); !reflect.DeepEqual(got, want) {
+		t.Fatalf("timer frames = %v, want %v", got, want)
+	}
+}
+
+func TestAtomicTimerRejectsTruncatedListBeforeGet(t *testing.T) {
+	s, f := newCtlSession()
+	f.push(CharCmd, "0680000207") // declares two IDs, contains one
+	if _, err := s.ListTimers(); err == nil {
+		t.Fatal("ListTimers accepted truncated ID list")
+	}
+	if got := writeFrames(f); !reflect.DeepEqual(got, []string{"060000"}) {
+		t.Fatalf("truncated list frames = %v, want list only", got)
+	}
+}
+
+func TestAtomicTimerAddRequiresAssignedID(t *testing.T) {
+	s, f := newCtlSession()
+	f.push(CharCmd, "068100") // successful reply with no assigned ID
+	f.push(CharCmd, "06800000")
+	timer := proto.Timer{Status: 1, Type: proto.TimerDaily, Hour: 6, Action: 1}
+	if _, _, err := s.AddTimer(timer); err == nil {
+		t.Fatal("AddTimer accepted reply without assigned ID")
+	}
+	if got := writeFrames(f); !reflect.DeepEqual(got, []string{"060102ff010106000000000001"}) {
+		t.Fatalf("missing-ID add frames = %v, want add only", got)
+	}
+}
+
+func TestAtomicTimerRejectsShortSettingsBody(t *testing.T) {
+	s, f := newCtlSession()
+	f.push(CharCmd, "0680000107")
+	f.push(CharCmd, "068000070101061e00000000") // ID plus eight setting bytes
+	if _, err := s.ListTimers(); err == nil {
+		t.Fatal("ListTimers accepted short timer settings body")
+	}
+}
+
+func TestAtomicTimerRejectsMismatchedGetID(t *testing.T) {
+	s, f := newCtlSession()
+	f.push(CharCmd, "0680000107")
+	f.push(CharCmd, "068000080101061e0000000001")
+	if _, err := s.ListTimers(); err == nil {
+		t.Fatal("ListTimers accepted mismatched GET reply ID")
 	}
 }
 

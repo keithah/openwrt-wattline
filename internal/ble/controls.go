@@ -93,7 +93,10 @@ func (s *Session) listTimersLocked() ([]proto.Timer, error) {
 	if err != nil {
 		return nil, err
 	}
-	ids := proto.ParseScheduleIDs(payload)
+	ids, err := strictScheduleIDs(payload)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]proto.Timer, 0, len(ids))
 	for _, id := range ids {
 		_, p, err := s.commandLocked(proto.ScheduleGet(id))
@@ -103,10 +106,13 @@ func (s *Session) listTimersLocked() ([]proto.Timer, error) {
 		// The get reply carries the timer id at payload[0]; the 9-byte
 		// TIMER_SETTINGS struct starts at payload[1] (API.md §3.4:
 		// "struct starting at byte 4" of the reply frame).
-		if len(p) < 1 {
-			return nil, fmt.Errorf("schedule %d: empty get reply", id)
+		if len(p) < 10 {
+			return nil, fmt.Errorf("schedule %d: GET payload too short: % x", id, p)
 		}
-		tm, err := proto.ParseTimer(p[1:])
+		if p[0] != id {
+			return nil, fmt.Errorf("schedule %d: GET reply ID mismatch: got %d", id, p[0])
+		}
+		tm, err := proto.ParseTimer(p[1:10])
 		if err != nil {
 			return nil, err
 		}
@@ -114,6 +120,27 @@ func (s *Session) listTimersLocked() ([]proto.Timer, error) {
 		out = append(out, tm)
 	}
 	return out, nil
+}
+
+func strictScheduleIDs(payload []byte) ([]byte, error) {
+	if len(payload) < 1 {
+		return nil, fmt.Errorf("schedule list payload is empty")
+	}
+	count := int(payload[0])
+	if len(payload) < 1+count {
+		return nil, fmt.Errorf("schedule list declares %d IDs but contains %d", count, len(payload)-1)
+	}
+	return append([]byte(nil), payload[1:1+count]...), nil
+}
+
+func strictUpsertID(payload []byte, requested byte) (byte, error) {
+	if len(payload) >= 1 {
+		return payload[0], nil
+	}
+	if requested == 0xff {
+		return 0, fmt.Errorf("schedule add reply is missing assigned ID")
+	}
+	return requested, nil
 }
 
 func (s *Session) ListTimers() ([]proto.Timer, error) {
@@ -129,7 +156,10 @@ func (s *Session) AddTimer(t proto.Timer) ([]proto.Timer, byte, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	id := proto.ParsedUpsertID(payload, 0xff)
+	id, err := strictUpsertID(payload, 0xff)
+	if err != nil {
+		return nil, 0, err
+	}
 	timers, err := s.listTimersLocked()
 	return timers, id, err
 }
@@ -158,7 +188,7 @@ func (s *Session) UpsertSchedule(id byte, t proto.Timer) (byte, error) {
 	if err != nil {
 		return 0, err
 	}
-	return proto.ParsedUpsertID(payload, id), nil
+	return strictUpsertID(payload, id)
 }
 
 // DeleteSchedule removes a timer by id.

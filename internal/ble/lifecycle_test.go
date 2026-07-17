@@ -25,6 +25,13 @@ func (p *fakeLifecyclePolicy) ResumeReconnect() {
 	p.calls = append(p.calls, lifecyclePolicyCall{name: "resume"})
 }
 
+func TestDisconnectDefaultGraceExceedsDocumentedOTAExit(t *testing.T) {
+	s, _ := newCtlSession()
+	if s.disconnectGrace <= 2*time.Second {
+		t.Fatalf("default disconnect grace = %v, want > 2s", s.disconnectGrace)
+	}
+}
+
 func TestClockAbsentDoesZeroIO(t *testing.T) {
 	s, f := newCtlSession()
 	if got, available, err := s.ReadClock(); err != nil || available || !got.IsZero() {

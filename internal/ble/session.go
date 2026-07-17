@@ -39,7 +39,7 @@ type Session struct {
 }
 
 func NewSession(t Transport, store *state.Store) *Session {
-	return &Session{t: t, store: store, settle: 2 * time.Second, disconnectGrace: 2 * time.Second}
+	return &Session{t: t, store: store, settle: 2 * time.Second, disconnectGrace: 5 * time.Second}
 }
 
 func (s *Session) setCancel(cancel context.CancelFunc) {
