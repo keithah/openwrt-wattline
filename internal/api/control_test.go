@@ -10,12 +10,13 @@ import (
 )
 
 type fakeControl struct {
-	limits     map[int]int
-	threshold  float64
-	timers     []proto.Timer
-	nextID     byte
-	lastUpsert proto.Timer
-	deleted    []byte
+	limits                     map[int]int
+	threshold                  float64
+	timers                     []proto.Timer
+	nextID                     byte
+	lastUpsert                 proto.Timer
+	deleted                    []byte
+	scheduleCalls, upsertCalls int
 }
 
 func (f *fakeControl) USBCLimit(typ int) (int, error) { return f.limits[typ], nil }
@@ -29,8 +30,9 @@ func (f *fakeControl) SetUSBCLimit(typ, level int) error {
 func (f *fakeControl) ClearUSBCLimit(typ int) error       { delete(f.limits, typ); return nil }
 func (f *fakeControl) BypassThreshold() (float64, error)  { return f.threshold, nil }
 func (f *fakeControl) SetBypassThreshold(v float64) error { f.threshold = v; return nil }
-func (f *fakeControl) Schedules() ([]proto.Timer, error)  { return f.timers, nil }
+func (f *fakeControl) Schedules() ([]proto.Timer, error)  { f.scheduleCalls++; return f.timers, nil }
 func (f *fakeControl) UpsertSchedule(id byte, t proto.Timer) (byte, error) {
+	f.upsertCalls++
 	f.lastUpsert = t
 	if id == 0xFF {
 		return f.nextID, nil
@@ -93,38 +95,21 @@ func TestBypassThresholdAPI(t *testing.T) {
 	}
 }
 
-func TestScheduleAPI(t *testing.T) {
+func TestScheduleAliasesDoNotUseLegacyControlFallback(t *testing.T) {
 	fc := &fakeControl{nextID: 3, timers: []proto.Timer{{ID: 0, Status: 1, Type: proto.TimerDaily, Hour: 3, Action: 1}}}
 	h := ctlServer(t, fc)
-	w := do(t, h, "GET", "/api/v1/device/schedules", "tok", "")
-	if w.Code != 200 {
-		t.Fatalf("GET %d", w.Code)
+	for _, request := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/v1/device/schedules", ""},
+		{http.MethodPost, "/api/v1/device/schedules", `{"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`},
+		{http.MethodDelete, "/api/v1/device/schedules/0", ""},
+	} {
+		rr := do(t, h, request.method, request.path, "tok", request.body)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s %s: %d %s", request.method, request.path, rr.Code, rr.Body.String())
+		}
 	}
-	var list []proto.Timer
-	json.Unmarshal(w.Body.Bytes(), &list)
-	if len(list) != 1 || list[0].Hour != 3 {
-		t.Fatalf("list %+v", list)
-	}
-	// add (no id) -> assigned nextID 3
-	w = do(t, h, "POST", "/api/v1/device/schedules", "tok", `{"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`)
-	if w.Code != 200 {
-		t.Fatalf("add %d", w.Code)
-	}
-	var added proto.Timer
-	json.Unmarshal(w.Body.Bytes(), &added)
-	if added.ID != 3 || added.Status != 1 || added.Hour != 6 {
-		t.Fatalf("added %+v", added)
-	}
-	// invalid hour
-	if w = do(t, h, "POST", "/api/v1/device/schedules", "tok", `{"type":1,"hour":25}`); w.Code != 400 {
-		t.Fatalf("bad hour %d", w.Code)
-	}
-	// delete
-	if w = do(t, h, "DELETE", "/api/v1/device/schedules/0", "tok", ""); w.Code != 200 || len(fc.deleted) != 1 {
-		t.Fatalf("delete %d deleted=%v", w.Code, fc.deleted)
-	}
-	if w = do(t, h, "DELETE", "/api/v1/device/schedules/abc", "tok", ""); w.Code != 400 {
-		t.Fatalf("bad id delete %d", w.Code)
+	if fc.scheduleCalls != 0 || fc.upsertCalls != 0 || len(fc.deleted) != 0 {
+		t.Fatalf("legacy Control touched: list=%d upsert=%d delete=%v", fc.scheduleCalls, fc.upsertCalls, fc.deleted)
 	}
 }
 
@@ -186,8 +171,14 @@ func TestScheduleAliasesUseControlServiceAndCanonicalErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _, _ := canonicalServer(t, tc.connected, tc.supported, true, tc.err)
-			if rr := do(t, h, http.MethodGet, "/api/v1/device/schedules", "tok", ""); rr.Code != tc.want {
-				t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+			for _, request := range []struct{ method, path, body string }{
+				{http.MethodGet, "/api/v1/device/schedules", ""},
+				{http.MethodPost, "/api/v1/device/schedules", `{"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`},
+				{http.MethodDelete, "/api/v1/device/schedules/4", ""},
+			} {
+				if rr := do(t, h, request.method, request.path, "tok", request.body); rr.Code != tc.want {
+					t.Fatalf("%s status %d: %s", request.method, rr.Code, rr.Body.String())
+				}
 			}
 		})
 	}

@@ -201,25 +201,13 @@ func (s *server) getSchedules(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
-	if s.d.DeviceControl != nil {
-		list, err := s.d.DeviceControl.ListTimers(r.Context())
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		if list == nil {
-			list = []proto.Timer{}
-		}
-		writeJSON(w, http.StatusOK, list)
+	service := s.controlService(w)
+	if service == nil {
 		return
 	}
-	c := s.ctl(w)
-	if c == nil {
-		return
-	}
-	list, err := c.Schedules()
+	list, err := service.ListTimers(r.Context())
 	if err != nil {
-		writeAPIError(w, "ble_operation_failed")
+		writeError(w, err)
 		return
 	}
 	if list == nil {
@@ -255,39 +243,29 @@ func (s *server) postSchedule(w http.ResponseWriter, r *http.Request) {
 		}
 		id = byte(*req.ID)
 	}
-	if s.d.DeviceControl != nil {
-		var list []proto.Timer
-		var observedID byte
-		if id == 0xff {
-			list, observedID, err = s.d.DeviceControl.AddTimer(r.Context(), timer)
-		} else {
-			observedID = id
-			list, err = s.d.DeviceControl.PutTimer(r.Context(), id, timer)
-		}
-		if err != nil {
-			writeError(w, err)
+	service := s.controlService(w)
+	if service == nil {
+		return
+	}
+	var list []proto.Timer
+	var observedID byte
+	if id == 0xff {
+		list, observedID, err = service.AddTimer(r.Context(), timer)
+	} else {
+		observedID = id
+		list, err = service.PutTimer(r.Context(), id, timer)
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	for _, observed := range list {
+		if observed.ID == observedID {
+			writeJSON(w, http.StatusOK, observed)
 			return
 		}
-		for _, observed := range list {
-			if observed.ID == observedID {
-				writeJSON(w, http.StatusOK, observed)
-				return
-			}
-		}
-		writeAPIError(w, "ble_operation_failed")
-		return
 	}
-	c := s.ctl(w)
-	if c == nil {
-		return
-	}
-	newID, err := c.UpsertSchedule(id, timer)
-	if err != nil {
-		writeAPIError(w, "ble_operation_failed")
-		return
-	}
-	timer.ID = newID
-	writeJSON(w, 200, timer)
+	writeAPIError(w, "ble_operation_failed")
 }
 
 func (s *server) deleteSchedule(w http.ResponseWriter, r *http.Request) {
@@ -300,20 +278,12 @@ func (s *server) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
-	if s.d.DeviceControl != nil {
-		if _, err := s.d.DeviceControl.DeleteTimer(r.Context(), byte(id)); err != nil {
-			writeError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	service := s.controlService(w)
+	if service == nil {
 		return
 	}
-	c := s.ctl(w)
-	if c == nil {
-		return
-	}
-	if err := c.DeleteSchedule(byte(id)); err != nil {
-		writeAPIError(w, "ble_operation_failed")
+	if _, err := service.DeleteTimer(r.Context(), byte(id)); err != nil {
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
