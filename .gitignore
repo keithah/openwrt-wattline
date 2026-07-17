@@ -8,6 +8,7 @@ Packages.gz
 
 # go
 /bin/
+/.worktrees/
 
 # os
 .DS_Store
