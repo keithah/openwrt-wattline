@@ -173,8 +173,10 @@ errors: only authentication errors. BLE I/O: none.
 Role: client. Request: none. Success: `200 OK`, no JSON response envelope. It
 sends one initial complete cached snapshot immediately, then another complete
 snapshot on each update. Events are unnamed so `EventSource.onmessage` works.
-The telemetry fields remain top-level and identity, connection/capability, and
-command state are additive top-level fields.
+Each `data:` value uses exactly the complete Snapshot schema defined by
+`GET /api/v1/telemetry`: telemetry fields remain top-level and the same
+`identity` and `commands` fields are present (including connection/capability
+data as that Snapshot schema evolves additively).
 
 ```text
 Content-Type: text/event-stream
@@ -183,9 +185,12 @@ data: {complete snapshot JSON}\n
 \n
 ```
 
-Endpoint-specific errors: `500` plain transport failure if streaming is not
-supported, plus authentication errors. BLE I/O: none; BLE notifications update
-the store independently.
+Endpoint-specific errors: if streaming is unsupported before response status
+`200` and SSE headers are sent, return HTTP `500` with exact body
+`E(internal_error)`. Once the `200` stream has begun, a transport failure or
+client disconnect ends the stream and cannot carry a JSON error body.
+Authentication errors occur before streaming begins. BLE I/O: none; BLE
+notifications update the store independently.
 
 ## Granular controls
 
@@ -628,9 +633,9 @@ for a valid client token. “No body” means an exactly zero-byte request body.
 | Endpoint | Role | Exact request | Exact success | Additional errors (status, body, condition) | BLE I/O |
 |---|---|---|---|---|---|
 | `GET /api/v1/status` | client | no body | `200 {"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"V2","firmware":"1.4.9","mac":"DC:04:5A:EB:72:2B","cid":773,"features":4095},"rules":[]}` | none | none |
-| `GET /api/v1/telemetry` | client | no body | `200 {"battery":{"enabled":true,"status":1,"full":false,"max_wh":221.0,"wh":170.2,"level":77,"volts":25.6,"amps":1.2,"watts":30.7,"remain_min":332},"dc":{"enabled":true,"status":0,"volts":24.0,"amps":0.5,"watts":12.0,"bypass":false},"typec":{"enabled":true,"status":0,"volts":20.0,"amps":1.0,"watts":20.0,"temp_c":35.0,"mode":3,"dc_input":false},"connected":true,"updated_at":"2026-07-17T20:00:00Z"}` | none | none |
+| `GET /api/v1/telemetry` | client | no body | `200` with exactly the one complete cached Snapshot JSON defined under the primary `GET /api/v1/telemetry` section, including its top-level `identity` and `commands`; this compatibility contract is not a reduced subset | none | none |
 | `GET /api/v1/history` | client | no body | `200 [{"at":"2026-07-17T19:59:00Z","level":77,"status":1,"dc_w":12.0,"typec_w":20.0}]` (empty is exactly `[]`) | none | none |
-| `GET /api/v1/events` | client | no body | `200`, `Content-Type: text/event-stream`, then the exact complete-snapshot framing specified above | `500 E(internal_error)` if response streaming is unavailable | none |
+| `GET /api/v1/events` | client | no body | `200`, `Content-Type: text/event-stream`, then the exact complete-snapshot framing specified above | before streaming begins, `500 E(internal_error)` if response streaming is unavailable; after `200` begins, transport failure/disconnect only terminates the stream and has no JSON error body | none |
 
 ### Rule and action compatibility routes
 
