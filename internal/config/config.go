@@ -25,12 +25,13 @@ var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month 
 type Rule struct {
 	Name             string        `json:"name"`
 	Enabled          bool          `json:"enabled"`
-	Condition        string        `json:"condition"` // input_power|battery_level|schedule|port_power
+	Condition        string        `json:"condition"` // input_power|battery_level|schedule|port_power|temperature
 	State            string        `json:"state,omitempty"`
 	Op               string        `json:"op,omitempty"` // below|above
 	Port             string        `json:"port,omitempty"`
 	Percent          int           `json:"percent,omitempty"`
 	Watts            float64       `json:"watts,omitempty"`
+	TempC            float64       `json:"temp_c,omitempty"` // temperature condition threshold (°C)
 	Hold             time.Duration `json:"hold"`
 	RepeatEvery      time.Duration `json:"repeat_every,omitempty"`
 	HysteresisMargin int           `json:"hysteresis_margin"`
@@ -138,6 +139,10 @@ func (r *Rule) Validate() error {
 		if (r.Op != "below" && r.Op != "above") || (r.Port != "dc" && r.Port != "usbc") {
 			return fmt.Errorf("port_power needs op below|above and port dc|usbc")
 		}
+	case "temperature":
+		if r.Op != "below" && r.Op != "above" {
+			return fmt.Errorf("temperature needs op below|above")
+		}
 	case "schedule":
 		if r.Cron == "" {
 			return fmt.Errorf("schedule needs cron expression")
@@ -180,6 +185,13 @@ func sectionToRule(s *UCISection) (Rule, error) {
 			return r, fmt.Errorf("watts: %w", err)
 		}
 		r.Watts = f
+	}
+	if v := s.Options["temp_c"]; v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return r, fmt.Errorf("temp_c: %w", err)
+		}
+		r.TempC = f
 	}
 	if v := s.Options["hysteresis_margin"]; v != "" {
 		n, err := strconv.Atoi(v)
@@ -225,6 +237,9 @@ func ruleToSection(r Rule) *UCISection {
 	}
 	if r.Watts != 0 {
 		s.Options["watts"] = strconv.FormatFloat(r.Watts, 'f', -1, 64)
+	}
+	if r.TempC != 0 {
+		s.Options["temp_c"] = strconv.FormatFloat(r.TempC, 'f', -1, 64)
 	}
 	if r.Hold != 0 {
 		s.Options["hold"] = r.Hold.String()

@@ -208,3 +208,44 @@ func TestDisabledAndBadCron(t *testing.T) {
 		t.Fatal("bad cron must error")
 	}
 }
+
+func tempSnap(tempC float64) state.Snapshot {
+	return state.Snapshot{
+		Connected: true,
+		Battery:   &proto.Battery{Status: 0, Level: 50},
+		TypeC:     &proto.TypeCPort{TempC: tempC},
+		DC:        &proto.DCPort{},
+	}
+}
+
+func TestTemperatureCondition(t *testing.T) {
+	r := config.Rule{Name: "hot", Enabled: true, Condition: "temperature",
+		Op: "above", TempC: 60, Hold: 0, HysteresisMargin: 5,
+		Actions: []string{"usbc_off"}}
+	e, err := NewEngine([]config.Rule{r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// below threshold: no fire
+	if f := e.Tick(tempSnap(55), t0); len(f) != 0 {
+		t.Fatalf("fired at 55°C: %v", f)
+	}
+	// above threshold: fires
+	if f := e.Tick(tempSnap(62), t0.Add(time.Minute)); len(f) != 1 {
+		t.Fatalf("did not fire at 62°C: %v", f)
+	}
+	// still hot but already armed-and-fired: no repeat
+	if f := e.Tick(tempSnap(63), t0.Add(2*time.Minute)); len(f) != 0 {
+		t.Fatalf("re-fired without re-arm: %v", f)
+	}
+	// drops but within hysteresis band (>= 60-... no, above-op re-arms below 60-5=55): 58 should NOT re-arm
+	e.Tick(tempSnap(58), t0.Add(3*time.Minute))
+	if f := e.Tick(tempSnap(62), t0.Add(4*time.Minute)); len(f) != 0 {
+		t.Fatalf("re-armed inside hysteresis band at 58°C: %v", f)
+	}
+	// drops below 55: re-arms, then fires again above 60
+	e.Tick(tempSnap(54), t0.Add(5*time.Minute))
+	if f := e.Tick(tempSnap(62), t0.Add(6*time.Minute)); len(f) != 1 {
+		t.Fatalf("did not re-fire after re-arm: %v", f)
+	}
+}

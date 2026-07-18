@@ -334,8 +334,10 @@
       var big = function (v, u, c) { return el('div', { fontSize: '30px', fontWeight: '600', color: c },
         [String(v), h('span', { style: { fontSize: '16px', color: GREY, fontWeight: '400', marginLeft: '3px' } }, u)]); };
       var sub = function (txt, c) { return el('div', { color: c || GREY, fontSize: '13px' }, txt); };
+      // v may be a string or a vnode (e.g. the coloured temp span); Vue 2 needs
+      // children as an array, so wrap it — a bare vnode child renders blank.
       var metric = function (v, l) { return el('div', { marginRight: '24px' },
-        [h('b', { style: { fontSize: '18px' } }, v), el('div', { color: GREY, fontSize: '12px' }, l)]); };
+        [h('b', { style: { fontSize: '18px' } }, [v]), el('div', { color: GREY, fontSize: '12px' }, l)]); };
       var pill = function (txt, c, bg) { return h('span', { style: { fontSize: '11px', padding: '2px 9px',
         borderRadius: '10px', background: bg, color: c, marginLeft: '8px', verticalAlign: 'middle' } }, txt); };
       var sw = function (on, action) {

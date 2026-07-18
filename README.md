@@ -15,6 +15,27 @@ The authoritative client contract is [`docs/api.md`](docs/api.md). The separate
 [`docs/API.md`](docs/API.md) is the read-only Link-Power BLE protocol reference;
 it is not a REST API.
 
+Both UIs cover the full lifecycle:
+
+- **Pairing** — scan, select the Link-Power, enter its PIN, and pair from the
+  browser (authenticated BLE bonding; no SSH needed).
+- **Monitoring** — battery, DC-port and USB-C telemetry with live updates.
+- **Control** — DC / USB-C output and DC bypass toggles; USB-C output power
+  limit (30–140 W); DC bypass engage-voltage threshold; on-device on/off
+  schedules; and Restart / Power-off.
+- **Automation** — the rules engine and webhooks.
+
+See the [changelog](CHANGELOG.md) for version history.
+
+## Screenshots
+
+The native GL.iNet admin-panel app (**Applications → Wattline**). The LuCI app
+mirrors the same layout.
+
+| Pairing | Monitoring & control |
+|---|---|
+| <img src="docs/screenshots/gl-pairing.png" alt="Pairing screen: scan, select the Link-Power, enter PIN" width="360"> | <img src="docs/screenshots/gl-panel.png" alt="Connected panel: battery, DC/USB-C, device settings, schedules, power" width="360"> |
+
 ## Build the packages
 
 The host needs Go, gzip, and GNU tar (`gtar` on macOS):
@@ -33,6 +54,23 @@ The default version is `1.3.0`. Override it consistently with, for example,
 - `luci-app-wattline_VERSION_all.ipk`: LuCI panel; and
 - `gl-app-wattline_VERSION_all.ipk`: native GL.iNet panel.
 
+Prebuilt `.ipk`s and an opkg feed index are attached to each
+[GitHub release](https://github.com/keithah/openwrt-wattline/releases).
+`ARCH` in `package/Makefile` targets `aarch64_cortex-a53`; adjust it when
+packaging for a different OpenWrt target.
+
+### Releasing
+
+GitHub Actions tests and builds every push and pull request. Pushing a `v*` tag
+builds the four packages and feed index, publishes a GitHub release, and updates
+the `gh-pages` feed. The tag supplies the package version after stripping `v`:
+
+```sh
+git tag v1.3.0 && git push origin v1.3.0
+```
+
+### `.ipk` format (verified on-target)
+
 These OpenWrt packages are gzip-compressed outer tar archives containing
 `debian-binary`, `control.tar.gz`, and `data.tar.gz`. Both the outer and inner
 archives use ustar. They are deliberately not ar/deb archives: the GL-X3000
@@ -48,10 +86,10 @@ for f in package/out/*.ipk; do
 done
 
 ssh root@192.168.8.1 'opkg update && opkg install \
-  /tmp/wattline-bt_1.3.0_all.ipk \
-  /tmp/wattlined_1.3.0_aarch64_cortex-a53.ipk \
-  /tmp/luci-app-wattline_1.3.0_all.ipk \
-  /tmp/gl-app-wattline_1.3.0_all.ipk'
+  /tmp/wattline-bt_*.ipk \
+  /tmp/wattlined_*.ipk \
+  /tmp/luci-app-wattline_*.ipk \
+  /tmp/gl-app-wattline_*.ipk'
 ```
 
 For a rebuilt package with the same version, use
@@ -65,6 +103,68 @@ Private credential directories and files are mode `0700`/`0600`. Confirm startup
 
 ```sh
 ssh root@192.168.8.1 '/etc/init.d/wattlined status; logread -e wattline | tail -n 50'
+```
+
+### Install from the hosted opkg feed (recommended)
+
+A ready-to-use opkg feed is published via GitHub Pages at
+**https://keithah.github.io/openwrt-wattline/**. Register it once and opkg
+handles install and upgrades (it pulls the `bluez`/`dbus`/`kmod-bluetooth`
+dependencies by name from the router's own feeds):
+
+```sh
+ssh root@192.168.8.1
+echo 'src/gz wattline https://keithah.github.io/openwrt-wattline' >> /etc/opkg/customfeeds.conf
+opkg update
+opkg install wattlined luci-app-wattline gl-app-wattline   # first time
+opkg upgrade wattlined luci-app-wattline gl-app-wattline    # later releases
+```
+
+The feed is regenerated and published automatically on each release (see
+[Releasing](#releasing)).
+
+### Install from a release
+
+Prefer the hosted feed above. If you'd rather grab files directly, each
+[GitHub release](https://github.com/keithah/openwrt-wattline/releases) attaches
+the four `.ipk`s plus a ready-made opkg feed index (`Packages`, `Packages.gz`).
+To install without building anything:
+
+```sh
+# Download the ipks from the latest release straight to the router
+ssh root@192.168.8.1 'cd /tmp && for p in \
+    wattline-bt_VER_all.ipk \
+    wattlined_VER_aarch64_cortex-a53.ipk \
+    luci-app-wattline_VER_all.ipk \
+    gl-app-wattline_VER_all.ipk; do
+  wget -q "https://github.com/keithah/openwrt-wattline/releases/latest/download/$p"
+done
+opkg update && opkg install /tmp/wattline-bt_*.ipk /tmp/wattlined_*.ipk \
+  /tmp/luci-app-wattline_*.ipk /tmp/gl-app-wattline_*.ipk'
+```
+
+Replace `VER` with the release version (for example `1.3.0`). The release
+assets are flat files, so they can also be registered directly as an opkg feed:
+
+```sh
+echo 'src/gz wattline https://github.com/keithah/openwrt-wattline/releases/latest/download' \
+  >> /etc/opkg/customfeeds.conf
+opkg update && opkg install wattlined luci-app-wattline gl-app-wattline
+```
+
+### Updating without a manual reinstall (opkg feed)
+
+Copying ipks by hand is only for first-time/dev installs. For updates, host
+the packages as an **opkg feed** (an HTTP dir with a `Packages.gz` index) —
+the same mechanism GL's own apps and the unofficial Speedify use — then the
+router upgrades with `opkg upgrade` (or the GL **Plug-ins** page).
+
+```sh
+# Build all ipks + the feed index. BUMP THE VERSION each release so opkg
+# detects an upgrade (the Version: field, filename, and index must all match —
+# the Makefile injects VERSION into all three).
+make -C package VERSION=1.3.0 feed
+# → package/out/{*.ipk, Packages, Packages.gz}
 ```
 
 ## Configuration
@@ -101,6 +201,37 @@ non-revocable bootstrap administrator secret. The first-boot initializer fills
 blank credentials and missing modern keys without replacing existing values.
 Legacy `port` and `lan_api` continue to load; new installations should use the
 listener keys above.
+
+```text
+config rule 'no_input_shutdown'
+	option enabled '0'
+	option condition 'input_power'
+	option state 'absent'
+	option hold '10m'
+	list action 'webhook:https://ntfy.sh/CHANGME?msg=input+lost'
+	list action 'shutdown'
+	option confirm_shutdown '1'
+
+# Thermal cutoff: disable USB-C output if the port runs hot for 1 min.
+config rule 'usbc_thermal'
+	option enabled '0'
+	option condition 'temperature'   # USB-C port temperature (°C)
+	option op 'above'
+	option temp_c '60'
+	option hold '1m'
+	list action 'usbc_off'
+```
+
+Rule conditions: `input_power`, `battery_level`, `port_power`, `temperature`
+(USB-C port °C), and `schedule` (cron). `battery_level` and `temperature`
+re-arm with a hysteresis margin (`option hysteresis_margin`, default 5) to
+avoid flapping near the threshold.
+
+Rules can also be managed live through the API (see below); edits made via
+the API are persisted back to this UCI file, and the running daemon is
+reloaded with `SIGHUP` (procd's `service_triggers`/`reload_service` wire this
+up automatically on `uci commit wattline` + `ubus call service reload`, or
+manually via `/etc/init.d/wattlined reload`).
 
 HTTP and HTTPS bind IPv4 and IPv6 independently. Both default to all addresses,
 which makes LAN, `tailscale0`, and other WireGuard/VPN interfaces reachable.
