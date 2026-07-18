@@ -289,9 +289,10 @@ Setting it to `1` installs TCP WAN rules for enabled listeners and logs
 `insecure — use TLS/VPN`; direct plain-HTTP WAN exposure is unsafe.
 On GL firmware, late WWAN or Speedify events can reload fw3 after Tailscale has
 installed its dynamic `ts-*` chains. Wattline detects that exact missing-chain
-state after daemon and interface firewall reconciliation and restarts an enabled
-Tailscale service to restore VPN input. It does not restart netifd-managed
-WireGuard interfaces or enable a disabled Tailscale installation.
+state after daemon and interface firewall reconciliation and asks an enabled
+Tailscale daemon to rebuild its netfilter integration. It does not restart the
+daemon, alter its other preferences, disturb netifd-managed WireGuard
+interfaces, or enable a disabled Tailscale installation.
 
 Apply UCI changes with:
 

@@ -42,8 +42,10 @@ OpenWrt packaging keeps `wan_access=0` by default. Netifd-managed WireGuard
 interfaces rely on their configured firewall zones. On GL firmware, a late fw3
 reload can remove an enabled Tailscale daemon's dynamic `ts-*` chains while
 leaving `tailscale0` present; Wattline's lifecycle/hotplug repair detects a
-missing `ts-input` chain or INPUT jump and restarts Tailscale to restore VPN
-reachability. It does nothing when Tailscale is absent, disabled, or intact.
+missing `ts-input` chain or INPUT jump and restores VPN reachability by toggling
+only Tailscale's netfilter mode from `nodivert` back to `on`.
+It does not restart the daemon or act when Tailscale is absent, disabled, or
+intact.
 
 Every non-SSE JSON success has the status and body stated below. CORS preflight
 `OPTIONS` bypasses bearer authentication and always returns `204 No Content`, an

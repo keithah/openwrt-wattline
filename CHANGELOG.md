@@ -17,8 +17,9 @@ versions built from `package/Makefile`.
   metadata checks. A kernel-changing GL firmware upgrade requires a rebuilt
   driver package.
 - Repair enabled Tailscale firewall integration when late GL WWAN/Speedify
-  events reload fw3 and flush Tailscale's dynamic chains, without opening WAN
-  access or disturbing ordinary netifd-managed WireGuard interfaces.
+  events reload fw3 and flush Tailscale's dynamic chains by reapplying its
+  netfilter mode, without restarting its daemon, opening WAN access, or
+  disturbing ordinary netifd-managed WireGuard interfaces.
 - Added a dedicated **Power-loss shutdown** card to LuCI and the native GL
   panel. The reserved preset defaults to ten minutes of continuous input loss,
   resets when input returns or BLE disconnects, preserves compatible rule

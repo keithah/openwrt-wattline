@@ -41,20 +41,22 @@ cat >"$TMP/bin/logger" <<'EOF'
 #!/bin/sh
 printf 'logger %s\n' "$*" >>"$CALLS"
 EOF
-cat >"$TMP/tailscale-init" <<'EOF'
+cat >"$TMP/bin/tailscale" <<'EOF'
 #!/bin/sh
 printf 'tailscale %s\n' "$*" >>"$CALLS"
-[ "${TAILSCALE_RESTART_FAIL:-0}" != 1 ]
+if [ "${TAILSCALE_REPAIR_FAIL:-0}" = 1 ] && [ "$*" = 'set --netfilter-mode=on' ]; then
+	exit 1
+fi
 EOF
 cat >"$TMP/firewall-sync" <<'EOF'
 #!/bin/sh
 printf 'firewall-sync\n' >>"$CALLS"
 EOF
 chmod +x "$TMP/bin/uci" "$TMP/bin/iptables" "$TMP/bin/logger" \
-	"$TMP/tailscale-init" "$TMP/firewall-sync"
+	"$TMP/bin/tailscale" "$TMP/firewall-sync"
 
 export PATH="$TMP/bin:/usr/bin:/bin"
-export TAILSCALE_INIT="$TMP/tailscale-init" IPTABLES="$TMP/bin/iptables"
+export TAILSCALE="$TMP/bin/tailscale" IPTABLES="$TMP/bin/iptables"
 
 [ -x "$HELPER" ] || fail "missing executable helper $HELPER"
 
@@ -69,22 +71,26 @@ iptables -C INPUT -j ts-input"
 : >"$CALLS"
 TAILSCALE_CHAIN_PRESENT=0 TAILSCALE_JUMP_PRESENT=0 "$HELPER"
 assert_calls "iptables -nL ts-input
-tailscale restart
+tailscale set --netfilter-mode=nodivert
+tailscale set --netfilter-mode=on
 logger -t wattline restored Tailscale firewall integration after OpenWrt reload"
 
 : >"$CALLS"
 TAILSCALE_CHAIN_PRESENT=1 TAILSCALE_JUMP_PRESENT=0 "$HELPER"
 assert_calls "iptables -nL ts-input
 iptables -C INPUT -j ts-input
-tailscale restart
+tailscale set --netfilter-mode=nodivert
+tailscale set --netfilter-mode=on
 logger -t wattline restored Tailscale firewall integration after OpenWrt reload"
 
 : >"$CALLS"
-if TAILSCALE_RESTART_FAIL=1 "$HELPER"; then
-	fail 'failed Tailscale restart reported success'
+if TAILSCALE_REPAIR_FAIL=1 "$HELPER"; then
+	fail 'failed Tailscale netfilter repair reported success'
 fi
 assert_calls "iptables -nL ts-input
-tailscale restart
+tailscale set --netfilter-mode=nodivert
+tailscale set --netfilter-mode=on
+tailscale set --netfilter-mode=on
 logger -t wattline failed to restore Tailscale firewall integration"
 
 : >"$CALLS"
@@ -92,7 +98,8 @@ FIREWALL_SYNC="$TMP/firewall-sync" VPN_REPAIR="$HELPER" \
 	ACTION=ifdown INTERFACE=speedify sh "$HOTPLUG"
 assert_calls "firewall-sync
 iptables -nL ts-input
-tailscale restart
+tailscale set --netfilter-mode=nodivert
+tailscale set --netfilter-mode=on
 logger -t wattline restored Tailscale firewall integration after OpenWrt reload"
 
 : >"$CALLS"
