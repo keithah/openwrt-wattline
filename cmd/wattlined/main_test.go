@@ -13,6 +13,7 @@ import (
 	"github.com/keithah/openwrt-wattline/internal/config"
 	"github.com/keithah/openwrt-wattline/internal/proto"
 	"github.com/keithah/openwrt-wattline/internal/rules"
+	serverpkg "github.com/keithah/openwrt-wattline/internal/server"
 	"github.com/keithah/openwrt-wattline/internal/state"
 )
 
@@ -144,5 +145,73 @@ func TestListenerConfigPreservesIndependentEndpoints(t *testing.T) {
 	got := listenerConfig(cfg)
 	if !got.HTTP.Enabled || got.HTTP.Port != 8000 || got.HTTPS.Enabled || got.HTTPS.Port != 9000 || got.CertFile != "cert" || got.KeyFile != "key" {
 		t.Fatalf("listener config = %+v", got)
+	}
+}
+
+func TestTLSIdentityRotationDoesNotChangeServedFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "cert"), filepath.Join(dir, "key")
+	cert, err := serverpkg.EnsureCertificate(certFile, keyFile, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := newTLSIdentity(cert, nil)
+	rotated, err := identity.rotate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated == cert.SHA256 {
+		t.Fatal("rotation did not create a new fingerprint")
+	}
+	if identity.fingerprint() != cert.SHA256 {
+		t.Fatalf("served fingerprint changed before restart: %s", identity.fingerprint())
+	}
+}
+
+func TestTLSIdentityRotatesConfiguredPathsButKeepsServedPin(t *testing.T) {
+	dir := t.TempDir()
+	served, err := serverpkg.EnsureCertificate(filepath.Join(dir, "served.crt"), filepath.Join(dir, "served.key"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCert, newKey := filepath.Join(dir, "next", "server.crt"), filepath.Join(dir, "next", "server.key")
+	identity := newTLSIdentity(served, nil)
+	identity.paths = func() (string, string) { return newCert, newKey }
+	staged, err := identity.rotate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staged == served.SHA256 || identity.fingerprint() != served.SHA256 {
+		t.Fatalf("staged=%s served=%s", staged, identity.fingerprint())
+	}
+	if _, err := os.Stat(newCert); err != nil {
+		t.Fatalf("configured certificate not created: %v", err)
+	}
+	if _, err := os.Stat(newKey); err != nil {
+		t.Fatalf("configured key not created: %v", err)
+	}
+}
+
+func TestLiveConfigSavePublishesCommittedNextWithoutReloadSplit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wattline")
+	if err := os.WriteFile(path, []byte("config wattline 'main'\n\toption token 'fresh-secret'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.Advanced = true
+	current := cloneConfig(next)
+	current.Token = "runtime-bootstrap"
+	next.Token = "stale-request-copy"
+	live := &liveConfig{cfg: current}
+	if err := live.save(path, next); err != nil {
+		t.Fatal(err)
+	}
+	got := live.current()
+	if !got.Advanced || got.Token != "runtime-bootstrap" {
+		t.Fatalf("published config = %+v", got)
 	}
 }

@@ -485,6 +485,55 @@ func TestEnsureBootstrapTokenRejectsEmptyCandidate(t *testing.T) {
 	}
 }
 
+func TestEnsureBootstrapTokenCapsConfigMode(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		before, want os.FileMode
+	}{
+		{"world readable becomes private", 0o644, 0o600},
+		{"stricter mode remains strict", 0o400, 0o400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTemp(t, "config wattline 'main'\n")
+			if err := os.Chmod(path, tc.before); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := EnsureBootstrapToken(path, "secret"); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != tc.want {
+				t.Fatalf("mode %o, want %o", info.Mode().Perm(), tc.want)
+			}
+		})
+	}
+}
+
+func TestEnsureBootstrapTokenSecuresExistingSecretWithoutReplacingIt(t *testing.T) {
+	path := writeTemp(t, "config wattline 'main'\n\toption token 'existing-secret'\n")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := EnsureBootstrapToken(path, "different-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "existing-secret" {
+		t.Fatalf("token=%q", got)
+	}
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%o", info.Mode().Perm())
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "different-secret") {
+		t.Fatal("existing token replaced")
+	}
+}
+
 func TestSecurityConfigSaveMainPreservesFileMode(t *testing.T) {
 	path := writeTemp(t, "config wattline 'main'\n")
 	if err := os.Chmod(path, 0o600); err != nil {

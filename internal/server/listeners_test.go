@@ -54,6 +54,11 @@ func TestListenerHTTPAndHTTPSIndependent(t *testing.T) {
 			t.Fatalf("%s body %q", raw, body)
 		}
 	}
+	legacy, err := tls.Dial("tcp4", net.JoinHostPort("127.0.0.1", fmt.Sprint(httpsPort)), &tls.Config{InsecureSkipVerify: true, MaxVersion: tls.VersionTLS11})
+	if err == nil {
+		legacy.Close()
+		t.Fatal("HTTPS listener accepted TLS below 1.2")
+	}
 }
 
 func TestListenerIndependentDisablement(t *testing.T) {
@@ -87,6 +92,38 @@ func TestListenerIndependentDisablement(t *testing.T) {
 			}
 			res.Body.Close()
 		})
+	}
+}
+
+func TestListenerFourWayIPv4IPv6HTTPHTTPSMatrix(t *testing.T) {
+	if probe, err := net.Listen("tcp6", "[::1]:0"); err != nil {
+		t.Skipf("IPv6 unavailable: %v", err)
+	} else {
+		probe.Close()
+	}
+	dir := t.TempDir()
+	cert, err := EnsureCertificate(filepath.Join(dir, "cert"), filepath.Join(dir, "key"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpPort := freePort(t, "tcp4", "127.0.0.1")
+	httpsPort := freePort(t, "tcp4", "127.0.0.1")
+	g, err := Start(context.Background(), ListenerConfig{HTTP: Endpoint{Enabled: true, Addr4: "127.0.0.1", Addr6: "::1", Port: httpPort}, HTTPS: Endpoint{Enabled: true, Addr4: "127.0.0.1", Addr6: "::1", Port: httpsPort}, CertFile: cert.CertFile, KeyFile: cert.KeyFile}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	if err != nil {
+		t.Skipf("dual-stack matrix unavailable: %v", err)
+	}
+	defer g.Shutdown(context.Background())
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	for _, raw := range []string{fmt.Sprintf("http://127.0.0.1:%d", httpPort), fmt.Sprintf("http://[::1]:%d", httpPort), fmt.Sprintf("https://127.0.0.1:%d", httpsPort), fmt.Sprintf("https://[::1]:%d", httpsPort)} {
+		res, err := client.Get(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if string(body) != "ok" {
+			t.Fatalf("%s body=%q", raw, body)
+		}
 	}
 }
 

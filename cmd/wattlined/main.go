@@ -88,6 +88,32 @@ type liveConfig struct {
 	pairing *auth.Pairing
 }
 
+// tlsIdentity distinguishes the certificate loaded by the active listener
+// from a newly staged certificate that takes effect only after restart.
+type tlsIdentity struct {
+	served serverpkg.Certificate
+	names  []string
+	paths  func() (string, string)
+}
+
+func newTLSIdentity(served serverpkg.Certificate, names []string) *tlsIdentity {
+	return &tlsIdentity{served: served, names: append([]string(nil), names...)}
+}
+
+func (t *tlsIdentity) fingerprint() string { return t.served.SHA256 }
+
+func (t *tlsIdentity) rotate() (string, error) {
+	certFile, keyFile := t.served.CertFile, t.served.KeyFile
+	if t.paths != nil {
+		certFile, keyFile = t.paths()
+	}
+	rotated, err := serverpkg.RotateCertificate(certFile, keyFile, t.names)
+	if err != nil {
+		return "", err
+	}
+	return rotated.SHA256, nil
+}
+
 func cloneConfig(cfg *config.Config) *config.Config {
 	if cfg == nil {
 		return nil
@@ -111,15 +137,16 @@ func (l *liveConfig) authStore() *auth.Store {
 }
 
 func (l *liveConfig) save(path string, next *config.Config) error {
+	l.mu.RLock()
+	bootstrap := l.cfg.Token
+	l.mu.RUnlock()
 	if err := next.SaveMain(path); err != nil {
 		return err
 	}
-	fresh, err := config.Load(path)
-	if err != nil {
-		return err
-	}
+	committed := cloneConfig(next)
+	committed.Token = bootstrap
 	l.mu.Lock()
-	l.cfg = cloneConfig(fresh)
+	l.cfg = committed
 	l.mu.Unlock()
 	return nil
 }
@@ -216,19 +243,10 @@ func run(cfgPath string, stop <-chan struct{}) error {
 	}
 	clientPairing := auth.NewPairing(tokenStore, cfg.PairingTTL, cfg.PairingAlwaysOn)
 	live := &liveConfig{cfg: cloneConfig(cfg), store: tokenStore, pairing: clientPairing}
-	var certMu sync.RWMutex
-	fingerprint := certificate.SHA256
-	getFingerprint := func() string { certMu.RLock(); defer certMu.RUnlock(); return fingerprint }
-	rotateTLS := func() (string, error) {
+	tlsState := newTLSIdentity(certificate, []string{hostname})
+	tlsState.paths = func() (string, string) {
 		current := live.current()
-		rotated, err := serverpkg.RotateCertificate(current.TLSCert, current.TLSKey, []string{hostname})
-		if err != nil {
-			return "", err
-		}
-		certMu.Lock()
-		fingerprint = rotated.SHA256
-		certMu.Unlock()
-		return rotated.SHA256, nil
+		return current.TLSCert, current.TLSKey
 	}
 	// The agent may fail to register when bluetoothd/the dongle come up after
 	// the daemon; ensureAgent retries before each pair attempt (idempotent).
@@ -341,8 +359,8 @@ func run(cfgPath string, stop <-chan struct{}) error {
 		Settings:       live.current,
 		SaveMain:       func(next *config.Config) error { return live.save(cfgPath, next) },
 		ApplySettings:  live.apply,
-		TLSFingerprint: getFingerprint,
-		RotateTLS:      rotateTLS,
+		TLSFingerprint: tlsState.fingerprint,
+		RotateTLS:      tlsState.rotate,
 		PreferredHost: func() string {
 			if hostname != "" {
 				return hostname

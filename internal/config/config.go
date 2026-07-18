@@ -505,13 +505,32 @@ func EnsureBootstrapToken(path, candidate string) (string, error) {
 		doc.Sections = append(doc.Sections, main)
 	}
 	if existing := main.Options["token"]; existing != "" {
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode().Perm()&^os.FileMode(0o600) != 0 {
+			if err := writeConfigAtomicPrivate(path, []byte(doc.Serialize())); err != nil {
+				return "", err
+			}
+		}
 		return existing, nil
 	}
 	main.Options["token"] = candidate
-	if err := writeConfigAtomic(path, []byte(doc.Serialize())); err != nil {
+	if err := writeConfigAtomicPrivate(path, []byte(doc.Serialize())); err != nil {
 		return "", err
 	}
 	return candidate, nil
+}
+
+func writeConfigAtomicPrivate(path string, data []byte) error {
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm() & 0o600
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return writeConfigAtomicWithMode(path, data, mode)
 }
 
 // writeConfigAtomic writes beside path so the final rename is atomic. Existing
@@ -523,6 +542,10 @@ func writeConfigAtomic(path string, data []byte) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	return writeConfigAtomicWithMode(path, data, mode)
+}
+
+func writeConfigAtomicWithMode(path string, data []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err

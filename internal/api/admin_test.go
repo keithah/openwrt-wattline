@@ -194,8 +194,7 @@ func TestTLSRotateRequiresAdminConfirmationAndReturnsNewPin(t *testing.T) {
 	rotations := 0
 	f.deps.RotateTLS = func() (string, error) {
 		rotations++
-		f.fingerprint = strings.Repeat("b", 64)
-		return f.fingerprint, nil
+		return strings.Repeat("b", 64), nil
 	}
 	h := NewServer(f.deps)
 	for _, tc := range []struct {
@@ -228,8 +227,17 @@ func TestTLSRotateRequiresAdminConfirmationAndReturnsNewPin(t *testing.T) {
 		t.Fatalf("rotations = %d", rotations)
 	}
 	settings := do(t, h, http.MethodGet, "/api/v1/settings", "tok", "")
-	if !strings.Contains(settings.Body.String(), strings.Repeat("b", 64)) {
-		t.Fatalf("settings has stale fingerprint: %s", settings.Body.String())
+	if !strings.Contains(settings.Body.String(), old) || strings.Contains(settings.Body.String(), strings.Repeat("b", 64)) {
+		t.Fatalf("settings must retain the fingerprint served until restart: %s", settings.Body.String())
+	}
+	status := f.pairing.Open()
+	uri := (&server{d: f.deps}).pairingURI(status.PIN)
+	if !strings.Contains(uri, "tls="+old) || strings.Contains(uri, strings.Repeat("b", 64)) {
+		t.Fatalf("QR/pairing URI switched before listener restart: %s", uri)
+	}
+	paired := do(t, h, http.MethodPost, "/api/v1/pair", "", `{"pin":"`+status.PIN+`","label":"post-rotation client"}`)
+	if paired.Code != http.StatusCreated || !strings.Contains(paired.Body.String(), old) || strings.Contains(paired.Body.String(), strings.Repeat("b", 64)) {
+		t.Fatalf("pair metadata switched before listener restart: %d %s", paired.Code, paired.Body.String())
 	}
 }
 
