@@ -3,35 +3,62 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/keithah/openwrt-wattline/internal/auth"
+	"github.com/keithah/openwrt-wattline/internal/ble"
 	"github.com/keithah/openwrt-wattline/internal/config"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 type adminFixture struct {
-	h            http.Handler
-	store        *auth.Store
-	pairing      *auth.Pairing
-	clientSecret string
-	clientID     string
-	config       *config.Config
-	saves        int
-	lastSaved    *config.Config
-	deps         Deps
+	h              http.Handler
+	store          *auth.Store
+	activeStore    *auth.Store
+	alternateStore *auth.Store
+	pairing        *auth.Pairing
+	clientSecret   string
+	clientID       string
+	config         *config.Config
+	saves          int
+	lastSaved      *config.Config
+	deps           Deps
+	fingerprint    string
+	preferredHost  string
+	magicDNS       string
+	deviceID       string
+	live           liveSettingsFixture
+	applyCalls     int
+	rollbacks      int
+	applyErr       error
+	saveErr        error
+}
+
+type liveSettingsFixture struct {
+	PairingTTL      time.Duration
+	PairingAlwaysOn bool
+	Advanced        bool
+	BLEPIN          string
+	TokenStore      string
 }
 
 func newAdminFixture(t *testing.T) *adminFixture {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := auth.OpenStore(filepath.Join(dir, "tokens.json"), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternateStore, err := auth.OpenStore(filepath.Join(dir, "tokens-next.json"), "tok")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,26 +75,60 @@ func newAdminFixture(t *testing.T) *adminFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &adminFixture{store: store, pairing: pairing, clientSecret: clientSecret, clientID: clientMeta.ID, config: cfg}
+	f := &adminFixture{store: store, activeStore: store, alternateStore: alternateStore, pairing: pairing, clientSecret: clientSecret, clientID: clientMeta.ID, config: cfg,
+		fingerprint: strings.Repeat("a", 64), preferredHost: "wattline.lan", magicDNS: "wattline.example.ts.net",
+		deviceID: "DC:04:5A:EB:72:2B", live: liveSettingsFixture{cfg.PairingTTL, cfg.PairingAlwaysOn, cfg.Advanced, cfg.BLEPIN, cfg.TokenStore}}
 	h, _, _ := testServerWith(t, func(d *Deps) {
 		d.Auth = store
+		d.AuthStore = func() *auth.Store { return f.activeStore }
 		d.ClientPairing = pairing
 		d.Settings = func() *config.Config {
+			if f.config == nil {
+				return nil
+			}
 			copy := *f.config
 			copy.MDNSInterfaces = append([]string(nil), f.config.MDNSInterfaces...)
 			return &copy
 		}
 		d.SaveMain = func(next *config.Config) error {
 			f.saves++
+			if f.saveErr != nil {
+				return f.saveErr
+			}
 			copy := *next
 			copy.MDNSInterfaces = append([]string(nil), next.MDNSInterfaces...)
 			f.config = &copy
 			f.lastSaved = &copy
 			return nil
 		}
-		d.TLSFingerprint = func() string { return strings.Repeat("a", 64) }
-		d.PreferredHost = func() string { return "wattline.lan" }
-		d.MagicDNSName = func() string { return "wattline.example.ts.net" }
+		d.ApplySettings = func(before, after *config.Config) (func(), error) {
+			f.applyCalls++
+			if f.applyErr != nil {
+				return nil, f.applyErr
+			}
+			previous := f.live
+			pairRollback := func() {}
+			storeRollback := func() {}
+			if before.PairingTTL != after.PairingTTL || before.PairingAlwaysOn != after.PairingAlwaysOn {
+				var err error
+				pairRollback, err = f.pairing.Reconfigure(after.PairingTTL, after.PairingAlwaysOn)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if before.TokenStore != after.TokenStore {
+				previousStore := f.activeStore
+				f.activeStore = f.alternateStore
+				pairingRollback := f.pairing.RebindStore(f.alternateStore)
+				storeRollback = func() { pairingRollback(); f.activeStore = previousStore }
+			}
+			f.live = liveSettingsFixture{after.PairingTTL, after.PairingAlwaysOn, after.Advanced, after.BLEPIN, after.TokenStore}
+			return func() { storeRollback(); pairRollback(); f.live = previous; f.rollbacks++ }, nil
+		}
+		d.TLSFingerprint = func() string { return f.fingerprint }
+		d.PreferredHost = func() string { return f.preferredHost }
+		d.MagicDNSName = func() string { return f.magicDNS }
+		d.Identity = func() ble.Identity { return ble.Identity{MAC: f.deviceID, Model: "BP4SL3V2"} }
 		f.deps = *d
 	})
 	f.h = h
@@ -84,11 +145,6 @@ func TestAuthRolesAndPrincipalContext(t *testing.T) {
 		{"managed client route", http.MethodGet, "/api/v1/status", f.clientSecret, 200},
 		{"managed admin route", http.MethodGet, "/api/v1/settings", f.clientSecret, 403},
 		{"bootstrap admin route", http.MethodGet, "/api/v1/settings", "tok", 200},
-		{"managed advanced route", http.MethodGet, "/api/v1/device/advanced/barrier-free", f.clientSecret, 403},
-		{"managed clock route", http.MethodGet, "/api/v1/device/clock", f.clientSecret, 403},
-		{"managed OTA route", http.MethodGet, "/api/v1/device/ota", f.clientSecret, 403},
-		{"managed threshold route", http.MethodGet, "/api/v1/device/dc/bypass/threshold", f.clientSecret, 403},
-		{"managed threshold alias", http.MethodGet, "/api/v1/device/bypass-threshold", f.clientSecret, 403},
 		{"managed BLE pairing route", http.MethodGet, "/api/v1/pairing/status", f.clientSecret, 409},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -98,6 +154,24 @@ func TestAuthRolesAndPrincipalContext(t *testing.T) {
 			}
 		})
 	}
+	adminRoutes := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/device/dc/bypass/threshold"}, {http.MethodPut, "/api/v1/device/dc/bypass/threshold"},
+		{http.MethodGet, "/api/v1/device/bypass-threshold"}, {http.MethodPost, "/api/v1/device/bypass-threshold"},
+		{http.MethodGet, "/api/v1/device/clock"}, {http.MethodPost, "/api/v1/device/clock/sync"},
+		{http.MethodGet, "/api/v1/device/ota"}, {http.MethodPost, "/api/v1/device/ota/enter"}, {http.MethodPost, "/api/v1/device/ota/exit"},
+		{http.MethodPut, "/api/v1/device/advanced/running-mode"},
+		{http.MethodGet, "/api/v1/device/advanced/barrier-free"}, {http.MethodPut, "/api/v1/device/advanced/barrier-free"},
+		{http.MethodGet, "/api/v1/device/advanced/usb-fw-version"}, {http.MethodPut, "/api/v1/device/advanced/ble-pin"},
+		{http.MethodGet, "/api/v1/pairing-mode"}, {http.MethodPost, "/api/v1/pairing-mode"}, {http.MethodDelete, "/api/v1/pairing-mode"},
+		{http.MethodGet, "/api/v1/pairing-mode/qr.png"}, {http.MethodGet, "/api/v1/tokens"}, {http.MethodDelete, "/api/v1/tokens/client"},
+		{http.MethodGet, "/api/v1/settings"}, {http.MethodPut, "/api/v1/settings"},
+	}
+	for _, route := range adminRoutes {
+		rr := do(t, f.h, route.method, route.path, f.clientSecret, "")
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("managed %s %s status %d: %s", route.method, route.path, rr.Code, rr.Body.String())
+		}
+	}
 	for _, header := range []string{"Bearer", "Bearer ", "Bearer  tok", "bearer tok", "Bearer tok extra"} {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
 		req.Header.Set("Authorization", header)
@@ -106,6 +180,23 @@ func TestAuthRolesAndPrincipalContext(t *testing.T) {
 		if rr.Code != 401 {
 			t.Fatalf("header %q got %d", header, rr.Code)
 		}
+	}
+}
+
+func TestRequesterIPPreservesScopedIPv6Identity(t *testing.T) {
+	tests := map[string]string{
+		"[fe80::1%br-lan]:1234":     "fe80::1%br-lan",
+		"[fe80::1%tailscale0]:9876": "fe80::1%tailscale0",
+		"[::ffff:192.0.2.4]:1234":   "192.0.2.4",
+		"192.0.2.4:9999":            "192.0.2.4",
+	}
+	for remote, want := range tests {
+		if got := requesterIP(remote); got != want {
+			t.Errorf("requesterIP(%q)=%q want %q", remote, got, want)
+		}
+	}
+	if requesterIP("[fe80::1%br-lan]:1") == requesterIP("[fe80::1%tailscale0]:1") {
+		t.Fatal("distinct IPv6 scopes collapsed into one rate-limit identity")
 	}
 }
 
@@ -196,6 +287,13 @@ func TestPairingModeAndQRCode(t *testing.T) {
 	if bytes.Contains(rr.Body.Bytes(), []byte("tok")) {
 		t.Fatal("bootstrap token leaked in QR bytes")
 	}
+	wantPNG, err := qrcode.Encode(wantURI, qrcode.Medium, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rr.Body.Bytes(), wantPNG) {
+		t.Fatal("QR PNG does not encode the exact documented pairing URI")
+	}
 	if rr := do(t, f.h, http.MethodGet, "/api/v1/pairing-mode/qr.png?pin="+status.PIN, "tok", ""); rr.Code != 400 {
 		t.Fatalf("query PIN status %d", rr.Code)
 	}
@@ -237,9 +335,27 @@ func TestAdminSettingsGetPutMergeAndRestartPolicy(t *testing.T) {
 	if rr.Code != 200 || strings.Contains(rr.Body.String(), `"token":"tok"`) || !strings.Contains(rr.Body.String(), `"sha256":"`+strings.Repeat("a", 64)+`"`) {
 		t.Fatalf("get settings: %d %s", rr.Code, rr.Body.String())
 	}
-	rr = do(t, f.h, http.MethodPut, "/api/v1/settings", "tok", `{"advanced":true,"pairing_always_on":true}`)
+	rr = do(t, f.h, http.MethodPut, "/api/v1/settings", "tok", `{"advanced":true,"pairing_always_on":true,"pairing_ttl":"1m30s","ble_pin":"123456","token_store":"/etc/wattline/new-tokens.json"}`)
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"restart_required":false`) || !f.config.Advanced || !f.config.PairingAlwaysOn {
 		t.Fatalf("policy update: %d %s cfg=%+v", rr.Code, rr.Body.String(), f.config)
+	}
+	wantLive := liveSettingsFixture{90 * time.Second, true, true, "123456", "/etc/wattline/new-tokens.json"}
+	if !reflect.DeepEqual(f.live, wantLive) {
+		t.Fatalf("live settings not applied: got %+v want %+v", f.live, wantLive)
+	}
+	if f.activeStore != f.alternateStore {
+		t.Fatal("token_store update did not switch the live authenticator")
+	}
+	pairStatus := f.pairing.Status(true)
+	if !pairStatus.Open || pairStatus.PIN == "" || time.Until(pairStatus.ExpiresAt) < 80*time.Second {
+		t.Fatalf("pairing policy not live: %+v", pairStatus)
+	}
+	beforeTokens := len(f.alternateStore.List())
+	if _, _, err := f.pairing.Exchange("test", pairStatus.PIN, "new-store client"); err != nil {
+		t.Fatalf("pairing did not switch token store: %v", err)
+	}
+	if len(f.alternateStore.List()) != beforeTokens+1 {
+		t.Fatal("pairing issued into the old token store")
 	}
 	oldHTTPS := f.config.HTTPSPort
 	rr = do(t, f.h, http.MethodPut, "/api/v1/settings", "tok", `{"http":{"port":8477},"mdns":{"enabled":false,"interfaces":[]},"wan_access":true}`)
@@ -248,6 +364,95 @@ func TestAdminSettingsGetPutMergeAndRestartPolicy(t *testing.T) {
 	}
 	if f.saves != 2 {
 		t.Fatalf("save count %d", f.saves)
+	}
+}
+
+func TestAdminSettingsTransactionRollsBackRuntimeWhenPersistenceFails(t *testing.T) {
+	f := newAdminFixture(t)
+	beforeLive := f.live
+	f.saveErr = errors.New("disk full")
+	rr := do(t, f.h, http.MethodPut, "/api/v1/settings", "tok", `{"advanced":true,"pairing_always_on":true,"pairing_ttl":"1m0s","token_store":"/etc/wattline/new-tokens.json"}`)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	if !reflect.DeepEqual(f.live, beforeLive) || f.pairing.Status(true).Open || f.config.Advanced || f.rollbacks != 1 || f.activeStore != f.store {
+		t.Fatalf("split state after failed persistence: live=%+v pairing=%+v config=%+v rollbacks=%d", f.live, f.pairing.Status(true), f.config, f.rollbacks)
+	}
+}
+
+func TestAdminSettingsApplyFailureDoesNotPersist(t *testing.T) {
+	f := newAdminFixture(t)
+	f.applyErr = errors.New("runtime rejected")
+	rr := do(t, f.h, http.MethodPut, "/api/v1/settings", "tok", `{"advanced":true}`)
+	if rr.Code != http.StatusInternalServerError || f.saves != 0 || f.config.Advanced {
+		t.Fatalf("status=%d saves=%d config=%+v", rr.Code, f.saves, f.config)
+	}
+}
+
+func TestClientPairValidatesConnectionMetadataBeforeIssuingToken(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*adminFixture)
+	}{
+		{"missing settings", func(f *adminFixture) { f.config = nil }},
+		{"missing device id", func(f *adminFixture) { f.deviceID = "" }},
+		{"missing host", func(f *adminFixture) { f.magicDNS, f.preferredHost = "", "" }},
+		{"no listener", func(f *adminFixture) { f.config.HTTPEnabled, f.config.HTTPSEnabled = false, false }},
+		{"missing HTTPS fingerprint", func(f *adminFixture) { f.fingerprint = "" }},
+		{"uppercase HTTPS fingerprint", func(f *adminFixture) { f.fingerprint = strings.Repeat("A", 64) }},
+		{"short HTTPS fingerprint", func(f *adminFixture) { f.fingerprint = "abc" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAdminFixture(t)
+			status := f.pairing.Open()
+			before := len(f.store.List())
+			tc.mutate(f)
+			rr := do(t, f.h, http.MethodPost, "/api/v1/pair", "", `{"pin":"`+status.PIN+`","label":"phone"}`)
+			if rr.Code != http.StatusInternalServerError {
+				t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+			}
+			if got := len(f.store.List()); got != before {
+				t.Fatalf("issued token before metadata validation: before=%d after=%d", before, got)
+			}
+		})
+	}
+}
+
+func TestPairAndQRAllowHTTPOnlyWithoutFingerprint(t *testing.T) {
+	f := newAdminFixture(t)
+	f.config.HTTPSEnabled = false
+	f.fingerprint = ""
+	status := f.pairing.Open()
+	rr := do(t, f.h, http.MethodPost, "/api/v1/pair", "", `{"pin":"`+status.PIN+`","label":"phone"}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("pair status %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = do(t, f.h, http.MethodGet, "/api/v1/pairing-mode/qr.png", "tok", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("QR status %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPairingQRRejectsInvalidConnectionMetadata(t *testing.T) {
+	f := newAdminFixture(t)
+	f.pairing.Open()
+	f.fingerprint = strings.Repeat("A", 64)
+	rr := do(t, f.h, http.MethodGet, "/api/v1/pairing-mode/qr.png", "tok", "")
+	if rr.Code != http.StatusInternalServerError || rr.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("status=%d content-type=%q body=%s", rr.Code, rr.Header().Get("Content-Type"), rr.Body.String())
+	}
+	exactBody(t, rr, `{"error":{"code":"internal_error","message":"Internal server error","details":{}}}`)
+}
+
+func TestAdminSettingsRefusesLiveChangeWithoutApplicationMechanism(t *testing.T) {
+	f := newAdminFixture(t)
+	deps := f.deps
+	deps.ApplySettings = nil
+	h := NewServer(deps)
+	rr := do(t, h, http.MethodPut, "/api/v1/settings", "tok", `{"advanced":true}`)
+	if rr.Code != http.StatusInternalServerError || f.saves != 0 || f.config.Advanced {
+		t.Fatalf("status=%d saves=%d config=%+v", rr.Code, f.saves, f.config)
 	}
 }
 

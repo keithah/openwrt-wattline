@@ -132,6 +132,72 @@ func (p *Pairing) Close() {
 	p.closeLocked()
 }
 
+// Reconfigure applies enrollment policy immediately and returns an idempotent
+// rollback for callers that still need to commit the corresponding durable
+// configuration. An already-visible PIN is retained; only its expiry changes.
+func (p *Pairing) Reconfigure(ttl time.Duration, alwaysOn bool) (func(), error) {
+	if ttl <= 0 {
+		return nil, errors.New("pairing TTL must be positive")
+	}
+	p.mu.Lock()
+	now := p.observeNowLocked()
+	p.refreshLocked(now)
+	type policyState struct {
+		ttl       time.Duration
+		alwaysOn  bool
+		open      bool
+		pin       string
+		expiresAt time.Time
+	}
+	before := policyState{p.ttl, p.alwaysOn, p.open, p.pin, p.expiresAt}
+	newPIN := ""
+	if alwaysOn && !p.open {
+		var err error
+		newPIN, err = generatePairingPIN(p.random)
+		if err != nil {
+			p.mu.Unlock()
+			return nil, fmt.Errorf("generate pairing PIN: %w", err)
+		}
+	}
+	p.ttl = ttl
+	p.alwaysOn = alwaysOn
+	if p.open {
+		p.expiresAt = now.Add(ttl)
+	} else if alwaysOn {
+		p.open = true
+		p.pin = newPIN
+		p.expiresAt = now.Add(ttl)
+	}
+	p.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.mu.Lock()
+			p.ttl, p.alwaysOn, p.open, p.pin, p.expiresAt = before.ttl, before.alwaysOn, before.open, before.pin, before.expiresAt
+			p.mu.Unlock()
+		})
+	}, nil
+}
+
+// RebindStore changes where subsequently enrolled client tokens are issued.
+// The returned rollback is used by the settings transaction if persistence of
+// the matching token_store setting fails.
+func (p *Pairing) RebindStore(tokens *Store) func() {
+	p.mu.Lock()
+	previous := p.tokens
+	p.tokens = tokens
+	p.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.mu.Lock()
+			p.tokens = previous
+			p.mu.Unlock()
+		})
+	}
+}
+
 func (p *Pairing) Exchange(source, pin, label string) (secret string, meta TokenMeta, err error) {
 	if err := validateLabel(label); err != nil {
 		return "", TokenMeta{}, err

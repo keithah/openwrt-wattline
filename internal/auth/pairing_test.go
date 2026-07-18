@@ -337,6 +337,73 @@ func TestPairingConcurrentStatusAndExchange(t *testing.T) {
 	wait.Wait()
 }
 
+func TestPairingReconfigureAppliesPolicyImmediatelyAndRollsBack(t *testing.T) {
+	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	pairing := NewPairing(nil, 5*time.Minute, false,
+		withPairingClock(func() time.Time { return now }),
+		withPairingRandom(bytes.NewReader(make([]byte, 64))))
+	if pairing.Status(true).Open {
+		t.Fatal("pairing unexpectedly open")
+	}
+	rollback, err := pairing.Reconfigure(90*time.Second, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := pairing.Status(true)
+	if !status.Open || status.PIN == "" || !status.ExpiresAt.Equal(now.Add(90*time.Second)) {
+		t.Fatalf("live status after reconfigure: %+v", status)
+	}
+	rollback()
+	if status := pairing.Status(true); status.Open {
+		t.Fatalf("rollback did not restore closed policy: %+v", status)
+	}
+}
+
+func TestPairingReconfigureUpdatesOpenExpiryWithoutRotatingPIN(t *testing.T) {
+	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	pairing := NewPairing(nil, 5*time.Minute, false,
+		withPairingClock(func() time.Time { return now }),
+		withPairingRandom(bytes.NewReader(make([]byte, 64))))
+	before := pairing.Open()
+	rollback, err := pairing.Reconfigure(time.Minute, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := pairing.Status(true)
+	if after.PIN != before.PIN || !after.ExpiresAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("reconfigured status: before=%+v after=%+v", before, after)
+	}
+	rollback()
+	restored := pairing.Status(true)
+	if restored.PIN != before.PIN || !restored.ExpiresAt.Equal(before.ExpiresAt) {
+		t.Fatalf("rollback status: before=%+v restored=%+v", before, restored)
+	}
+}
+
+func TestPairingRebindStoreMovesIssuanceAndRollsBack(t *testing.T) {
+	now := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	first := pairingTestStore(t, &now)
+	second := pairingTestStore(t, &now)
+	pairing := NewPairing(first, time.Minute, false,
+		withPairingClock(func() time.Time { return now }),
+		withPairingRandom(bytes.NewReader(make([]byte, 64))))
+	pin := pairing.Open().PIN
+	rollback := pairing.RebindStore(second)
+	if _, _, err := pairing.Exchange("source", pin, "second store"); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.List()) != 1 || len(second.List()) != 2 {
+		t.Fatalf("issuance did not move: first=%d second=%d", len(first.List()), len(second.List()))
+	}
+	rollback()
+	if _, _, err := pairing.Exchange("source", pin, "first store"); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.List()) != 2 || len(second.List()) != 2 {
+		t.Fatalf("rollback did not restore issuance: first=%d second=%d", len(first.List()), len(second.List()))
+	}
+}
+
 func pairingTestStore(t *testing.T, now *time.Time) *Store {
 	t.Helper()
 	store, err := OpenStore(t.TempDir()+"/tokens.json", "bootstrap-secret", withClock(func() time.Time { return *now }))

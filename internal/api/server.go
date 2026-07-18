@@ -20,24 +20,31 @@ import (
 )
 
 type Deps struct {
-	Store          *state.Store
-	Engine         *rules.Engine
-	Exec           *actions.Executor
-	Token          string
-	Identity       func() ble.Identity
-	Connected      func() bool
-	SaveRules      func([]config.Rule) error
-	LoadRules      func() []config.Rule
-	Pairing        *ble.Pairing   // nil when the platform has no pairing support
-	Control        func() Control // returns nil when no device is connected
-	DeviceControl  *control.Service
-	MagicDNSName   func() string
-	Now            func() time.Time
-	SaveBLEPIN     func(string) error
-	Auth           *auth.Store
-	ClientPairing  *auth.Pairing
-	Settings       func() *config.Config
-	SaveMain       func(*config.Config) error
+	Store         *state.Store
+	Engine        *rules.Engine
+	Exec          *actions.Executor
+	Token         string
+	Identity      func() ble.Identity
+	Connected     func() bool
+	SaveRules     func([]config.Rule) error
+	LoadRules     func() []config.Rule
+	Pairing       *ble.Pairing   // nil when the platform has no pairing support
+	Control       func() Control // returns nil when no device is connected
+	DeviceControl *control.Service
+	MagicDNSName  func() string
+	Now           func() time.Time
+	SaveBLEPIN    func(string) error
+	Auth          *auth.Store
+	// AuthStore is used when token_store can be switched live. It must return
+	// the same store used by ClientPairing for managed-token issuance.
+	AuthStore     func() *auth.Store
+	ClientPairing *auth.Pairing
+	Settings      func() *config.Config
+	SaveMain      func(*config.Config) error
+	// ApplySettings atomically applies non-restart settings (pairing policy,
+	// advanced, BLE PIN, and token store) and returns an idempotent rollback.
+	// On error it must leave runtime state unchanged.
+	ApplySettings  func(before, after *config.Config) (rollback func(), err error)
 	TLSFingerprint func() string
 	PreferredHost  func() string
 }
@@ -161,13 +168,20 @@ func (s *server) authenticate(r *http.Request) (auth.Principal, bool) {
 	if secret == "" || strings.ContainsAny(secret, " \t\r\n") {
 		return auth.Principal{}, false
 	}
-	if s.d.Auth != nil {
-		return s.d.Auth.Authenticate(secret)
+	if store := s.authStore(); store != nil {
+		return store.Authenticate(secret)
 	}
 	if s.d.Token != "" && subtle.ConstantTimeCompare([]byte(secret), []byte(s.d.Token)) == 1 {
 		return auth.Principal{TokenID: "bootstrap", Role: auth.RoleAdmin}, true
 	}
 	return auth.Principal{}, false
+}
+
+func (s *server) authStore() *auth.Store {
+	if s.d.AuthStore != nil {
+		return s.d.AuthStore()
+	}
+	return s.d.Auth
 }
 
 func (s *server) admin(next http.HandlerFunc) http.HandlerFunc {

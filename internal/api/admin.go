@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -17,12 +18,11 @@ import (
 )
 
 func requesterIP(remoteAddr string) string {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
+	if address, err := netip.ParseAddrPort(remoteAddr); err == nil {
+		return address.Addr().Unmap().String()
 	}
-	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
-		return ip.String()
+	if address, err := netip.ParseAddr(strings.Trim(remoteAddr, "[]")); err == nil {
+		return address.Unmap().String()
 	}
 	return "invalid"
 }
@@ -40,7 +40,12 @@ func (s *server) clientPair(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "internal_error")
 		return
 	}
-	secret, metadata, err := s.d.ClientPairing.Exchange(requesterIP(r.RemoteAddr), request.PIN, request.Label)
+	metadata, err := s.connectionMetadata()
+	if err != nil {
+		writeAPIError(w, "internal_error")
+		return
+	}
+	secret, tokenMetadata, err := s.d.ClientPairing.Exchange(requesterIP(r.RemoteAddr), request.PIN, request.Label)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidOrExpiredPIN) {
 			writeAPIError(w, "invalid_or_expired_pin")
@@ -51,7 +56,6 @@ func (s *server) clientPair(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	magicDNS := s.magicDNSName()
 	writeJSON(w, http.StatusCreated, struct {
 		Token         string            `json:"token"`
 		TokenMetadata auth.TokenMeta    `json:"token_metadata"`
@@ -59,7 +63,7 @@ func (s *server) clientPair(w http.ResponseWriter, r *http.Request) {
 		BaseURLs      map[string]string `json:"base_urls"`
 		TLSSHA256     string            `json:"tls_sha256"`
 		MagicDNSName  string            `json:"magic_dns_name"`
-	}{secret, metadata, s.deviceID(), s.baseURLs(), s.tlsFingerprint(), magicDNS})
+	}{secret, tokenMetadata, metadata.DeviceID, metadata.BaseURLs, metadata.TLSSHA256, s.magicDNSName()})
 }
 
 func (s *server) pairingModeStatus(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +119,12 @@ func (s *server) pairingQRCode(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "capability_unsupported")
 		return
 	}
-	png, err := qrcode.Encode(s.pairingURI(status.PIN), qrcode.Medium, 256)
+	metadata, err := s.connectionMetadata()
+	if err != nil {
+		writeAPIError(w, "internal_error")
+		return
+	}
+	png, err := qrcode.Encode(pairingURIFromMetadata(metadata, status.PIN), qrcode.Medium, 256)
 	if err != nil {
 		writeAPIError(w, "internal_error")
 		return
@@ -131,11 +140,12 @@ func (s *server) listTokens(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
-	if s.d.Auth == nil {
+	store := s.authStore()
+	if store == nil {
 		writeJSON(w, http.StatusOK, []auth.TokenMeta{})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.d.Auth.List())
+	writeJSON(w, http.StatusOK, store.List())
 }
 
 func (s *server) revokeToken(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +153,8 @@ func (s *server) revokeToken(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
-	if s.d.Auth == nil {
+	store := s.authStore()
+	if store == nil {
 		writeAPIError(w, "not_found")
 		return
 	}
@@ -152,7 +163,7 @@ func (s *server) revokeToken(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
-	if err := s.d.Auth.Revoke(id); err != nil {
+	if err := store.Revoke(id); err != nil {
 		switch {
 		case errors.Is(err, auth.ErrBootstrapToken):
 			writeAPIError(w, "invalid_request")
@@ -377,6 +388,11 @@ func restartFieldsChanged(before, after *config.Config) bool {
 		strings.Join(before.MDNSInterfaces, "\x00") != strings.Join(after.MDNSInterfaces, "\x00") || before.WANAccess != after.WANAccess
 }
 
+func liveFieldsChanged(before, after *config.Config) bool {
+	return before.PairingTTL != after.PairingTTL || before.PairingAlwaysOn != after.PairingAlwaysOn ||
+		before.Advanced != after.Advanced || before.BLEPIN != after.BLEPIN || before.TokenStore != after.TokenStore
+}
+
 func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 	before, ok := s.currentConfig()
 	if !ok || s.d.SaveMain == nil {
@@ -394,7 +410,24 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	rollback := func() {}
+	if liveFieldsChanged(before, &after) {
+		if s.d.ApplySettings == nil {
+			writeAPIError(w, "internal_error")
+			return
+		}
+		var err error
+		rollback, err = s.d.ApplySettings(before, &after)
+		if err != nil {
+			writeAPIError(w, "internal_error")
+			return
+		}
+		if rollback == nil {
+			rollback = func() {}
+		}
+	}
 	if err := s.d.SaveMain(&after); err != nil {
+		rollback()
 		writeAPIError(w, "internal_error")
 		return
 	}
@@ -442,13 +475,8 @@ func hostPort(host string, port int) string {
 	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
-func (s *server) baseURLs() map[string]string {
+func baseURLsFor(cfg *config.Config, host string) map[string]string {
 	urls := map[string]string{}
-	cfg, ok := s.currentConfig()
-	if !ok {
-		return urls
-	}
-	host := s.preferredHost()
 	if cfg.HTTPEnabled {
 		urls["http"] = "http://" + hostPort(host, cfg.HTTPPort) + "/api/v1"
 	}
@@ -456,6 +484,47 @@ func (s *server) baseURLs() map[string]string {
 		urls["https"] = "https://" + hostPort(host, cfg.HTTPSPort) + "/api/v1"
 	}
 	return urls
+}
+
+type connectionMetadata struct {
+	Config    *config.Config
+	DeviceID  string
+	Host      string
+	BaseURLs  map[string]string
+	TLSSHA256 string
+}
+
+func validFingerprint(fingerprint string) bool {
+	if len(fingerprint) != 64 {
+		return false
+	}
+	for _, character := range fingerprint {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *server) connectionMetadata() (connectionMetadata, error) {
+	cfg, ok := s.currentConfig()
+	if !ok || cfg.Validate() != nil {
+		return connectionMetadata{}, errors.New("connection settings unavailable")
+	}
+	deviceID := strings.TrimSpace(s.deviceID())
+	host := strings.TrimSpace(s.preferredHost())
+	if deviceID == "" || host == "" {
+		return connectionMetadata{}, errors.New("connection identity unavailable")
+	}
+	urls := baseURLsFor(cfg, host)
+	if len(urls) == 0 {
+		return connectionMetadata{}, errors.New("no API listener enabled")
+	}
+	fingerprint := s.tlsFingerprint()
+	if cfg.HTTPSEnabled && !validFingerprint(fingerprint) {
+		return connectionMetadata{}, errors.New("HTTPS fingerprint unavailable")
+	}
+	return connectionMetadata{Config: cfg, DeviceID: deviceID, Host: host, BaseURLs: urls, TLSSHA256: fingerprint}, nil
 }
 
 func escapeRFC3986(value string) string {
@@ -475,20 +544,24 @@ func escapeRFC3986(value string) string {
 }
 
 func (s *server) pairingURI(pin string) string {
-	cfg, ok := s.currentConfig()
-	if !ok {
+	metadata, err := s.connectionMetadata()
+	if err != nil {
 		return ""
 	}
-	parts := []string{"v=1", "id=" + escapeRFC3986(s.deviceID()), "host=" + escapeRFC3986(s.preferredHost())}
-	if cfg.HTTPEnabled {
-		parts = append(parts, "http="+strconv.Itoa(cfg.HTTPPort))
+	return pairingURIFromMetadata(metadata, pin)
+}
+
+func pairingURIFromMetadata(metadata connectionMetadata, pin string) string {
+	parts := []string{"v=1", "id=" + escapeRFC3986(metadata.DeviceID), "host=" + escapeRFC3986(metadata.Host)}
+	if metadata.Config.HTTPEnabled {
+		parts = append(parts, "http="+strconv.Itoa(metadata.Config.HTTPPort))
 	}
-	if cfg.HTTPSEnabled {
-		parts = append(parts, "https="+strconv.Itoa(cfg.HTTPSPort))
+	if metadata.Config.HTTPSEnabled {
+		parts = append(parts, "https="+strconv.Itoa(metadata.Config.HTTPSPort))
 	}
 	parts = append(parts, "pin="+escapeRFC3986(pin))
-	if cfg.HTTPSEnabled && s.tlsFingerprint() != "" {
-		parts = append(parts, "tls="+escapeRFC3986(s.tlsFingerprint()))
+	if metadata.Config.HTTPSEnabled {
+		parts = append(parts, "tls="+escapeRFC3986(metadata.TLSSHA256))
 	}
 	return "wattline://pair?" + strings.Join(parts, "&")
 }
