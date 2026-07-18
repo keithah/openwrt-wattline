@@ -65,6 +65,65 @@
       blob: function (method, path, body, extra) { return checked(method, path, body, extra).then(function (r) { return r.blob(); }); }
     };
   }
+  function powerLossCompatible(rule) {
+    return !!rule && rule.name === 'no_input_shutdown' && rule.condition === 'input_power' &&
+      rule.state === 'absent' && Array.isArray(rule.actions) && rule.actions.indexOf('shutdown') !== -1;
+  }
+  function powerLossClassify(rules) {
+    var list = Array.isArray(rules) ? rules : [], rule = null;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].name === 'no_input_shutdown') { rule = list[i]; break; }
+    }
+    if (!rule) return { kind: 'missing', rule: null };
+    return { kind: powerLossCompatible(rule) ? 'compatible' : 'conflict', rule: rule };
+  }
+  function powerLossPayload(existing, enabled, minutes, reset) {
+    var delay = Number(minutes);
+    if (!Number.isInteger(delay) || delay < 1 || delay > 1440)
+      throw new Error('Delay must be a whole number from 1 to 1440 minutes');
+    if (existing && !reset && !powerLossCompatible(existing))
+      throw new Error('Customized rule conflict requires resetting the preset');
+    var rule = reset || !existing ? {
+      name: 'no_input_shutdown', enabled: true, condition: 'input_power', state: 'absent',
+      hold: 600000000000, hysteresis_margin: 5, actions: ['shutdown'], confirm_shutdown: true
+    } : Object.assign({}, existing);
+    rule.name = 'no_input_shutdown'; rule.enabled = !!enabled;
+    rule.hold = delay * 60000000000; rule.confirm_shutdown = true;
+    return rule;
+  }
+  function powerLossMinutes(rule) {
+    var value = Number(rule && rule.hold) / 60000000000;
+    if (!Number.isFinite(value) || value <= 0) return 10;
+    return Math.max(1, Math.min(1440, Math.round(value)));
+  }
+  function powerLossDurationSeconds(value) {
+    var match = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(String(value || ''));
+    if (!match || (!match[1] && !match[2] && !match[3])) return null;
+    return Number(match[1] || 0) * 3600 + Number(match[2] || 0) * 60 + Number(match[3] || 0);
+  }
+  function powerLossDisplay(rule, status, telemetry) {
+    var model = powerLossClassify(rule ? [rule] : []);
+    if (model.kind === 'missing') return { kind: 'missing', remainingSeconds: null };
+    if (model.kind === 'conflict') return { kind: 'conflict', remainingSeconds: null };
+    if (rule.enabled === false) return { kind: 'disabled', remainingSeconds: null };
+    if (!telemetry || telemetry.connected !== true) return { kind: 'disconnected', remainingSeconds: null };
+    var inputPresent = !!((telemetry.battery && telemetry.battery.status === 1) ||
+      (telemetry.typec && telemetry.typec.dc_input === true));
+    if (inputPresent) return { kind: 'present', remainingSeconds: null };
+    var list = Array.isArray(status) ? status : status && status.rules, runtime = null;
+    if (Array.isArray(list)) {
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && list[i].name === 'no_input_shutdown') { runtime = list[i]; break; }
+      }
+    }
+    if (runtime && runtime.armed === false && runtime.last_fired)
+      return { kind: 'fired', remainingSeconds: 0, lastFired: runtime.last_fired };
+    var elapsed = runtime && runtime.armed === true ? powerLossDurationSeconds(runtime.holding_for) : null;
+    var total = Number(rule.hold) / 1000000000;
+    if (elapsed == null || !Number.isFinite(total) || total <= 0)
+      return { kind: 'inactive', remainingSeconds: null };
+    return { kind: 'holding', remainingSeconds: Math.max(0, Math.round(total - elapsed)) };
+  }
   function advancedCapabilities(settings, device) {
     var enabled = !!(settings && settings.advanced), available = device && device.available || {};
     var features = device && device.features || {};
@@ -101,6 +160,9 @@
         etick: 0, ctlErr: '', newSch: { status: 1, type: 1, hour: 8, minute: 0, action: 1, date: '', repeatInput: '' },
         adminTick: 0, settings: null, tokens: [], apiPair: null, adminErr: '', qrURL: '', qrCtl: null,
         settingsDraft: null, adminGeneration: 0, adminMutations: 0, destroyed: false,
+        powerLossRule: null, powerLossStatus: null,
+        powerLossDraft: { enabled: false, minutes: '10', focused: false },
+        powerLossBusy: false, powerLossRetryDraft: false, powerLossError: '',
         usbFirmware: '', barrierFree: null, commandBusy: {} };
     },
     created: function () {
@@ -254,10 +316,17 @@
       fetchAdmin: function () { var self = this;
         if (this.destroyed || this.adminMutations) return Promise.resolve(null);
         var generation = ++this.adminGeneration;
-        return Promise.all([this.get('/device'), this.get('/settings'), this.get('/tokens'), this.get('/pairing-mode')])
+        return Promise.all([this.get('/device'), this.get('/settings'), this.get('/tokens'), this.get('/pairing-mode'),
+          this.get('/rules'), this.get('/status')])
           .then(function (values) {
             if (self.destroyed || self.adminMutations || generation !== self.adminGeneration) return null;
             self.dev = values[0]; self.settings = values[1]; self.tokens = values[2] || []; self.apiPair = values[3];
+            var powerModel = self.powerLossClassify(values[4]);
+            self.powerLossRule = powerModel.rule; self.powerLossStatus = values[5];
+            if (!self.powerLossRetryDraft) {
+              self.powerLossDraft.enabled = powerModel.rule ? powerModel.rule.enabled !== false : true;
+              if (!self.powerLossDraft.focused) self.powerLossDraft.minutes = String(powerLossMinutes(powerModel.rule));
+            }
             // Polls update read-only state but never replace a user's focused
             // reachability form. The draft is refreshed after explicit saves.
             if (!self.settingsDraft && !self.focused()) self.settingsDraft = JSON.parse(JSON.stringify(values[1]));
@@ -319,6 +388,43 @@
           // Preserve its fresh read-only policy state, but reinstate the
           // operator's editable values when the PUT itself failed.
           if (result === null && !self.destroyed) self.settingsDraft = operatorDraft;
+          return result;
+        });
+      },
+      powerLossClassify: function (rules) { return powerLossClassify(rules); },
+      powerLossPayload: function (existing, enabled, minutes, reset) {
+        return powerLossPayload(existing, enabled, minutes, reset);
+      },
+      powerLossDisplay: function (rule, status, telemetry) {
+        return powerLossDisplay(arguments.length ? rule : this.powerLossRule,
+          arguments.length > 1 ? status : this.powerLossStatus,
+          arguments.length > 2 ? telemetry : this.tel);
+      },
+      savePowerLoss: function (reset) { var self = this;
+        if (this.destroyed || this.powerLossBusy || this.adminMutations) return Promise.resolve(null);
+        var model = this.powerLossClassify(this.powerLossRule ? [this.powerLossRule] : []);
+        if (model.kind === 'conflict' && !reset) {
+          this.powerLossError = 'Customized rule conflict. Save is disabled until you reset this preset.';
+          return Promise.resolve(null);
+        }
+        if (reset && !window.confirm('Reset the customized rule to the Power-loss shutdown preset?'))
+          return Promise.resolve(null);
+        var submitted = { enabled: !!this.powerLossDraft.enabled, minutes: String(this.powerLossDraft.minutes),
+          focused: !!this.powerLossDraft.focused }, payload;
+        try { payload = this.powerLossPayload(model.rule, submitted.enabled, submitted.minutes, reset); }
+        catch (error) { this.powerLossError = error.message; return Promise.resolve(null); }
+        var method = model.kind === 'missing' ? 'POST' : 'PUT';
+        var path = model.kind === 'missing' ? '/rules' : '/rules/no_input_shutdown';
+        this.powerLossBusy = true; this.powerLossRetryDraft = false; this.powerLossError = '';
+        if (this.$forceUpdate) this.$forceUpdate();
+        return this.adminAction(method, path, payload).then(function (result) {
+          self.powerLossBusy = false;
+          if (result === null && !self.destroyed) {
+            self.powerLossDraft = submitted;
+            self.powerLossRetryDraft = true;
+            self.powerLossError = self.adminErr || 'Power-loss preset update failed';
+          } else { self.powerLossRetryDraft = false; self.powerLossError = ''; }
+          if (self.$forceUpdate) self.$forceUpdate();
           return result;
         });
       },
@@ -606,6 +712,58 @@
         kv('MagicDNS', self.dev && self.dev.magic_dns_name), kv('TLS certificate SHA-256', settingsInfo.tls && settingsInfo.tls.sha256)
       ]);
 
+      var powerLossModel = self.powerLossClassify(self.powerLossRule ? [self.powerLossRule] : []);
+      var powerLossState = self.powerLossDisplay();
+      var powerLossText = powerLossState.kind === 'missing' ? 'Preset not configured · no countdown'
+        : powerLossState.kind === 'conflict' ? 'Customized rule conflict · no countdown'
+          : powerLossState.kind === 'disabled' ? 'Rule disabled · no countdown'
+            : powerLossState.kind === 'disconnected' ? 'Disconnected · countdown reset'
+              : powerLossState.kind === 'present' ? 'Input power present · countdown reset'
+                : powerLossState.kind === 'fired' ? 'Rule last fired ' + new Date(powerLossState.lastFired).toLocaleString() + ' · delivery not confirmed'
+                  : powerLossState.kind === 'holding' ? 'Input power absent · ' + Math.ceil(powerLossState.remainingSeconds / 60) + ' min remaining'
+                    : 'Input power absent · countdown not active';
+      var powerLossDisabled = !!(self.powerLossBusy || self.adminMutations);
+      var powerLossButton = function (label, onclick, danger, disabled) {
+        return h('button', {
+          attrs: { type: 'button', disabled: !!disabled },
+          style: { padding: '7px 14px', borderRadius: '8px', fontSize: '13px', marginRight: '8px',
+            cursor: disabled ? 'wait' : 'pointer', opacity: disabled ? '.55' : '1', border: danger ? 'none' : '1px solid #d0d4d9',
+            background: danger ? RED : '#fff', color: danger ? '#fff' : '#3c4043' },
+          on: { click: function () { if (!disabled) onclick(); } }
+        }, label);
+      };
+      var powerLossActions = [powerLossButton('Save', function () { self.savePowerLoss(false); }, false,
+        powerLossDisabled || powerLossModel.kind === 'conflict')];
+      if (powerLossModel.kind === 'conflict') powerLossActions.push(
+        powerLossButton('Reset preset', function () { self.savePowerLoss(true); }, true, powerLossDisabled));
+      var powerLossCard = card([
+        cardhead('Power-loss shutdown'),
+        el('div', { color: RED, fontSize: '12px', margin: '7px 0' },
+          'Shutting down Link-Power also powers off this router. It returns only when Link-Power wakes after input power comes back.'),
+        el('div', { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', gap: '14px', marginTop: '12px' }, [
+          h('label', { attrs: { for: 'wl-power-loss-enabled' }, style: { display: 'flex', alignItems: 'center', gap: '7px', fontSize: '13px' } }, [
+            h('input', { attrs: { id: 'wl-power-loss-enabled', type: 'checkbox', disabled: powerLossDisabled },
+              domProps: { checked: !!self.powerLossDraft.enabled },
+              on: { change: function (event) { self.powerLossDraft.enabled = event.target.checked; } } }), 'Enable'
+          ]),
+          h('label', { attrs: { for: 'wl-power-loss-delay' }, style: { display: 'block', fontSize: '13px' } }, [
+            el('div', { color: GREY, fontSize: '12px' }, 'Delay (minutes)'),
+            h('input', { attrs: { id: 'wl-power-loss-delay', type: 'number', min: 1, max: 1440, step: 1,
+              disabled: powerLossDisabled }, domProps: { value: self.powerLossDraft.minutes },
+              style: { width: '96px', padding: '7px 9px', border: '1px solid #cbd1d5', borderRadius: '3px',
+                font: '13px ui-monospace,SFMono-Regular,Consolas,monospace' },
+              on: { focus: function () { self.powerLossDraft.focused = true; },
+                blur: function () { self.powerLossDraft.focused = false; },
+                input: function (event) { self.powerLossDraft.minutes = event.target.value; } } })
+          ])
+        ]),
+        h('div', { attrs: { 'aria-live': 'polite' }, style: { color: GREY, fontSize: '13px', marginTop: '10px' } }, powerLossText),
+        powerLossModel.kind === 'conflict' ? el('div', { color: RED, fontSize: '12px', marginTop: '7px' },
+          'Customized rule conflict. Save is disabled until you reset this preset.') : '',
+        self.powerLossError ? el('div', { color: RED, fontSize: '12px', marginTop: '7px' }, self.powerLossError) : '',
+        el('div', { display: 'flex', marginTop: '10px' }, powerLossActions)
+      ]);
+
       var apiPairKids = [cardhead('Pair an API client', pill(self.apiPair && self.apiPair.open ? 'Open' : 'Closed',
         self.apiPair && self.apiPair.open ? GREEN : GREY, self.apiPair && self.apiPair.open ? '#e6f6ec' : '#eef1f4')),
         sub('Open a short enrollment window, then scan the authenticated QR in a Wattline client. This is separate from Pair Link-Power over BLE.')];
@@ -727,7 +885,7 @@
       var note = el('div', { color: GREY, fontSize: '12px', maxWidth: '460px', margin: '6px 2px 0', lineHeight: '1.5' },
         '~10–15% of the battery is reserved for the Starlink Mini — USB-C output turns off automatically below that to keep your dish running.');
 
-      var adminCards = [identityCard, apiPairCard, tokenCard, reachCard, advancedCard, adminError];
+      var adminCards = [identityCard, powerLossCard, apiPairCard, tokenCard, reachCard, advancedCard, adminError];
       if (offlineCards) return wrap(offlineCards.concat(adminCards));
       var deviceCards = [battery];
       var available = self.dev && self.dev.available;

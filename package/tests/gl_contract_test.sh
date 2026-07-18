@@ -17,7 +17,7 @@ for route in /device /telemetry /pairing/status /pairing/scan /pairing/pair \
 	/pairing-mode /pairing-mode/qr.png /tokens /settings /tls/rotate \
 	/device/dc /device/usbc/output /device/timers /device/restart \
 	/device/shutdown /device/ota/enter /device/advanced/running-mode \
-	/device/advanced/ble-pin; do
+	/device/advanced/ble-pin /rules /status; do
 	need "$VIEW" "'$route'" "canonical route $route"
 done
 for label in 'Pair Link-Power over BLE' 'Pair an API client' 'Device identity' \
@@ -28,6 +28,11 @@ for label in 'Pair Link-Power over BLE' 'Pair an API client' 'Device identity' \
 done
 for label in 'One-shot date' 'Weekly repeat mask' 'Monthly repeat mask' 'Enabled' 'Disabled'; do
 	need "$VIEW" "$label" "timer editor $label"
+done
+for label in 'Power-loss shutdown' 'Delay \(minutes\)' 'Reset preset' \
+	'Shutting down Link-Power also powers off this router' \
+	'Customized rule conflict. Save is disabled until you reset this preset.'; do
+	need "$VIEW" "$label" "power-loss card $label"
 done
 
 # The GL session may receive the bootstrap bearer token for API authorization,
@@ -73,11 +78,12 @@ if grep -Eq '\[\[|const[[:space:]]|var[[:space:]]|=>|local[[:space:]]+[^=]+:=' "
 	exit 1
 fi
 
-VIEW="$VIEW" node <<'JS'
+ROOT="$ROOT" VIEW="$VIEW" node <<'JS'
 'use strict';
 const fs = require('fs');
 const assert = require('assert');
 const source = fs.readFileSync(process.env.VIEW, 'utf8');
+const fixture = require(process.env.ROOT + '/package/tests/power_loss_preset.json');
 
 function transportFactory(fetchImpl) {
 	const start = source.indexOf('  function apiError');
@@ -126,6 +132,47 @@ function component(environment) {
 		environment.fetch, environment.window, environment.document, environment.URL, AbortController);
 }
 
+function powerLossHelpers() {
+	const start = source.indexOf('  function powerLossCompatible');
+	const end = source.indexOf('  function advancedCapabilities', start);
+	assert(start >= 0 && end > start, 'power-loss helpers remain inspectable in the actual GL bundle');
+	return Function(source.slice(start, end) + '\nreturn { classify: powerLossClassify, payload: powerLossPayload, minutes: powerLossMinutes, display: powerLossDisplay };')();
+}
+
+function powerLossHelperTests() {
+	const helpers = powerLossHelpers();
+	assert.strictEqual(helpers.classify([]).kind, 'missing');
+	assert.strictEqual(helpers.classify([fixture.canonical]).kind, 'compatible');
+	assert.strictEqual(helpers.classify([{ name: fixture.name, condition: 'schedule' }]).kind, 'conflict');
+	assert.deepStrictEqual(helpers.payload(null, true, 10, false), fixture.canonical);
+
+	const customized = Object.assign({}, fixture.canonical, {
+		actions: ['webhook:https://example.test/input-lost', 'shutdown'], repeat_every: 1800000000000
+	});
+	assert.deepStrictEqual(helpers.payload(customized, false, 17, false), Object.assign({}, customized, {
+		enabled: false, hold: 1020000000000, confirm_shutdown: true
+	}), 'compatible updates preserve custom fields and actions');
+	const incompatible = { name: fixture.name, enabled: false, condition: 'schedule', actions: ['shutdown'], cron: '0 1 * * *' };
+	assert.throws(() => helpers.payload(incompatible, true, 10, false), /conflict/i);
+	assert.deepStrictEqual(helpers.payload(incompatible, false, 17, true), Object.assign({}, fixture.canonical, {
+		enabled: false, hold: 1020000000000
+	}), 'confirmed reset discards incompatible custom semantics');
+	for (const minutes of [0, 1441, 1.5]) assert.throws(() => helpers.payload(null, true, minutes, false), /1.*1440|whole number/);
+
+	const holding = { rules: [{ name: fixture.name, armed: true, holding_for: '5m' }] };
+	assert.deepStrictEqual(helpers.display(fixture.canonical, holding, {
+		connected: true, battery: { status: 0 }, typec: { dc_input: false }
+	}), { kind: 'holding', remainingSeconds: 300 });
+	for (const sample of [
+		[null, holding, { connected: true }, 'missing'],
+		[Object.assign({}, fixture.canonical, { condition: 'schedule' }), holding, { connected: true }, 'conflict'],
+		[Object.assign({}, fixture.canonical, { enabled: false }), holding, { connected: true }, 'disabled'],
+		[fixture.canonical, { rules: [{ name: fixture.name, armed: true }] }, { connected: true }, 'inactive'],
+		[fixture.canonical, { rules: [{ name: fixture.name, armed: true, holding_for: 'nonsense' }] }, { connected: true }, 'inactive']
+	]) assert.strictEqual(helpers.display(sample[0], sample[1], sample[2]).kind, sample[3],
+		'does not synthesize a countdown for ' + sample[3] + ' state');
+}
+
 async function lifecycleTests() {
 	const revoked = [], pending = [];
 	const environment = {
@@ -154,16 +201,107 @@ async function lifecycleTests() {
 
 	const values = [
 		{ id: 'device', features: {}, commands: { active: [] } },
-		{ http: { enabled: true }, https: { enabled: true }, tls: {}, mdns: { interfaces: [] } }, [], { open: false }
+		{ http: { enabled: true }, https: { enabled: true }, tls: {}, mdns: { interfaces: [] } }, [], { open: false },
+		[fixture.canonical], { rules: [] }
 	];
+	const adminPaths = [];
 	const focused = {
 		adminGeneration: 0, adminMutations: 0, destroyed: false,
-		settingsDraft: { user: 'typing' }, focused: () => true, get: async () => values.shift(),
-		loadQR() {}, clearQR() {}, adminErr: '', dev: null, settings: null, tokens: null, apiPair: null
+		settingsDraft: { user: 'typing' }, focused: () => true, get: async (path) => { adminPaths.push(path); return values.shift(); },
+		loadQR() {}, clearQR() {}, adminErr: '', dev: null, settings: null, tokens: null, apiPair: null,
+		powerLossRule: null, powerLossStatus: null, powerLossDraft: { enabled: false, minutes: '17', focused: true },
+		powerLossClassify: methods.powerLossClassify
 	};
 	await methods.fetchAdmin.call(focused);
+	assert.deepStrictEqual(adminPaths, ['/device', '/settings', '/tokens', '/pairing-mode', '/rules', '/status'],
+		'guarded admin refresh reads rules and runtime status with the other authoritative state');
 	assert.strictEqual(focused.dev.id, 'device', 'initialized generation fixture applies the authoritative refresh');
 	assert.deepStrictEqual(focused.settingsDraft, { user: 'typing' }, 'poll cannot rebuild a focused settings form');
+	assert.strictEqual(focused.powerLossDraft.minutes, '17', 'poll preserves the focused power-loss delay only');
+	assert.strictEqual(focused.powerLossDraft.enabled, true, 'poll reconciles non-focused power-loss controls');
+}
+
+async function powerLossComponentTests() {
+	let confirmContext;
+	const environment = { fetch: () => {}, window: { location: { hostname: 'router.lan' }, confirm: () => {
+		confirmContext.resetPrompted = true; return true;
+	} }, document: { activeElement: null }, URL: { createObjectURL() {}, revokeObjectURL() {} } };
+	const methods = componentMethods(environment);
+	function deferred() {
+		let resolve, reject;
+		const promise = new Promise((good, bad) => { resolve = good; reject = bad; });
+		return { promise, resolve, reject };
+	}
+
+	const pending = deferred(), requests = [];
+	const create = {
+		powerLossRule: null, powerLossDraft: { enabled: true, minutes: '10', focused: false },
+		powerLossBusy: false, powerLossError: '', adminMutations: 0, destroyed: false,
+		powerLossClassify: methods.powerLossClassify, powerLossPayload: methods.powerLossPayload,
+		adminAction(method, path, body) { requests.push([method, path, body]); return pending.promise; }
+	};
+	const first = methods.savePowerLoss.call(create, false);
+	methods.savePowerLoss.call(create, false);
+	assert.deepStrictEqual(requests[0], ['POST', '/rules', fixture.canonical]);
+	assert.strictEqual(requests.length, 1, 'pending double-click is suppressed');
+	assert.strictEqual(create.powerLossBusy, true);
+	pending.resolve({});
+	await first;
+	assert.strictEqual(create.powerLossBusy, false);
+
+	const incompatible = { name: fixture.name, enabled: false, condition: 'schedule', actions: ['shutdown'], cron: '0 1 * * *' };
+	const readValues = [
+		{ id: 'fresh', features: {}, commands: { active: [] } },
+		{ http: {}, https: {}, mdns: {}, tls: {} }, [], { open: false }, [incompatible], { rules: [] }
+	];
+	const resetPending = deferred();
+	const context = {
+		adminGeneration: 0, adminMutations: 0, destroyed: false, settingsDraft: null, adminErr: '',
+		dev: null, settings: null, tokens: [], apiPair: null, qrURL: '', qrCtl: null,
+		powerLossRule: fixture.canonical, powerLossStatus: null,
+		powerLossDraft: { enabled: true, minutes: '17', focused: true }, powerLossBusy: false, powerLossError: '',
+		focused: () => false, loadQR() {}, clearQR() {}, get: async () => readValues.shift(),
+		powerLossClassify: methods.powerLossClassify, powerLossPayload: methods.powerLossPayload,
+		adminAction(method, path, body) { this.resetRequest = [method, path, body]; return resetPending.promise; },
+		resetPrompted: false
+	};
+	confirmContext = context;
+	await methods.fetchAdmin.call(context);
+	assert.strictEqual(context.powerLossDraft.minutes, '17', 'polling preserves the focused delay draft');
+	assert.strictEqual(context.powerLossDraft.enabled, false, 'polling reconciles the latest enabled state');
+	assert.strictEqual(methods.powerLossClassify.call(context, [context.powerLossRule]).kind, 'conflict');
+	const reset = methods.savePowerLoss.call(context, true);
+	assert.strictEqual(context.resetPrompted, true, 'conflict cannot silently overwrite the rule');
+	assert.deepStrictEqual(context.resetRequest, ['PUT', '/rules/no_input_shutdown', Object.assign({}, fixture.canonical, {
+		enabled: false, hold: 1020000000000
+	})]);
+	resetPending.resolve({});
+	await reset;
+
+	const submitted = { enabled: false, minutes: '17', focused: false };
+	const failed = {
+		powerLossRule: fixture.canonical, powerLossDraft: Object.assign({}, submitted),
+		powerLossBusy: false, powerLossError: '', adminErr: '', adminMutations: 0, destroyed: false,
+		powerLossClassify: methods.powerLossClassify, powerLossPayload: methods.powerLossPayload,
+		adminAction: async function () {
+			this.powerLossDraft = { enabled: true, minutes: '10', focused: false };
+			this.adminErr = 'preset write rejected';
+			return null;
+		}
+	};
+	await methods.savePowerLoss.call(failed, false);
+	assert.deepStrictEqual(failed.powerLossDraft, submitted, 'failed mutation restores the submitted operator draft');
+	assert.strictEqual(failed.powerLossError, 'preset write rejected');
+	const retryReads = [
+		{ id: 'retry', features: {}, commands: { active: [] } }, { http: {}, https: {}, mdns: {}, tls: {} },
+		[], { open: false }, [fixture.canonical], { rules: [] }
+	];
+	Object.assign(failed, {
+		adminGeneration: 0, settingsDraft: null, dev: null, settings: null, tokens: [], apiPair: null,
+		powerLossStatus: null, focused: () => false, loadQR() {}, clearQR() {}, get: async () => retryReads.shift()
+	});
+	await methods.fetchAdmin.call(failed);
+	assert.deepStrictEqual(failed.powerLossDraft, submitted, 'later polling preserves a rejected mutation draft for retry');
 }
 
 async function actionAndTimerTests() {
@@ -204,10 +342,12 @@ async function adminRaceTests() {
 		document: { activeElement: null }, URL: { createObjectURL() {}, revokeObjectURL() {} } };
 	const view = component(environment), methods = view.methods;
 	const groups = [], mutations = [];
-	function deferred() { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; }
+	function deferred() { let resolve, reject; const promise = new Promise((r, j) => { resolve = r; reject = j; }); return { promise, resolve, reject }; }
 	const context = {
 		adminGeneration: 0, adminMutations: 0, destroyed: false, settingsDraft: null, adminErr: '',
 		dev: null, settings: null, tokens: [], apiPair: null, qrURL: '', qrCtl: null,
+		powerLossRule: null, powerLossStatus: null, powerLossDraft: { enabled: false, minutes: '17', focused: false },
+		powerLossClassify: methods.powerLossClassify,
 		focused: () => false, loadQR() { this.loadedQR = true; }, clearQR() { this.clearedQR = true; },
 		get(path) { const d = deferred(); groups.push([path, d]); return d.promise; },
 		mutate() { const d = deferred(); mutations.push(d); return d.promise; }
@@ -215,26 +355,45 @@ async function adminRaceTests() {
 	context.fetchAdmin = methods.fetchAdmin.bind(context);
 	const stale = context.fetchAdmin();
 	const closing = methods.adminAction.call(context, 'DELETE', '/pairing-mode', null);
-	groups.slice(0, 4).forEach((entry, index) => entry[1].resolve([
-		{ id: 'stale' }, { http: {}, https: {}, mdns: {}, tls: {} }, [{ id: 'stale' }], { open: true, expires_at: 'stale' }
+	groups.slice(0, 6).forEach((entry, index) => entry[1].resolve([
+		{ id: 'stale' }, { http: {}, https: {}, mdns: {}, tls: {} }, [{ id: 'stale' }], { open: true, expires_at: 'stale' },
+		[fixture.canonical], { rules: [] }
 	][index]));
 	await stale;
 	assert.strictEqual(context.dev, null, 'pre-mutation refresh cannot overwrite state');
 	assert.strictEqual(context.loadedQR, undefined, 'stale pairing response cannot recreate QR after close');
 	mutations[0].resolve({});
 	await new Promise((resolve) => setImmediate(resolve));
-	groups.slice(4, 8).forEach((entry, index) => entry[1].resolve([
-		{ id: 'fresh' }, { http: {}, https: {}, mdns: {}, tls: {} }, [], { open: false }
+	groups.slice(6, 12).forEach((entry, index) => entry[1].resolve([
+		{ id: 'fresh' }, { http: {}, https: {}, mdns: {}, tls: {} }, [], { open: false },
+		[fixture.canonical], { rules: [] }
 	][index]));
 	await closing;
 	assert.strictEqual(context.dev.id, 'fresh', 'mutation completion performs one authoritative refresh');
+
+	const transientGroup = [];
+	context.qrURL = 'blob:fresh'; context.clearedQR = false;
+	context.get = function (path) { const d = deferred(); transientGroup.push([path, d]); return d.promise; };
+	const transient = context.fetchAdmin();
+	transientGroup.forEach((entry, index) => {
+		if (index === 4) entry[1].reject(new Error('rules temporarily unavailable'));
+		else entry[1].resolve([
+			{ id: 'partial' }, { http: {}, https: {}, mdns: {}, tls: {} }, [{ id: 'partial' }], { open: false },
+			null, { rules: [] }
+		][index]);
+	});
+	await transient;
+	assert.strictEqual(context.dev.id, 'fresh', 'transient admin read cannot partially replace authoritative state');
+	assert.strictEqual(context.qrURL, 'blob:fresh', 'transient admin read does not destroy the current QR lifecycle');
+	assert.strictEqual(context.clearedQR, false, 'transient admin read does not close QR state');
 
 	const destroyGroup = [];
 	context.get = function (path) { const d = deferred(); destroyGroup.push([path, d]); return d.promise; };
 	const pending = context.fetchAdmin();
 	view.beforeDestroy.call(Object.assign(context, { _iv: null, clearQR: methods.clearQR.bind(context) }));
 	destroyGroup.forEach((entry, index) => entry[1].resolve([
-		{ id: 'after-destroy' }, { http: {}, https: {}, mdns: {}, tls: {} }, [], { open: true }
+		{ id: 'after-destroy' }, { http: {}, https: {}, mdns: {}, tls: {} }, [], { open: true },
+		[fixture.canonical], { rules: [] }
 	][index]));
 	await pending;
 	assert.strictEqual(context.dev.id, 'fresh', 'destroyed view ignores late refresh completion');
@@ -290,6 +449,8 @@ function timerPresentationTests() {
 	await transportTests();
 	await lifecycleTests();
 	await actionAndTimerTests();
+	powerLossHelperTests();
+	await powerLossComponentTests();
 	await adminRaceTests();
 	await failedSettingsDraftTest();
 	capabilityTests();
