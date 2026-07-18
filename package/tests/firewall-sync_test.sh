@@ -10,7 +10,8 @@ mkdir -p "$TMP/bin"
 STATE="$TMP/uci"
 LOG="$TMP/logger"
 RELOADS="$TMP/reloads"
-export STATE LOG RELOADS
+APPLY_MARKER="$TMP/firewall.pending"
+export STATE LOG RELOADS APPLY_MARKER
 
 cat > "$TMP/bin/uci" <<'EOF'
 #!/bin/sh
@@ -24,6 +25,10 @@ case "$command" in
 		line="$(sed -n "s|^${key}=||p" "$STATE" 2>/dev/null | tail -n 1)"
 		[ -n "$line" ] || exit 1
 		printf '%s\n' "$line"
+		;;
+	show)
+		key="$1"
+		awk -v key="$key" 'index($0, key "=") == 1 || index($0, key ".") == 1 { print; found = 1 } END { exit !found }' "$STATE"
 		;;
 	set)
 		assignment="$1"
@@ -53,6 +58,7 @@ cat > "$TMP/firewall" <<'EOF'
 #!/bin/sh
 [ "$1" = reload ]
 printf 'reload\n' >> "$RELOADS"
+[ ! -e "${FAIL_RELOAD:-}" ]
 EOF
 chmod +x "$TMP/bin/uci" "$TMP/bin/logger" "$TMP/firewall"
 export PATH="$TMP/bin:$PATH"
@@ -68,7 +74,7 @@ assert_line() {
 }
 
 assert_absent() {
-	if grep -Eq "^$1($|\.)" "$STATE"; then
+	if grep -Eq "^$1(=|\.)" "$STATE"; then
 		fail "unexpected managed state: $1"
 	fi
 }
@@ -104,6 +110,8 @@ wattline.main.http_enabled=1
 wattline.main.port=8480
 wattline.main.https_enabled=1
 wattline.main.https_port=8481
+firewall.wattline_http.family=ipv4
+firewall.wattline_https.extra=hostile
 EOF
 "$HELPER"
 for rule in wattline_http wattline_https; do
@@ -117,6 +125,8 @@ assert_line 'firewall.wattline_http.name=Wattline HTTP'
 assert_line 'firewall.wattline_http.dest_port=8480'
 assert_line 'firewall.wattline_https.name=Wattline HTTPS'
 assert_line 'firewall.wattline_https.dest_port=8481'
+assert_absent firewall.wattline_http.family
+assert_absent firewall.wattline_https.extra
 grep -Fqx 'wattline: WAN access enabled: insecure — use TLS/VPN' "$LOG" || fail "missing exact WAN warning"
 [ "$(wc -l < "$STATE.commands")" -eq 2 ] || fail "enabled reconciliation did not commit exactly once"
 [ "$(wc -l < "$RELOADS")" -eq 2 ] || fail "enabled reconciliation did not reload exactly once"
@@ -126,6 +136,7 @@ cp "$STATE" "$TMP/enabled.before"
 cmp -s "$STATE" "$TMP/enabled.before" || fail "enabled repeat changed UCI state"
 [ "$(wc -l < "$STATE.commands")" -eq 2 ] || fail "enabled repeat committed"
 [ "$(wc -l < "$RELOADS")" -eq 2 ] || fail "enabled repeat reloaded"
+[ "$(grep -Fc 'wattline: WAN access enabled: insecure — use TLS/VPN' "$LOG")" -eq 1 ] || fail "no-op sync repeated WAN warning"
 
 # Listener disablement removes only its corresponding named rule.
 printf '%s\n' 'wattline.main.https_enabled=0' >> "$STATE"
@@ -134,7 +145,26 @@ assert_line 'firewall.wattline_http=rule'
 assert_absent firewall.wattline_https
 assert_line 'firewall.unrelated=rule'
 
+# A committed disable remains apply-pending when reload fails, and the next
+# no-op invocation retries the reload rather than silently accepting stale
+# kernel firewall state.
+printf '%s\n' 'wattline.main.wan_access=0' >> "$STATE"
+FAIL_RELOAD="$TMP/fail-reload"
+export FAIL_RELOAD
+: > "$FAIL_RELOAD"
+if "$HELPER"; then
+	fail "firewall reload failure was ignored"
+fi
+[ -e "$APPLY_MARKER" ] || fail "failed reload did not leave apply marker"
+assert_absent firewall.wattline_http
+before_commits="$(wc -l < "$STATE.commands")"
+rm -f "$FAIL_RELOAD"
+"$HELPER"
+[ ! -e "$APPLY_MARKER" ] || fail "successful retry did not clear apply marker"
+[ "$(wc -l < "$STATE.commands")" -eq "$before_commits" ] || fail "apply retry committed unchanged UCI"
+
 # Invalid manual UCI edits fail before changing any firewall section.
+printf '%s\n' 'wattline.main.wan_access=1' >> "$STATE"
 printf '%s\n' 'wattline.main.port=not-a-port' >> "$STATE"
 cp "$STATE" "$TMP/invalid.before"
 if "$HELPER"; then

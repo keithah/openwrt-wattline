@@ -3,24 +3,30 @@
 USE_PROCD=1
 START=95
 STOP=10
-RUNTIME_DIR=/var/run/wattline
-LISTENER_STATE="$RUNTIME_DIR/listener-state"
+RUNTIME_DIR="${RUNTIME_DIR:-/var/run/wattline}"
+DAEMON_STATE="${DAEMON_STATE:-$RUNTIME_DIR/daemon-state}"
+FIREWALL_SYNC="${FIREWALL_SYNC:-/usr/lib/wattline/firewall-sync}"
+SERVICE_SCRIPT="${SERVICE_SCRIPT:-/etc/init.d/wattlined}"
+PGREP="${PGREP:-pgrep}"
 
-listener_state() {
-	for key in http_enabled http_addr4 http_addr6 port https_enabled https_addr4 https_addr6 https_port tls_cert tls_key; do
-		printf '%s=%s\n' "$key" "$(uci -q get "wattline.main.$key" 2>/dev/null || true)"
-	done
+daemon_state() {
+	# wattlined only reloads rule sections on SIGHUP. Any main-section change
+	# therefore needs a process restart, including auth, discovery, and WAN
+	# policy in addition to listener/TLS settings.
+	uci -q show wattline.main 2>/dev/null || true
 }
 
-save_listener_state() {
+save_daemon_state() {
 	mkdir -p "$RUNTIME_DIR"
-	listener_state > "$LISTENER_STATE.new"
-	mv "$LISTENER_STATE.new" "$LISTENER_STATE"
+	chmod 0700 "$RUNTIME_DIR"
+	daemon_state > "$DAEMON_STATE.new"
+	chmod 0600 "$DAEMON_STATE.new"
+	mv "$DAEMON_STATE.new" "$DAEMON_STATE"
 }
 
 start_service() {
-	/usr/lib/wattline/firewall-sync
-	save_listener_state
+	"$FIREWALL_SYNC" || return 1
+	save_daemon_state || return 1
 	procd_open_instance
 	procd_set_param command /usr/bin/wattlined -config /etc/config/wattline
 	procd_set_param respawn 3600 5 5
@@ -30,16 +36,16 @@ start_service() {
 }
 
 reload_service() {
-	/usr/lib/wattline/firewall-sync
-	current="$(listener_state)"
-	previous="$(cat "$LISTENER_STATE" 2>/dev/null || true)"
+	"$FIREWALL_SYNC" || return 1
+	current="$(daemon_state)"
+	previous="$(cat "$DAEMON_STATE" 2>/dev/null || true)"
 	if [ "$current" != "$previous" ]; then
-		/etc/init.d/wattlined restart
+		"$SERVICE_SCRIPT" restart
 		return
 	fi
 	# Rule-only changes retain the BLE link and reload with SIGHUP.
 	local pid
-	for pid in $(pgrep -f '/usr/bin/wattlined -config /etc/config/wattline' || true); do
+	for pid in $("$PGREP" -f '/usr/bin/wattlined -config /etc/config/wattline' || true); do
 		kill -HUP "$pid"
 	done
 }

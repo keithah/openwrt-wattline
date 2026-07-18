@@ -2,6 +2,7 @@
 set -eu
 
 FIREWALL_INIT="${FIREWALL_INIT:-/etc/init.d/firewall}"
+APPLY_MARKER="${APPLY_MARKER:-/var/run/wattline-firewall.pending}"
 changed=0
 
 # Serialize procd reloads and hotplug events when OpenWrt's lock helper is
@@ -32,7 +33,7 @@ set_if_changed() {
 }
 
 delete_if_present() {
-	if get "$1" >/dev/null 2>&1; then
+	if uci -q show "$1" >/dev/null 2>&1; then
 		uci -q delete "$1"
 		changed=1
 	fi
@@ -51,6 +52,37 @@ sync_rule() {
 	set_if_changed "firewall.$section.enabled" 1
 }
 
+rule_is_exact() {
+	section="$1"
+	name="$2"
+	port="$3"
+	[ "$(get "firewall.$section" || true)" = rule ] || return 1
+	[ "$(get "firewall.$section.name" || true)" = "$name" ] || return 1
+	[ "$(get "firewall.$section.src" || true)" = wan ] || return 1
+	[ "$(get "firewall.$section.proto" || true)" = tcp ] || return 1
+	[ "$(get "firewall.$section.dest_port" || true)" = "$port" ] || return 1
+	[ "$(get "firewall.$section.target" || true)" = ACCEPT ] || return 1
+	[ "$(get "firewall.$section.enabled" || true)" = 1 ] || return 1
+	for key in $(uci -q show "firewall.$section" 2>/dev/null | sed -n "s/^firewall\.$section\.\([^=]*\)=.*/\1/p"); do
+		case "$key" in
+			name|src|proto|dest_port|target|enabled) ;;
+			*) return 1 ;;
+		esac
+	done
+	return 0
+}
+
+reconcile_rule() {
+	section="$1"
+	name="$2"
+	port="$3"
+	if rule_is_exact "$section" "$name" "$port"; then
+		return
+	fi
+	delete_if_present "firewall.$section"
+	sync_rule "$section" "$name" "$port"
+}
+
 valid_port() {
 	case "$1" in
 		''|*[!0-9]*) return 1 ;;
@@ -65,14 +97,13 @@ if [ "$(value_or wattline.main.wan_access 0)" = 1 ]; then
 	https_port="$(value_or wattline.main.https_port 8378)"
 	[ "$http_enabled" != 1 ] || valid_port "$http_port" || { logger 'wattline: refusing invalid HTTP WAN port'; exit 1; }
 	[ "$https_enabled" != 1 ] || valid_port "$https_port" || { logger 'wattline: refusing invalid HTTPS WAN port'; exit 1; }
-	logger 'wattline: WAN access enabled: insecure — use TLS/VPN'
 	if [ "$http_enabled" = 1 ]; then
-		sync_rule wattline_http 'Wattline HTTP' "$http_port"
+		reconcile_rule wattline_http 'Wattline HTTP' "$http_port"
 	else
 		delete_if_present firewall.wattline_http
 	fi
 	if [ "$https_enabled" = 1 ]; then
-		sync_rule wattline_https 'Wattline HTTPS' "$https_port"
+		reconcile_rule wattline_https 'Wattline HTTPS' "$https_port"
 	else
 		delete_if_present firewall.wattline_https
 	fi
@@ -82,6 +113,21 @@ else
 fi
 
 if [ "$changed" -eq 1 ]; then
-	uci -q commit firewall
-	"$FIREWALL_INIT" reload
+	mkdir -p "$(dirname "$APPLY_MARKER")"
+	: > "$APPLY_MARKER"
+	if ! uci -q commit firewall; then
+		rm -f "$APPLY_MARKER"
+		exit 1
+	fi
+	if [ "$(value_or wattline.main.wan_access 0)" = 1 ]; then
+		logger 'wattline: WAN access enabled: insecure — use TLS/VPN'
+	fi
+fi
+
+if [ "$changed" -eq 1 ] || [ -e "$APPLY_MARKER" ]; then
+	if "$FIREWALL_INIT" reload; then
+		rm -f "$APPLY_MARKER"
+	else
+		exit 1
+	fi
 fi

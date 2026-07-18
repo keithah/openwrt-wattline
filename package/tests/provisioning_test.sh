@@ -28,6 +28,10 @@ case "$command" in
 		[ -n "$value" ] || exit 1
 		printf '%s\n' "$value"
 		;;
+	show)
+		key="$1"
+		awk -v key="$key" 'index($0, key "=") == 1 || index($0, key ".") == 1 { print; found = 1 } END { exit !found }' "$STATE"
+		;;
 	set|add_list)
 		assignment="$1"
 		printf '%s\n' "$assignment" >> "$STATE"
@@ -62,15 +66,63 @@ cmp -s "$STATE" "$TMP/before"
 [ "$(grep -Fc 'commit wattline' "$CALLS")" -eq 1 ]
 [ "$(grep -Fc -- '-init -config /etc/config/wattline' "$CALLS")" -eq 2 ]
 
-# The lifecycle contract: sync before spawning, restart for listener identity
-# changes, but retain SIGHUP for rule-only reloads.
+# The lifecycle contract: sync before spawning, restart for any daemon main
+# setting change, but retain SIGHUP for rule-only reloads.
 sync_line="$(grep -n '/usr/lib/wattline/firewall-sync' "$INIT" | head -n 1 | cut -d: -f1)"
 open_line="$(grep -n 'procd_open_instance' "$INIT" | head -n 1 | cut -d: -f1)"
 [ "$sync_line" -lt "$open_line" ]
-grep -Fq '/etc/init.d/wattlined restart' "$INIT"
+grep -Fq '"$SERVICE_SCRIPT" restart' "$INIT"
 grep -Fq 'kill -HUP' "$INIT"
 grep -Fq 'procd_set_param respawn' "$INIT"
 grep -Fq 'procd_set_param stdout 1' "$INIT"
 grep -Fq 'procd_set_param stderr 1' "$INIT"
+
+FIREWALL_SYNC="$TMP/firewall-sync"
+SERVICE_SCRIPT="$TMP/service"
+PGREP="$TMP/pgrep"
+RUNTIME_DIR="$TMP/run"
+DAEMON_STATE="$RUNTIME_DIR/daemon-state"
+export FIREWALL_SYNC SERVICE_SCRIPT PGREP RUNTIME_DIR DAEMON_STATE
+cat > "$FIREWALL_SYNC" <<'EOF'
+#!/bin/sh
+printf 'sync\n' >> "$CALLS"
+EOF
+cat > "$SERVICE_SCRIPT" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CALLS"
+EOF
+cat > "$PGREP" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$FIREWALL_SYNC" "$SERVICE_SCRIPT" "$PGREP"
+
+# rc.common normally sources this file; sourcing lets the harness call its
+# lifecycle functions with harmless injected commands.
+. "$INIT"
+save_daemon_state
+[ "$(ls -ld "$RUNTIME_DIR" | awk '{print $1}')" = drwx------ ]
+[ "$(ls -l "$DAEMON_STATE" | awk '{print $1}')" = -rw------- ]
+
+for assignment in \
+	wattline.main.advanced=1 \
+	wattline.main.mdns_enabled=0 \
+	wattline.main.pairing_ttl=2m \
+	wattline.main.pairing_always_on=1 \
+	wattline.main.token_store=/etc/wattline/alternate.json \
+	wattline.main.wan_access=1 \
+	wattline.main.port=9222
+do
+	restart_count="$(grep -Fc 'restart' "$CALLS" || true)"
+	printf '%s\n' "$assignment" >> "$STATE"
+	reload_service
+	[ "$(grep -Fc 'restart' "$CALLS")" -eq "$((restart_count + 1))" ]
+	save_daemon_state
+done
+
+restart_count="$(grep -Fc 'restart' "$CALLS")"
+printf '%s\n' 'wattline.rule.enabled=1' >> "$STATE"
+reload_service
+[ "$(grep -Fc 'restart' "$CALLS")" -eq "$restart_count" ]
 
 echo "provisioning tests passed"
