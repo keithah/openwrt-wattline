@@ -237,11 +237,12 @@ func (service *Service) Refresh() {
 }
 
 type publication struct {
-	key        string
-	instance   string
-	port       int
-	txt        []string
-	interfaces []net.Interface
+	key          string
+	interfaceKey string
+	instance     string
+	port         int
+	txt          []string
+	interfaces   []net.Interface
 }
 
 func (service *Service) desired() (publication, bool, error) {
@@ -297,10 +298,12 @@ func (service *Service) desired() (publication, bool, error) {
 	}
 	var key strings.Builder
 	fmt.Fprintf(&key, "%s\x00%d\x00%s", instance, port, strings.Join(txt, "\x00"))
+	var interfaceKey strings.Builder
 	for _, iface := range interfaces {
-		fmt.Fprintf(&key, "\x00%d:%s", iface.Index, iface.Name)
+		fmt.Fprintf(&interfaceKey, "\x00%d:%s", iface.Index, iface.Name)
 	}
-	return publication{key: key.String(), instance: instance, port: port, txt: txt, interfaces: interfaces}, true, nil
+	key.WriteString(interfaceKey.String())
+	return publication{key: key.String(), interfaceKey: interfaceKey.String(), instance: instance, port: port, txt: txt, interfaces: interfaces}, true, nil
 }
 
 // Run reacts to state publications and explicit Refresh calls until context
@@ -320,6 +323,7 @@ func (service *Service) Run(ctx context.Context) error {
 	defer cancelSubscription()
 	var active Registration
 	activeKey := ""
+	activeInterfaceKey := ""
 	var retry RetryTimer
 	var retryChannel <-chan time.Time
 	retryAttempt := 0
@@ -375,7 +379,7 @@ func (service *Service) Run(ctx context.Context) error {
 			stopRevalidate()
 			if active != nil {
 				active.Shutdown()
-				active, activeKey = nil, ""
+				active, activeKey, activeInterfaceKey = nil, "", ""
 			}
 			if service.options.Logf != nil {
 				service.options.Logf("wattline: mDNS interface resolution: %v", err)
@@ -388,7 +392,7 @@ func (service *Service) Run(ctx context.Context) error {
 			stopRevalidate()
 			if active != nil {
 				active.Shutdown()
-				active, activeKey = nil, ""
+				active, activeKey, activeInterfaceKey = nil, "", ""
 			}
 			return
 		}
@@ -396,6 +400,13 @@ func (service *Service) Run(ctx context.Context) error {
 			stopRetry(true)
 			scheduleRevalidate()
 			return
+		}
+		// Interface authorization is fail-closed. If the authoritative LAN set
+		// changed, revoke the old responder before attempting its replacement.
+		// Metadata-only replacements on the same interfaces may preserve it.
+		if active != nil && desired.interfaceKey != activeInterfaceKey {
+			active.Shutdown()
+			active, activeKey, activeInterfaceKey = nil, "", ""
 		}
 		next, err := service.options.Registrar.Register(desired.instance, serviceType, "local.", desired.port, desired.txt, desired.interfaces)
 		if next == nil && err == nil {
@@ -412,7 +423,7 @@ func (service *Service) Run(ctx context.Context) error {
 		stopRetry(true)
 		stopRevalidate()
 		previous := active
-		active, activeKey = next, desired.key
+		active, activeKey, activeInterfaceKey = next, desired.key, desired.interfaceKey
 		if previous != nil {
 			previous.Shutdown()
 		}

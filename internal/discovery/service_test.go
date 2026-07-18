@@ -482,3 +482,80 @@ func TestServiceStopsHealthyRevalidationTimerOnShutdown(t *testing.T) {
 		t.Fatal("healthy revalidation timer was not stopped")
 	}
 }
+
+func TestServiceRevokesUnauthorizedInterfaceBeforeReplacementAttempt(t *testing.T) {
+	store := state.NewStore()
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
+	registrar := &fakeRegistrar{}
+	membership := &dynamicLANMembership{names: []string{"br-a"}}
+	healthyTimers, retryTimers := &manualTimerFactory{}, &manualTimerFactory{}
+	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-a", "br-b"}, HTTPEnabled: true, HTTPPort: 8377}
+	service := NewService(Options{
+		Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar,
+		Interfaces: fakeInterfaces{interfaces: []net.Interface{
+			{Index: 2, Name: "br-a", Flags: net.FlagUp | net.FlagMulticast},
+			{Index: 3, Name: "br-b", Flags: net.FlagUp | net.FlagMulticast},
+		}},
+		LANMembership: membership, NewRetryTimer: retryTimers.New, NewRevalidateTimer: healthyTimers.New,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	calls := waitCalls(t, registrar, 1)
+	if calls[0].interfaces[0].Name != "br-a" {
+		t.Fatalf("initial interfaces = %#v", calls[0].interfaces)
+	}
+	healthy := healthyTimers.wait(t, 1)
+	membership.set("br-b")
+	registrar.mu.Lock()
+	registrar.fail = 1
+	registrar.mu.Unlock()
+	healthy.ch <- time.Now()
+	retry := retryTimers.wait(t, 1)
+	if calls[0].registration.shutdowns() != 1 {
+		t.Fatal("old responder remained active after its interface lost LAN authorization")
+	}
+	retry.ch <- time.Now()
+	calls = waitCalls(t, registrar, 2)
+	if len(calls[1].interfaces) != 1 || calls[1].interfaces[0].Name != "br-b" {
+		t.Fatalf("replacement interfaces = %#v", calls[1].interfaces)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceKeepsAuthorizedResponderWhenMetadataReplacementFails(t *testing.T) {
+	store := state.NewStore()
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B", Features: 1})
+	registrar := &fakeRegistrar{}
+	retryTimers := &manualTimerFactory{}
+	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
+	service := NewService(Options{
+		Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar,
+		Interfaces:    fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}},
+		LANMembership: lanOnly("br-lan"), NewRetryTimer: retryTimers.New, NewRevalidateTimer: (&manualTimerFactory{}).New,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	calls := waitCalls(t, registrar, 1)
+	registrar.mu.Lock()
+	registrar.fail = 1
+	registrar.mu.Unlock()
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B", Features: 2})
+	retry := retryTimers.wait(t, 1)
+	if calls[0].registration.shutdowns() != 0 {
+		t.Fatal("authorized responder was revoked by a metadata-only registration failure")
+	}
+	retry.ch <- time.Now()
+	calls = waitCalls(t, registrar, 2)
+	if calls[0].registration.shutdowns() != 1 {
+		t.Fatal("old metadata responder was not replaced after retry succeeded")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
