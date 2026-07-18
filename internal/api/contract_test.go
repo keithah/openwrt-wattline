@@ -67,7 +67,9 @@ func TestContractDocumentation(t *testing.T) {
 		{"## Settings and TLS", "## mDNS", []string{
 			"successful durable `SaveMain` activates the target store",
 			"all old-store managed SSE streams close",
-			"old managed tokens fail future requests",
+			"old-store-only managed tokens fail future requests",
+			"all managed-token records present in the target store become active",
+			"identical or copied secret hashes can reconnect even though their old-store SSE streams closed",
 			"bootstrap SSE remains open",
 			"not revoked or deleted",
 			"switching back to that path can reactivate them",

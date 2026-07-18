@@ -596,12 +596,15 @@ JSON, an unknown/read-only field, invalid value, or invalid resulting listener
 configuration, plus auth/role errors. BLE I/O: none.
 
 For a `token_store` change, a successful durable `SaveMain` activates the target
-store. At that commit boundary, all old-store managed SSE streams close and old
-managed tokens fail future requests because authentication now uses the target
-store; the bootstrap SSE remains open. The old store file and its managed tokens
-are not revoked or deleted, and switching back to that path can reactivate them.
-A persistence failure preserves the old authenticator and its streams: the
-runtime store swap is rolled back and no cutover termination is published.
+store. At that commit boundary, all old-store managed SSE streams close and
+old-store-only managed tokens fail future requests because authentication now
+uses the target store; the bootstrap SSE remains open. Conversely, all managed-token
+records present in the target store become active. Secrets represented by
+identical or copied secret hashes can reconnect even though their old-store SSE
+streams closed. The old store file and its managed tokens are not revoked or
+deleted, and switching back to that path can reactivate them. A persistence
+failure preserves the old authenticator and its streams: the runtime store swap
+is rolled back and no cutover termination is published.
 
 ### `POST /api/v1/tls/rotate`
 
