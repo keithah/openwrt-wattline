@@ -19,5 +19,22 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./... -count=1
+      - name: Package behavior tests
+        run: |
+          set -eu
+          for test in \
+            package/tests/firewall-sync_test.sh \
+            package/tests/provisioning_test.sh \
+            package/tests/luci_contract_test.sh \
+            package/tests/gl_contract_test.sh \
+            package/tests/rtl8761b-artifacts_test.sh \
+            package/tests/rtl8761b-driver_test.sh \
+            package/tests/rtl8761b-lifecycle_test.sh; do
+            sh "$test"
+          done
+          node package/tests/luci_behavior_test.js
+          node package/tests/power_loss_behavior_test.js
       - name: Build packages (ipks + metadata check)
-        run: make -C package all
+        run: make -C package feed
+      - name: Release inventory
+        run: sh package/tests/release-inventory_test.sh package/out 0.1.0

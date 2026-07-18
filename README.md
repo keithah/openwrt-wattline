@@ -9,7 +9,8 @@ dependency.
 The project targets the GL.iNet Spitz AX (GL-X3000) and other
 `aarch64_cortex-a53` OpenWrt routers. Most routers require a USB Bluetooth
 adapter. CSR8510 adapters work with the stock driver; RTL8761B adapters need the
-kernel-module and firmware work described in [`dongle-rtl8761b/`](dongle-rtl8761b/).
+optional `wattline-rtl8761b` package described in
+[`dongle-rtl8761b/`](dongle-rtl8761b/).
 
 The authoritative client contract is [`docs/api.md`](docs/api.md). The separate
 [`docs/API.md`](docs/API.md) is the read-only Link-Power BLE protocol reference;
@@ -52,6 +53,9 @@ The default version is `0.1.0`. Override it consistently with, for example,
 - `wattlined_VERSION_aarch64_cortex-a53.ipk`: daemon, procd service,
   first-boot initialization, firewall reconciliation, and interface hotplug;
 - `wattline-bt_VERSION_all.ipk`: BlueZ and kernel Bluetooth dependencies;
+- `wattline-rtl8761b_VERSION_aarch64_cortex-a53.ipk`: optional, pinned
+  GL-X3000 Linux 5.4.211 driver and firmware for USB IDs `2357:0604` and
+  `0bda:8771`;
 - `luci-app-wattline_VERSION_all.ipk`: LuCI panel; and
 - `gl-app-wattline_VERSION_all.ipk`: native GL.iNet panel.
 
@@ -63,7 +67,7 @@ packaging for a different OpenWrt target.
 ### Releasing
 
 GitHub Actions tests and builds every push and pull request. Pushing a `v*` tag
-builds the four packages and feed index, publishes a GitHub release, and updates
+builds the five packages and feed index, publishes a GitHub release, and updates
 the `gh-pages` feed. The tag supplies the package version after stripping `v`:
 
 ```sh
@@ -93,6 +97,25 @@ ssh root@192.168.8.1 'opkg update && opkg install \
   /tmp/gl-app-wattline_*.ipk'
 ```
 
+Install the RTL8761B package only when sysfs identifies a supported adapter:
+
+```sh
+ssh root@192.168.8.1 '
+for d in /sys/bus/usb/devices/*; do
+  [ -r "$d/idVendor" ] && [ -r "$d/idProduct" ] || continue
+  id="$(tr A-F a-f < "$d/idVendor"):$(tr A-F a-f < "$d/idProduct")"
+  case "$id" in
+    2357:0604|0bda:8771) opkg install /tmp/wattline-rtl8761b_*.ipk; break ;;
+  esac
+done'
+```
+
+`wattline-rtl8761b` bundles the matching linux-firmware blobs and verified
+`btintel`/`btrtl`/`btusb` modules, installs them transactionally, loads them at
+boot and USB hotplug, and restores the original modules when removed. It
+hard-fails unless the router is `aarch64` on Linux `5.4.211`; a firmware upgrade
+that changes the kernel requires a new driver build and package.
+
 For a rebuilt package with the same version, use
 `opkg install --force-reinstall /tmp/PACKAGE.ipk`; otherwise opkg skips it.
 Release builds should bump `VERSION`. `make -C package VERSION=1.3.1 feed`
@@ -118,6 +141,7 @@ ssh root@192.168.8.1
 echo 'src/gz wattline https://keithah.github.io/openwrt-wattline' >> /etc/opkg/customfeeds.conf
 opkg update
 opkg install wattlined luci-app-wattline gl-app-wattline   # first time
+# Add wattline-rtl8761b only after the sysfs check above reports a supported ID.
 opkg upgrade wattlined luci-app-wattline gl-app-wattline    # later releases
 ```
 
@@ -128,13 +152,14 @@ The feed is regenerated and published automatically on each release (see
 
 Prefer the hosted feed above. If you'd rather grab files directly, each
 [GitHub release](https://github.com/keithah/openwrt-wattline/releases) attaches
-the four `.ipk`s plus a ready-made opkg feed index (`Packages`, `Packages.gz`).
+the five `.ipk`s plus a ready-made opkg feed index (`Packages`, `Packages.gz`).
 To install without building anything:
 
 ```sh
 # Download the ipks from the latest release straight to the router
 ssh root@192.168.8.1 'cd /tmp && for p in \
     wattline-bt_VER_all.ipk \
+    wattline-rtl8761b_VER_aarch64_cortex-a53.ipk \
     wattlined_VER_aarch64_cortex-a53.ipk \
     luci-app-wattline_VER_all.ipk \
     gl-app-wattline_VER_all.ipk; do
@@ -143,6 +168,9 @@ done
 opkg update && opkg install /tmp/wattline-bt_*.ipk /tmp/wattlined_*.ipk \
   /tmp/luci-app-wattline_*.ipk /tmp/gl-app-wattline_*.ipk'
 ```
+
+The download includes `wattline-rtl8761b`, but install it separately only after
+the supported-ID sysfs check above succeeds.
 
 Replace `VER` with the release version (for example `0.1.0`). The release
 assets are flat files, so they can also be registered directly as an opkg feed:

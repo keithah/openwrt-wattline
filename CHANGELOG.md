@@ -7,6 +7,15 @@ versions built from `package/Makefile`.
 
 ## 0.1.0
 
+- Added the optional `wattline-rtl8761b` package for GL-X3000 Linux 5.4.211.
+  It bundles pinned, hash-verified GL ABI-compatible Bluetooth modules and
+  linux-firmware, selects only USB IDs `2357:0604`/`0bda:8771`, backs up and
+  transactionally replaces the stock modules, loads before wattlined and on
+  hotplug, repairs drift, and restores the original files on removal.
+- Added artifact provenance, exact-kernel/architecture admission, lifecycle and
+  rollback fault tests, five-package release inventory enforcement, and package
+  metadata checks. A kernel-changing GL firmware upgrade requires a rebuilt
+  driver package.
 - Added a dedicated **Power-loss shutdown** card to LuCI and the native GL
   panel. The reserved preset defaults to ten minutes of continuous input loss,
   resets when input returns or BLE disconnects, preserves compatible rule

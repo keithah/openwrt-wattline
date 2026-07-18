@@ -21,12 +21,31 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
+      - name: Package behavior tests
+        run: |
+          set -eu
+          for test in \
+            package/tests/firewall-sync_test.sh \
+            package/tests/provisioning_test.sh \
+            package/tests/luci_contract_test.sh \
+            package/tests/gl_contract_test.sh \
+            package/tests/rtl8761b-artifacts_test.sh \
+            package/tests/rtl8761b-driver_test.sh \
+            package/tests/rtl8761b-lifecycle_test.sh; do
+            sh "$test"
+          done
+          node package/tests/luci_behavior_test.js
+          node package/tests/power_loss_behavior_test.js
+
       - name: Derive version from tag
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build ipks + opkg feed index
         run: make -C package VERSION=${{ steps.ver.outputs.version }} feed
+
+      - name: Verify release inventory
+        run: sh package/tests/release-inventory_test.sh package/out ${{ steps.ver.outputs.version }}
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2

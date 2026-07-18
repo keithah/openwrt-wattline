@@ -1,4 +1,5 @@
-# Builds wattlined + wattline-bt .ipk files without the full OpenWrt SDK.
+# Builds Wattline daemon, dependency, optional driver, and UI .ipk files
+# without the full OpenWrt SDK.
 # Requires: go (host), tar, gzip. Output in ./out.
 #
 # An OpenWrt .ipk is a GZIPPED TAR (not an ar/.deb archive) wrapping
@@ -12,9 +13,9 @@ TAR := $(shell command -v gtar || command -v gnutar || echo tar)
 OUT := out
 BIN := $(OUT)/wattlined-bin
 
-.PHONY: all clean bin ipk-wattlined ipk-bt ipk-luci ipk-glapp feed
+.PHONY: all clean bin ipk-wattlined ipk-bt ipk-rtl8761b ipk-luci ipk-glapp feed
 
-all: ipk-wattlined ipk-bt ipk-luci ipk-glapp
+all: ipk-wattlined ipk-bt ipk-rtl8761b ipk-luci ipk-glapp
 	TAR="$(TAR)" ./check-ipk-metadata.sh $(OUT)/*.ipk
 
 # feed: build all ipks + an opkg index (Packages/Packages.gz) so a router can
@@ -75,6 +76,24 @@ ipk-wattlined: bin
 
 ipk-bt:
 	$(call make_ipk,wattline-bt,wattline-bt,all)
+
+# Optional, exact-kernel RTL8761B backport for GL-X3000 firmware 4.8.3.
+# The package's preinst and driverctl reject every kernel except 5.4.211.
+ipk-rtl8761b:
+	rm -rf $(OUT)/stage-rtl8761b-source
+	cp -r wattline-rtl8761b $(OUT)/stage-rtl8761b-source
+	chmod 0755 \
+		$(OUT)/stage-rtl8761b-source/CONTROL/preinst \
+		$(OUT)/stage-rtl8761b-source/CONTROL/postinst \
+		$(OUT)/stage-rtl8761b-source/CONTROL/prerm \
+		$(OUT)/stage-rtl8761b-source/etc/init.d/wattline-rtl8761b \
+		$(OUT)/stage-rtl8761b-source/etc/hotplug.d/usb/20-wattline-rtl8761b \
+		$(OUT)/stage-rtl8761b-source/usr/lib/wattline/rtl8761b/driverctl
+	chmod 0644 \
+		$(OUT)/stage-rtl8761b-source/usr/lib/wattline/rtl8761b/modules/5.4.211/*.ko \
+		$(OUT)/stage-rtl8761b-source/lib/firmware/rtl_bt/*.bin \
+		$(OUT)/stage-rtl8761b-source/usr/share/wattline-rtl8761b/*
+	$(call make_ipk,wattline-rtl8761b,$(OUT)/stage-rtl8761b-source,$(ARCH))
 
 ipk-luci:
 	$(call make_ipk,luci-app-wattline,luci-app-wattline,all)
