@@ -2,6 +2,10 @@ module github.com/keithah/openwrt-wattline
 
 go 1.22
 
+// Local v1.0.0 patch closes its Register/Shutdown WaitGroup race; see
+// third_party/zeroconf/PATCH.md.
+replace github.com/grandcat/zeroconf => ./third_party/zeroconf
+
 require (
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/grandcat/zeroconf v1.0.0

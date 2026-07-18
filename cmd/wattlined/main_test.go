@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/keithah/openwrt-wattline/internal/actions"
 	"github.com/keithah/openwrt-wattline/internal/auth"
 	"github.com/keithah/openwrt-wattline/internal/config"
+	"github.com/keithah/openwrt-wattline/internal/discovery"
 	"github.com/keithah/openwrt-wattline/internal/proto"
 	"github.com/keithah/openwrt-wattline/internal/rules"
 	serverpkg "github.com/keithah/openwrt-wattline/internal/server"
@@ -48,22 +50,35 @@ func TestTickDispatchesFirings(t *testing.T) {
 	}
 }
 
-func TestDiscoveryOptionsReadDynamicConfigAndServedTLSIdentity(t *testing.T) {
+func TestDiscoveryOptionsUseDynamicMDNSPolicyButServedListeners(t *testing.T) {
 	cfg := &config.Config{HTTPEnabled: true, HTTPPort: 8377, MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}}
 	live := &liveConfig{cfg: cloneConfig(cfg)}
 	tlsState := &tlsIdentity{served: serverpkg.Certificate{SHA256: strings.Repeat("a", 64)}}
 	store := state.NewStore()
-	options := discoveryOptions("1.3.0", "router", store, live, tlsState)
+	options := discoveryOptions("1.3.0", "router", store, live, tlsState, listenerConfig(cfg))
 	if options.Version != "1.3.0" || options.Hostname != "router" || options.Store != store || options.Config().HTTPPort != 8377 || options.TLSFingerprint() != strings.Repeat("a", 64) {
 		t.Fatalf("options = %+v", options)
 	}
 	next := cloneConfig(cfg)
-	next.HTTPPort = 9000
+	next.HTTPPort = 9000 // pending until restart: must not be advertised.
+	next.HTTPSEnabled = true
+	next.HTTPSPort = 9443
+	next.MDNSInterfaces = []string{"lan2"}
 	live.mu.Lock()
 	live.cfg = next
 	live.mu.Unlock()
-	if options.Config().HTTPPort != 9000 {
-		t.Fatal("discovery config callback captured a stale config")
+	discovery.NewService(options).Refresh()
+	got := options.Config()
+	if got.HTTPPort != 8377 || got.HTTPSEnabled || got.HTTPSPort == 9443 || discovery.PreferredPort(*got) != 8377 || !reflect.DeepEqual(got.MDNSInterfaces, []string{"lan2"}) {
+		t.Fatalf("projected discovery config = %+v", got)
+	}
+}
+
+func TestPreferredLANHostMatchesAdvertisedLocalName(t *testing.T) {
+	for input, want := range map[string]string{"router": "router.local", "router.local.": "router.local", "192.168.8.1": "192.168.8.1.local", "": "wattline.local"} {
+		if got := preferredLANHost(input); got != want {
+			t.Fatalf("preferredLANHost(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 

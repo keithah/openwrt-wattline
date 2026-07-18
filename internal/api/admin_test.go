@@ -501,6 +501,31 @@ func TestPairAndQRAllowHTTPOnlyWithoutFingerprint(t *testing.T) {
 	}
 }
 
+func TestPairMetadataAndQRUseAdvertisedLocalHostWithoutMagicDNS(t *testing.T) {
+	f := newAdminFixture(t)
+	f.deps.MagicDNSName = func() string { return "" }
+	f.deps.PreferredHost = func() string { return "router.local" }
+	f.h = NewServer(f.deps)
+	status := f.pairing.Open()
+	rr := do(t, f.h, http.MethodPost, "/api/v1/pair", "", `{"pin":"`+status.PIN+`","label":"phone"}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("pair status %d: %s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		BaseURLs map[string]string `json:"base_urls"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.BaseURLs["http"] != "http://router.local:8377/api/v1" || response.BaseURLs["https"] != "https://router.local:8378/api/v1" {
+		t.Fatalf("base URLs = %#v", response.BaseURLs)
+	}
+	uri := (&server{d: f.deps}).pairingURI("123456")
+	if !strings.Contains(uri, "&host=router.local&") {
+		t.Fatalf("pairing URI = %s", uri)
+	}
+}
+
 func TestPairingQRRejectsInvalidConnectionMetadata(t *testing.T) {
 	f := newAdminFixture(t)
 	f.pairing.Open()

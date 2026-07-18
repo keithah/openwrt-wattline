@@ -403,6 +403,25 @@ func TestSecurityConfigSettingsViewRendersClearedInterfacesAsArray(t *testing.T)
 	}
 }
 
+func TestSecurityConfigAcceptsScopedIPv6MDNSSelector(t *testing.T) {
+	cfg, err := Load(writeTemp(t, `config wattline 'main'
+	option mdns_enabled '1'
+	list mdns_interface 'fe80::1%br-lan'
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.MDNSInterfaces, []string{"fe80::1%br-lan"}) {
+		t.Fatalf("selectors = %#v", cfg.MDNSInterfaces)
+	}
+	if _, err := Load(writeTemp(t, `config wattline 'main'
+	option mdns_enabled '1'
+	list mdns_interface 'fe80::1'
+`)); err == nil {
+		t.Fatal("accepted unscoped link-local mDNS selector")
+	}
+}
+
 func TestSecurityConfigSaveMainRoundTripsClearedMDNSInterfaces(t *testing.T) {
 	path := writeTemp(t, `config wattline 'main'
 	option mdns_enabled '1'

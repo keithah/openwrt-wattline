@@ -2,11 +2,13 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/grandcat/zeroconf"
 	"github.com/keithah/openwrt-wattline/internal/config"
@@ -42,21 +44,39 @@ func (systemInterfaces) Addrs(iface net.Interface) ([]net.Addr, error) {
 	return iface.Addrs()
 }
 
-func configuredIP(value string) (netip.Addr, bool) {
-	value = strings.TrimSpace(value)
-	if zone := strings.LastIndexByte(value, '%'); zone >= 0 {
-		value = value[:zone]
-	}
-	address, err := netip.ParseAddr(value)
-	return address.Unmap(), err == nil
+type addressSelector struct {
+	address netip.Addr
+	zone    string
 }
 
-func interfaceAddress(value string) (netip.Addr, bool) {
+func parseAddress(value string) (addressSelector, bool) {
+	value = strings.TrimSpace(value)
+	address, err := netip.ParseAddr(value)
+	if err != nil {
+		return addressSelector{}, false
+	}
+	return addressSelector{address: address.WithZone("").Unmap(), zone: address.Zone()}, true
+}
+
+func interfaceAddress(value string) (addressSelector, bool) {
 	value = strings.TrimSpace(value)
 	if slash := strings.LastIndexByte(value, '/'); slash >= 0 {
 		value = value[:slash]
 	}
-	return configuredIP(value)
+	return parseAddress(value)
+}
+
+func lanEligible(iface net.Interface) bool {
+	if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagLoopback != 0 {
+		return false
+	}
+	name := strings.ToLower(iface.Name)
+	for _, prefix := range []string{"wan", "wwan", "ppp", "tun", "wg", "tailscale", "rmnet"} {
+		if strings.HasPrefix(name, prefix) {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolveInterfaces returns only existing interfaces explicitly named by UCI,
@@ -71,10 +91,13 @@ func ResolveInterfaces(configured []string, source InterfaceSource) ([]net.Inter
 		return nil, err
 	}
 	wantedNames := make(map[string]struct{}, len(configured))
-	wantedIPs := make(map[netip.Addr]struct{}, len(configured))
+	wantedIPs := make([]addressSelector, 0, len(configured))
 	for _, value := range configured {
-		if address, ok := configuredIP(value); ok {
-			wantedIPs[address] = struct{}{}
+		if selector, ok := parseAddress(value); ok {
+			if selector.address.Is6() && selector.address.IsLinkLocalUnicast() && selector.zone == "" {
+				return nil, fmt.Errorf("link-local mDNS address %q requires an interface zone", value)
+			}
+			wantedIPs = append(wantedIPs, selector)
 		} else {
 			wantedNames[value] = struct{}{}
 		}
@@ -82,6 +105,9 @@ func ResolveInterfaces(configured []string, source InterfaceSource) ([]net.Inter
 	selected := make([]net.Interface, 0, len(configured))
 	seen := make(map[int]struct{})
 	for _, iface := range interfaces {
+		if !lanEligible(iface) {
+			continue
+		}
 		_, match := wantedNames[iface.Name]
 		if !match && len(wantedIPs) != 0 {
 			addresses, addressErr := source.Addrs(iface)
@@ -89,11 +115,18 @@ func ResolveInterfaces(configured []string, source InterfaceSource) ([]net.Inter
 				return nil, addressErr
 			}
 			for _, raw := range addresses {
-				address, ok := interfaceAddress(raw.String())
-				if ok {
-					if _, match = wantedIPs[address]; match {
+				candidate, ok := interfaceAddress(raw.String())
+				if !ok {
+					continue
+				}
+				for _, selector := range wantedIPs {
+					if selector.address == candidate.address && (selector.zone == "" || selector.zone == iface.Name) && (candidate.zone == "" || candidate.zone == iface.Name) {
+						match = true
 						break
 					}
+				}
+				if match {
+					break
 				}
 			}
 		}
@@ -124,6 +157,31 @@ type Options struct {
 	Registrar      Registrar
 	Interfaces     InterfaceSource
 	Logf           func(string, ...any)
+	NewRetryTimer  func(time.Duration) RetryTimer
+	RetryDelay     func(int) time.Duration
+}
+
+// RetryTimer permits deterministic failure-only retry tests and explicit stop
+// on shutdown. Healthy and identity-less services do not create timers.
+type RetryTimer interface {
+	C() <-chan time.Time
+	Stop()
+}
+
+type systemRetryTimer struct{ timer *time.Timer }
+
+func (timer systemRetryTimer) C() <-chan time.Time { return timer.timer.C }
+func (timer systemRetryTimer) Stop()               { timer.timer.Stop() }
+
+func defaultRetryDelay(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	delay := time.Second << min(attempt, 5)
+	if delay > 30*time.Second {
+		return 30 * time.Second
+	}
+	return delay
 }
 
 // Service owns at most one zeroconf responder and atomically replaces it when
@@ -139,6 +197,12 @@ func NewService(options Options) *Service {
 	}
 	if options.Interfaces == nil {
 		options.Interfaces = systemInterfaces{}
+	}
+	if options.NewRetryTimer == nil {
+		options.NewRetryTimer = func(delay time.Duration) RetryTimer { return systemRetryTimer{time.NewTimer(delay)} }
+	}
+	if options.RetryDelay == nil {
+		options.RetryDelay = defaultRetryDelay
 	}
 	return &Service{options: options, refresh: make(chan struct{}, 1)}
 }
@@ -200,8 +264,11 @@ func (service *Service) desired() (publication, bool, error) {
 	}
 	txt := TXT(Metadata{Version: service.options.Version, API: 1, ID: identity.MAC, Model: identity.Model, CID: identity.CID, Features: identity.Features, TLS: tls})
 	interfaces, err := ResolveInterfaces(cfg.MDNSInterfaces, service.options.Interfaces)
-	if err != nil || len(interfaces) == 0 {
+	if err != nil {
 		return publication{}, false, err
+	}
+	if len(interfaces) == 0 {
+		return publication{}, false, fmt.Errorf("no configured LAN mDNS interface is available")
 	}
 	instance := service.options.Hostname
 	if strings.TrimSpace(instance) == "" {
@@ -232,21 +299,52 @@ func (service *Service) Run(ctx context.Context) error {
 	defer cancelSubscription()
 	var active Registration
 	activeKey := ""
+	var retry RetryTimer
+	var retryChannel <-chan time.Time
+	retryAttempt := 0
+	stopRetry := func(reset bool) {
+		if retry != nil {
+			retry.Stop()
+			retry, retryChannel = nil, nil
+		}
+		if reset {
+			retryAttempt = 0
+		}
+	}
 	defer func() {
+		stopRetry(false)
 		if active != nil {
 			active.Shutdown()
 		}
 	}()
 
+	scheduleRetry := func() {
+		if retry != nil {
+			return
+		}
+		retry = service.options.NewRetryTimer(service.options.RetryDelay(retryAttempt))
+		if retry == nil {
+			return
+		}
+		retryChannel = retry.C()
+		retryAttempt++
+	}
+
 	reconcile := func() {
 		desired, publish, err := service.desired()
 		if err != nil {
+			if active != nil {
+				active.Shutdown()
+				active, activeKey = nil, ""
+			}
 			if service.options.Logf != nil {
 				service.options.Logf("wattline: mDNS interface resolution: %v", err)
 			}
+			scheduleRetry()
 			return
 		}
 		if !publish {
+			stopRetry(true)
 			if active != nil {
 				active.Shutdown()
 				active, activeKey = nil, ""
@@ -254,15 +352,21 @@ func (service *Service) Run(ctx context.Context) error {
 			return
 		}
 		if desired.key == activeKey {
+			stopRetry(true)
 			return
 		}
 		next, err := service.options.Registrar.Register(desired.instance, serviceType, "local.", desired.port, desired.txt, desired.interfaces)
+		if next == nil && err == nil {
+			err = errors.New("registrar returned no registration")
+		}
 		if err != nil {
 			if service.options.Logf != nil {
 				service.options.Logf("wattline: mDNS registration: %v", err)
 			}
+			scheduleRetry()
 			return
 		}
+		stopRetry(true)
 		previous := active
 		active, activeKey = next, desired.key
 		if previous != nil {
@@ -270,15 +374,33 @@ func (service *Service) Run(ctx context.Context) error {
 		}
 	}
 
+	identityKey := ""
+	if service.options.Store != nil {
+		identityKey = discoveryIdentityKey(service.options.Store.Snapshot())
+	}
 	reconcile()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-updates:
-			reconcile()
+		case snapshot := <-updates:
+			if key := discoveryIdentityKey(snapshot); key != identityKey {
+				identityKey = key
+				reconcile()
+			}
 		case <-service.refresh:
+			stopRetry(true)
+			reconcile()
+		case <-retryChannel:
+			retry, retryChannel = nil, nil
 			reconcile()
 		}
 	}
+}
+
+func discoveryIdentityKey(snapshot state.Snapshot) string {
+	if snapshot.Device == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s\x00%s\x00%04x\x00%08x", snapshot.Device.MAC, snapshot.Device.Model, snapshot.Device.CID, snapshot.Device.Features)
 }

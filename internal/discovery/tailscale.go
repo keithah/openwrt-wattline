@@ -22,11 +22,28 @@ func ParseTailscaleStatus(raw []byte) string {
 	if json.Unmarshal(raw, &status) != nil || status.Self == nil {
 		return ""
 	}
-	name := strings.TrimSuffix(strings.TrimSpace(status.Self.DNSName), ".")
-	if name == "" || strings.ContainsAny(name, " \t\r\n/\\") {
+	name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(status.Self.DNSName), "."))
+	if !validDNSName(name) {
 		return ""
 	}
 	return name
+}
+
+func validDNSName(name string) bool {
+	if len(name) == 0 || len(name) > 253 || !strings.Contains(name, ".") {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Tailscale provides a dependency-free, optional MagicDNS lookup. Its seams
@@ -57,7 +74,7 @@ func (tailscale Tailscale) Name(ctx context.Context) string {
 	run := tailscale.Run
 	if run == nil {
 		run = func(ctx context.Context, executable string, args ...string) ([]byte, error) {
-			return exec.CommandContext(ctx, executable, args...).Output()
+			return runBoundedCommand(ctx, executable, args...)
 		}
 	}
 	raw, err := run(bounded, executable, "status", "--json")

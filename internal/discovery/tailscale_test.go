@@ -3,6 +3,10 @@ package discovery
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -18,6 +22,9 @@ func TestParseTailscaleStatusNormalizesMagicDNSName(t *testing.T) {
 		{"null self", `{"Self":null}`, ""},
 		{"malformed", `{`, ""},
 		{"whitespace", `{"Self":{"DNSName":"  "}}`, ""},
+		{"bad label", `{"Self":{"DNSName":"-router.example.ts.net."}}`, ""},
+		{"empty label", `{"Self":{"DNSName":"router..example.ts.net."}}`, ""},
+		{"not dns", `{"Self":{"DNSName":"router/example"}}`, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -26,6 +33,45 @@ func TestParseTailscaleStatusNormalizesMagicDNSName(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBoundedCommandRejectsOversizedOutput(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	output, err := runBoundedCommand(ctx, sh, "-c", "head -c 1100000 /dev/zero")
+	if !errors.Is(err, ErrCommandOutputTooLarge) || len(output) > maxCommandOutput {
+		t.Fatalf("len=%d err=%v", len(output), err)
+	}
+}
+
+func TestBoundedCommandKillsHangingChildProcessGroup(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	output, err := runBoundedCommand(ctx, sh, "-c", "sleep 30 & child=$!; echo $child; wait")
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("elapsed=%v err=%v", time.Since(started), err)
+	}
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(output)))
+	if parseErr != nil {
+		t.Fatalf("child PID %q: %v", output, parseErr)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if killErr := syscall.Kill(pid, 0); errors.Is(killErr, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("child process %d survived cancellation", pid)
 }
 
 func TestTailscaleNameRequiresExecutableAndUsesBoundedContext(t *testing.T) {

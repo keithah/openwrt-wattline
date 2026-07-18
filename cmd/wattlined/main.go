@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -214,11 +215,28 @@ func listenerConfig(cfg *config.Config) serverpkg.ListenerConfig {
 	}
 }
 
-func discoveryOptions(daemonVersion, hostname string, store *state.Store, live *liveConfig, tlsState *tlsIdentity) discovery.Options {
+func discoveryOptions(daemonVersion, hostname string, store *state.Store, live *liveConfig, tlsState *tlsIdentity, served serverpkg.ListenerConfig) discovery.Options {
 	return discovery.Options{
 		Version: daemonVersion, Hostname: hostname, Store: store,
-		Config: live.current, TLSFingerprint: tlsState.fingerprint, Logf: log.Printf,
+		Config: func() *config.Config {
+			current := live.current()
+			current.HTTPEnabled, current.HTTPPort = served.HTTP.Enabled, served.HTTP.Port
+			current.HTTPSEnabled, current.HTTPSPort = served.HTTPS.Enabled, served.HTTPS.Port
+			return current
+		},
+		TLSFingerprint: tlsState.fingerprint, Logf: log.Printf,
 	}
+}
+
+func preferredLANHost(hostname string) string {
+	hostname = strings.TrimSuffix(strings.TrimSpace(hostname), ".")
+	if hostname == "" {
+		return "wattline.local"
+	}
+	if strings.HasSuffix(strings.ToLower(hostname), ".local") {
+		return hostname
+	}
+	return hostname + ".local"
 }
 
 // tickOnce evaluates rules and dispatches any firings against the current device.
@@ -282,7 +300,8 @@ func run(cfgPath string, stop <-chan struct{}) error {
 	store := state.NewStore()
 	magicDNS := discovery.NewMagicDNSCache(discovery.Tailscale{})
 	magicDNS.Refresh(context.Background())
-	discoveryService := discovery.NewService(discoveryOptions(version, hostname, store, live, tlsState))
+	servedListeners := listenerConfig(cfg)
+	discoveryService := discovery.NewService(discoveryOptions(version, hostname, store, live, tlsState, servedListeners))
 	eng, err := rules.NewEngine(cfg.Rules)
 	if err != nil {
 		return err
@@ -383,10 +402,7 @@ func run(cfgPath string, stop <-chan struct{}) error {
 		RotateTLS:      tlsState.rotate,
 		MagicDNSName:   magicDNS.Name,
 		PreferredHost: func() string {
-			if hostname != "" {
-				return hostname
-			}
-			return "wattline.lan"
+			return preferredLANHost(hostname)
 		},
 		SaveBLEPIN: func(pin string) error {
 			current := live.current()
@@ -422,7 +438,7 @@ func run(cfgPath string, stop <-chan struct{}) error {
 			return eng.SetRules(rs)
 		},
 	})
-	group, err := serverpkg.Start(context.Background(), listenerConfig(cfg), handler)
+	group, err := serverpkg.Start(context.Background(), servedListeners, handler)
 	if err != nil {
 		return err
 	}

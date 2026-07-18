@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"net"
 	"reflect"
 	"sync"
@@ -33,14 +34,20 @@ func (a fakeAddr) String() string  { return string(a) }
 
 func TestResolveInterfacesMatchesOnlyConfiguredNamesOrAddresses(t *testing.T) {
 	source := fakeInterfaces{
-		interfaces: []net.Interface{{Index: 1, Name: "lo"}, {Index: 2, Name: "br-lan"}, {Index: 3, Name: "tailscale0"}},
+		interfaces: []net.Interface{
+			{Index: 1, Name: "lo", Flags: net.FlagUp | net.FlagMulticast | net.FlagLoopback},
+			{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast},
+			{Index: 3, Name: "tailscale0", Flags: net.FlagUp | net.FlagMulticast},
+			{Index: 4, Name: "wan", Flags: net.FlagUp | net.FlagMulticast},
+		},
 		addresses: map[int][]net.Addr{
 			2: {fakeAddr("192.168.8.1/24"), fakeAddr("fd00::1/64")},
 			3: {fakeAddr("100.64.0.1/32")},
+			4: {fakeAddr("fe80::1%wan/64")},
 		},
 	}
 	source.addresses[2] = append(source.addresses[2], fakeAddr("fe80::1%br-lan/64"))
-	for _, configured := range [][]string{{"br-lan"}, {"192.168.8.1"}, {"fd00::1"}, {"fe80::1"}} {
+	for _, configured := range [][]string{{"br-lan"}, {"192.168.8.1"}, {"fd00::1"}, {"fe80::1%br-lan"}} {
 		got, err := ResolveInterfaces(configured, source)
 		if err != nil {
 			t.Fatal(err)
@@ -55,6 +62,18 @@ func TestResolveInterfacesMatchesOnlyConfiguredNamesOrAddresses(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("missing interface fell back to %#v", got)
+	}
+	if _, err := ResolveInterfaces([]string{"fe80::1"}, source); err == nil {
+		t.Fatal("accepted ambiguous unscoped link-local selector")
+	}
+	for _, forbidden := range []string{"lo", "wan", "tailscale0", "fe80::1%wan"} {
+		got, err := ResolveInterfaces([]string{forbidden}, source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("forbidden interface %q resolved to %#v", forbidden, got)
+		}
 	}
 }
 
@@ -84,16 +103,73 @@ type registerCall struct {
 }
 
 type fakeRegistrar struct {
-	mu    sync.Mutex
-	calls []registerCall
+	mu              sync.Mutex
+	calls           []registerCall
+	fail            int
+	nilRegistration bool
 }
 
 func (r *fakeRegistrar) Register(instance, service, domain string, port int, txt []string, interfaces []net.Interface) (Registration, error) {
-	registration := &fakeRegistration{}
 	r.mu.Lock()
+	if r.fail > 0 {
+		r.fail--
+		r.mu.Unlock()
+		return nil, errors.New("temporary registration failure")
+	}
+	if r.nilRegistration {
+		r.mu.Unlock()
+		return nil, nil
+	}
+	registration := &fakeRegistration{}
 	r.calls = append(r.calls, registerCall{instance, service, domain, port, append([]string(nil), txt...), append([]net.Interface(nil), interfaces...), registration})
 	r.mu.Unlock()
 	return registration, nil
+}
+
+type manualRetryTimer struct {
+	ch      chan time.Time
+	stopped atomic.Bool
+}
+
+func (timer *manualRetryTimer) C() <-chan time.Time { return timer.ch }
+func (timer *manualRetryTimer) Stop()               { timer.stopped.Store(true) }
+
+type manualTimerFactory struct {
+	mu        sync.Mutex
+	timers    []*manualRetryTimer
+	durations []time.Duration
+}
+
+func (factory *manualTimerFactory) New(duration time.Duration) RetryTimer {
+	timer := &manualRetryTimer{ch: make(chan time.Time, 1)}
+	factory.mu.Lock()
+	factory.timers = append(factory.timers, timer)
+	factory.durations = append(factory.durations, duration)
+	factory.mu.Unlock()
+	return timer
+}
+
+func (factory *manualTimerFactory) wait(t *testing.T, count int) *manualRetryTimer {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		factory.mu.Lock()
+		if len(factory.timers) >= count {
+			timer := factory.timers[count-1]
+			factory.mu.Unlock()
+			return timer
+		}
+		factory.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("retry timers < %d", count)
+	return nil
+}
+
+func (factory *manualTimerFactory) count() int {
+	factory.mu.Lock()
+	defer factory.mu.Unlock()
+	return len(factory.timers)
 }
 
 func (r *fakeRegistrar) snapshot() []registerCall {
@@ -132,7 +208,7 @@ func TestServiceSuppressesUntilMACAndReregistersOnlyOnMeaningfulChange(t *testin
 		},
 		TLSFingerprint: func() string { return fingerprint.Load().(string) },
 		Registrar:      registrar,
-		Interfaces:     fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan"}}},
+		Interfaces:     fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -195,7 +271,7 @@ func TestServiceNeverFallsBackWhenConfiguredInterfaceIsAbsent(t *testing.T) {
 	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
 	registrar := &fakeRegistrar{}
 	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
-	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 1, Name: "lo"}}}})
+	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 1, Name: "lo", Flags: net.FlagUp | net.FlagMulticast | net.FlagLoopback}}}})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- service.Run(ctx) }()
@@ -214,7 +290,7 @@ func TestServiceDoesNotRegisterWhenContextIsAlreadyCanceled(t *testing.T) {
 	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
 	registrar := &fakeRegistrar{}
 	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
-	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan"}}}})
+	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}}})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := service.Run(ctx); err != nil {
@@ -223,4 +299,78 @@ func TestServiceDoesNotRegisterWhenContextIsAlreadyCanceled(t *testing.T) {
 	if calls := registrar.snapshot(); len(calls) != 0 {
 		t.Fatalf("canceled service registered: %#v", calls)
 	}
+}
+
+func TestServiceRetriesRegistrationFailuresWithoutHealthyPolling(t *testing.T) {
+	store := state.NewStore()
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
+	registrar := &fakeRegistrar{fail: 1}
+	timers := &manualTimerFactory{}
+	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
+	service := NewService(Options{
+		Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar,
+		Interfaces:    fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}},
+		NewRetryTimer: timers.New,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	retry := timers.wait(t, 1)
+	retry.ch <- time.Now()
+	waitCalls(t, registrar, 1)
+	store.SetConnected(true)
+	time.Sleep(10 * time.Millisecond)
+	if got := timers.count(); got != 1 {
+		t.Fatalf("healthy service created %d retry timers", got)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDefaultRetryDelayIsExponentiallyBounded(t *testing.T) {
+	for attempt, want := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second} {
+		if got := defaultRetryDelay(attempt); got != want {
+			t.Fatalf("attempt %d delay = %v, want %v", attempt, got, want)
+		}
+	}
+}
+
+func TestServiceRetriesMissingInterfaceAndStopsTimerOnCancel(t *testing.T) {
+	store := state.NewStore()
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
+	timers := &manualTimerFactory{}
+	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
+	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: &fakeRegistrar{}, Interfaces: fakeInterfaces{}, NewRetryTimer: timers.New})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	retry := timers.wait(t, 1)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !retry.stopped.Load() {
+		t.Fatal("retry timer was not stopped on cancellation")
+	}
+}
+
+func TestServiceDoesNotRetryWithoutMACOrAfterNilRegistration(t *testing.T) {
+	store := state.NewStore()
+	timers := &manualTimerFactory{}
+	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
+	registrar := &fakeRegistrar{nilRegistration: true}
+	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}}, NewRetryTimer: timers.New})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	time.Sleep(10 * time.Millisecond)
+	if timers.count() != 0 {
+		t.Fatal("service polled while MAC was unknown")
+	}
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
+	timers.wait(t, 1) // nil registrations are failures, not an active responder.
+	cancel()
+	<-done
 }

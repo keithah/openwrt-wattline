@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -302,6 +303,23 @@ func validatePath(name, value string) error {
 
 var interfaceNameRE = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,15}$`)
 
+func validMDNSInterfaceSelector(value string) bool {
+	if interfaceNameRE.MatchString(value) {
+		if address, err := netip.ParseAddr(value); err == nil && address.Is6() && address.IsLinkLocalUnicast() && address.Zone() == "" {
+			return false
+		}
+		return true
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil {
+		return false
+	}
+	if address.Zone() != "" && !interfaceNameRE.MatchString(address.Zone()) {
+		return false
+	}
+	return !address.Is6() || !address.IsLinkLocalUnicast() || address.Zone() != ""
+}
+
 func listenersConflict(a4, a6 string, aPort int, b4, b6 string, bPort int) bool {
 	if aPort != bPort {
 		return false
@@ -353,7 +371,7 @@ func (c *Config) Validate() error {
 	}
 	seen := make(map[string]struct{}, len(c.MDNSInterfaces))
 	for _, name := range c.MDNSInterfaces {
-		if !interfaceNameRE.MatchString(name) {
+		if !validMDNSInterfaceSelector(name) {
 			return fmt.Errorf("invalid mdns_interface %q", name)
 		}
 		if _, duplicate := seen[name]; duplicate {
