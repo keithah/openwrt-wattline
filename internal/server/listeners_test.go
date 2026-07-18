@@ -61,6 +61,28 @@ func TestListenerHTTPAndHTTPSIndependent(t *testing.T) {
 	}
 }
 
+func TestListenerBoundsRequestReadsWithoutTimingOutSSEWrites(t *testing.T) {
+	port := freePort(t, "tcp4", "127.0.0.1")
+	group, err := Start(context.Background(), ListenerConfig{
+		HTTP: Endpoint{Enabled: true, Addr4: "127.0.0.1", Port: port},
+	}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer group.Shutdown(context.Background())
+
+	if len(group.servers) != 1 {
+		t.Fatalf("server count %d, want 1", len(group.servers))
+	}
+	server := group.servers[0]
+	if server.ReadTimeout <= 0 {
+		t.Fatalf("ReadTimeout = %v, want a positive request read timeout", server.ReadTimeout)
+	}
+	if server.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %v, want zero for long-lived SSE", server.WriteTimeout)
+	}
+}
+
 func TestListenerIndependentDisablement(t *testing.T) {
 	dir := t.TempDir()
 	cert, err := EnsureCertificate(filepath.Join(dir, "cert"), filepath.Join(dir, "key"), nil)

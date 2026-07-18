@@ -60,6 +60,7 @@ type Deps struct {
 type server struct {
 	d          Deps
 	settingsMu sync.RWMutex
+	rulesMu    sync.Mutex
 }
 
 func (s *server) now() time.Time {
@@ -77,7 +78,7 @@ func NewServer(d Deps) http.Handler {
 		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			route.handler(s, w, r)
 		})
-		mux.HandleFunc(route.method+" "+route.path, route.middleware(s, handler))
+		mux.HandleFunc(route.method+" "+route.path, route.middleware(s, limitRequestBody(handler)))
 	}
 	return cors(mux)
 }
@@ -147,9 +148,9 @@ var routeDescriptors = []routeDescriptor{
 	{"GET", "/api/v1/device/advanced/usb-fw-version", (*server).getUSBFirmware, adminSettingsRoute, false},
 	{"PUT", "/api/v1/device/advanced/ble-pin", (*server).putBLEPIN, adminSettingsRoute, false},
 	{"GET", "/api/v1/rules", (*server).getRules, clientRoute, true},
-	{"POST", "/api/v1/rules", (*server).postRule, clientRoute, true},
-	{"PUT", "/api/v1/rules/{name}", (*server).putRule, clientRoute, true},
-	{"DELETE", "/api/v1/rules/{name}", (*server).deleteRule, clientRoute, true},
+	{"POST", "/api/v1/rules", (*server).postRule, adminRoute, true},
+	{"PUT", "/api/v1/rules/{name}", (*server).putRule, adminRoute, true},
+	{"DELETE", "/api/v1/rules/{name}", (*server).deleteRule, adminRoute, true},
 	{"POST", "/api/v1/device/action", (*server).deviceAction, clientRoute, true},
 	{"GET", "/api/v1/pairing/status", pairingStatusRoute, clientSettingsRoute, true},
 	{"POST", "/api/v1/pairing/scan", pairingScanRoute, clientSettingsRoute, true},
@@ -312,6 +313,8 @@ func (s *server) upsert(w http.ResponseWriter, rule config.Rule, name string) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	s.rulesMu.Lock()
+	defer s.rulesMu.Unlock()
 	rulesList := s.d.LoadRules()
 	replaced := false
 	for i := range rulesList {
@@ -350,6 +353,8 @@ func (s *server) putRule(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) deleteRule(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	s.rulesMu.Lock()
+	defer s.rulesMu.Unlock()
 	rulesList := s.d.LoadRules()
 	found := false
 	out := rulesList[:0]
@@ -382,6 +387,13 @@ func (s *server) deviceAction(w http.ResponseWriter, r *http.Request) {
 	if err := actions.ValidateAction(body.Action); err != nil {
 		writeAPIError(w, "invalid_request")
 		return
+	}
+	if strings.HasPrefix(body.Action, "webhook:") {
+		principal, ok := principalFromContext(r.Context())
+		if !ok || principal.Role != auth.RoleAdmin {
+			writeAPIError(w, "admin_required")
+			return
+		}
 	}
 	snap := s.d.Store.Snapshot()
 	errs := s.d.Exec.Execute([]string{body.Action}, snap, "manual", snap.UpdatedAt)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,9 +16,11 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/keithah/openwrt-wattline/internal/actions"
 	"github.com/keithah/openwrt-wattline/internal/auth"
 	"github.com/keithah/openwrt-wattline/internal/ble"
 	"github.com/keithah/openwrt-wattline/internal/config"
@@ -185,6 +188,88 @@ func openSSE(t *testing.T, server *httptest.Server, token string) (*http.Respons
 		t.Fatalf("initial SSE delimiter = %q, %v", line, err)
 	}
 	return response, reader
+}
+
+func TestManagedClientCanReadButCannotAdministerRules(t *testing.T) {
+	f := newAdminFixture(t)
+
+	if response := do(t, f.h, http.MethodGet, "/api/v1/rules", f.clientSecret, ""); response.Code != http.StatusOK {
+		t.Fatalf("GET rules status %d: %s", response.Code, response.Body.String())
+	}
+	if response := do(t, f.h, http.MethodPost, "/api/v1/device/action", f.clientSecret, `{"action":"dc_off"}`); response.Code != http.StatusOK {
+		t.Fatalf("ordinary device action status %d: %s", response.Code, response.Body.String())
+	}
+	for _, request := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPost, "/api/v1/rules", `{"name":"new","condition":"input_power","state":"absent","actions":["dc_off"]}`},
+		{http.MethodPut, "/api/v1/rules/existing", `{"condition":"input_power","state":"absent","actions":["dc_off"]}`},
+		{http.MethodDelete, "/api/v1/rules/existing", ""},
+	} {
+		response := do(t, f.h, request.method, request.path, f.clientSecret, request.body)
+		if response.Code != http.StatusForbidden {
+			t.Errorf("%s %s status %d: %s", request.method, request.path, response.Code, response.Body.String())
+			continue
+		}
+		exactBody(t, response, `{"error":{"code":"admin_required","message":"Administrator token required","details":{}}}`)
+	}
+}
+
+func TestManagedClientManualWebhookIsDeniedBeforeHTTPRequest(t *testing.T) {
+	var requests atomic.Int32
+	webhook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests.Add(1)
+	}))
+	defer webhook.Close()
+
+	f := newAdminFixture(t)
+	deps := f.deps
+	deps.Exec = actions.NewExecutor(nopDev{}, "Link-Power-2")
+	handler := NewServer(deps)
+	response := do(t, handler, http.MethodPost, "/api/v1/device/action", f.clientSecret,
+		`{"action":"webhook:`+webhook.URL+`"}`)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("manual webhook status %d: %s", response.Code, response.Body.String())
+	}
+	exactBody(t, response, `{"error":{"code":"admin_required","message":"Administrator token required","details":{}}}`)
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("manual webhook made %d HTTP requests, want zero", got)
+	}
+}
+
+func TestPublicPairRejectsOversizedJSONWithoutReadingItAll(t *testing.T) {
+	f := newAdminFixture(t)
+	status := f.pairing.Open()
+	body := `{"pin":"` + status.PIN + `","label":"` + strings.Repeat("x", testRequestBodyLimit*2) + `"}`
+	reader := &countingReader{reader: io.NopCloser(strings.NewReader(body))}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/pair", reader)
+	request.ContentLength = -1
+	request.TransferEncoding = []string{"chunked"}
+	response := httptest.NewRecorder()
+
+	f.h.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("oversized pair status %d: %s", response.Code, response.Body.String())
+	}
+	exactBody(t, response, `{"error":{"code":"invalid_request","message":"Request is invalid","details":{}}}`)
+	if reader.read > testRequestBodyLimit+1 {
+		t.Fatalf("public pair read %d bytes, want at most %d", reader.read, testRequestBodyLimit+1)
+	}
+}
+
+func TestOversizedRuleMutationStillRequiresAdministrator(t *testing.T) {
+	f := newAdminFixture(t)
+	response := do(t, f.h, http.MethodPost, "/api/v1/rules", f.clientSecret,
+		strings.Repeat("x", testRequestBodyLimit+1))
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("client oversized rule status %d: %s", response.Code, response.Body.String())
+	}
+	exactBody(t, response, `{"error":{"code":"admin_required","message":"Administrator token required","details":{}}}`)
 }
 
 func TestRevokingManagedTokenClosesOnlyItsOpenSSE(t *testing.T) {

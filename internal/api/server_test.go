@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +28,20 @@ func (nopDev) TypeCOutput(bool) error   { return nil }
 func (nopDev) BypassControl(bool) error { return nil }
 func (nopDev) Restart() error           { return nil }
 func (nopDev) Shutdown() error          { return nil }
+
+type eofSignalReader struct {
+	reader *strings.Reader
+	once   sync.Once
+	done   chan struct{}
+}
+
+func (r *eofSignalReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err == io.EOF {
+		r.once.Do(func() { close(r.done) })
+	}
+	return n, err
+}
 
 func testServer(t *testing.T) (http.Handler, *state.Store, *[]config.Rule) {
 	return testServerWith(t, nil)
@@ -242,6 +258,94 @@ func TestDeleteRule(t *testing.T) {
 	}
 	if len(*saved) != 0 {
 		t.Fatalf("not deleted: %+v", *saved)
+	}
+}
+
+func TestConcurrentRuleHandlersSerializeLoadModifySave(t *testing.T) {
+	var dataMu sync.Mutex
+	saved := []config.Rule{{Name: "removed", Condition: "input_power", State: "absent", Actions: []string{"dc_off"}}}
+	s := &server{d: Deps{
+		LoadRules: func() []config.Rule {
+			dataMu.Lock()
+			defer dataMu.Unlock()
+			return append([]config.Rule(nil), saved...)
+		},
+		SaveRules: func(rules []config.Rule) error {
+			dataMu.Lock()
+			defer dataMu.Unlock()
+			saved = append([]config.Rule(nil), rules...)
+			return nil
+		},
+	}}
+
+	s.rulesMu.Lock()
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			s.rulesMu.Unlock()
+		}
+	})
+
+	type result struct {
+		response *httptest.ResponseRecorder
+		bodyDone <-chan struct{}
+		callDone <-chan struct{}
+	}
+	start := func(name string) result {
+		bodyDone := make(chan struct{})
+		callDone := make(chan struct{})
+		body := `{"name":"` + name + `","condition":"input_power","state":"absent","actions":["dc_off"]}`
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/rules", &eofSignalReader{
+			reader: strings.NewReader(body),
+			done:   bodyDone,
+		})
+		response := httptest.NewRecorder()
+		go func() {
+			s.postRule(response, request)
+			close(callDone)
+		}()
+		return result{response: response, bodyDone: bodyDone, callDone: callDone}
+	}
+
+	first := start("first")
+	second := start("second")
+	deleteDone := make(chan struct{})
+	deleteStarted := make(chan struct{})
+	deleteResponse := httptest.NewRecorder()
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/rules/removed", nil)
+	deleteRequest.SetPathValue("name", "removed")
+	go func() {
+		close(deleteStarted)
+		s.deleteRule(deleteResponse, deleteRequest)
+		close(deleteDone)
+	}()
+	<-first.bodyDone
+	<-second.bodyDone
+	<-deleteStarted
+	s.rulesMu.Unlock()
+	locked = false
+
+	for _, call := range []result{first, second} {
+		<-call.callDone
+		if call.response.Code != http.StatusOK {
+			t.Fatalf("concurrent rule response %d: %s", call.response.Code, call.response.Body.String())
+		}
+	}
+	<-deleteDone
+	if deleteResponse.Code != http.StatusOK {
+		t.Fatalf("concurrent delete response %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	dataMu.Lock()
+	defer dataMu.Unlock()
+	if len(saved) != 2 {
+		t.Fatalf("concurrent rules saved %+v, want two updates and the delete preserved", saved)
+	}
+	names := map[string]bool{}
+	for _, rule := range saved {
+		names[rule.Name] = true
+	}
+	if !names["first"] || !names["second"] || names["removed"] {
+		t.Fatalf("concurrent rules saved %+v, want first and second only", saved)
 	}
 }
 

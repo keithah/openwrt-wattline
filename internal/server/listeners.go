@@ -89,7 +89,11 @@ func Start(ctx context.Context, cfg ListenerConfig, handler http.Handler) (*Grou
 		if item.tls {
 			listener = tls.NewListener(listener, tlsConfig.Clone())
 		}
-		srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+		srv := &http.Server{
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       15 * time.Second,
+		}
 		g.listeners = append(g.listeners, listener)
 		g.servers = append(g.servers, srv)
 		go func(server *http.Server, l net.Listener) {

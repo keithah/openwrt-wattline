@@ -9,6 +9,8 @@ import (
 	"github.com/keithah/openwrt-wattline/internal/control"
 )
 
+const maxRequestBodyBytes int64 = 64 << 10
+
 type apiErrorBody struct {
 	Error apiError `json:"error"`
 }
@@ -70,7 +72,8 @@ func writeError(w http.ResponseWriter, err error) {
 // decodeJSON accepts exactly one JSON object. Pointer fields distinguish a
 // required false/zero value from a missing field in endpoint request structs.
 func decodeJSON(r *http.Request, dst any) error {
-	dec := json.NewDecoder(r.Body)
+	limited := &io.LimitedReader{R: r.Body, N: maxRequestBodyBytes + 1}
+	dec := json.NewDecoder(limited)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return err
@@ -82,16 +85,34 @@ func decodeJSON(r *http.Request, dst any) error {
 		}
 		return err
 	}
+	if limited.N == 0 {
+		return errors.New("request body is too large")
+	}
 	return nil
 }
 
 func requireNoBody(r *http.Request) error {
-	body, err := io.ReadAll(r.Body)
+	limited := &io.LimitedReader{R: r.Body, N: maxRequestBodyBytes + 1}
+	body, err := io.ReadAll(limited)
 	if err != nil {
 		return err
+	}
+	if limited.N == 0 {
+		return errors.New("request body is too large")
 	}
 	if len(body) != 0 {
 		return errors.New("request body must be empty")
 	}
 	return nil
+}
+
+func limitRequestBody(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > maxRequestBodyBytes {
+			writeAPIError(w, "invalid_request")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	}
 }
