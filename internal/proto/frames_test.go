@@ -70,6 +70,15 @@ func TestValidateReply(t *testing.T) {
 	}
 }
 
+func TestValidateReplyRejectsEveryFrameShorterThanResultHeader(t *testing.T) {
+	req := []byte{0x01, 0x01, 0x01}
+	for _, reply := range [][]byte{nil, {0x01}, {0x01, 0x81}} {
+		if _, _, err := ValidateReply(req, reply); err == nil {
+			t.Fatalf("ValidateReply accepted short reply % x", reply)
+		}
+	}
+}
+
 func TestParsers(t *testing.T) {
 	feats, err := ParseFeatures([]byte{0xFF, 0x7F, 0x00, 0x00})
 	if err != nil || feats != 0x7FFF {

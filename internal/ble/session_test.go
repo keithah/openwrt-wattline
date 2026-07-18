@@ -22,6 +22,7 @@ type fakeTransport struct {
 	replies    map[string][][]byte // uuid -> FIFO of read replies
 	subs       map[string]func([]byte)
 	chars      map[string]bool
+	readable   map[string]bool
 	failWrites map[string]error // uuid -> error to return on write
 	disc       chan struct{}
 	closeOnce  sync.Once
@@ -35,15 +36,23 @@ func (f *fakeTransport) Close() error {
 func newFake() *fakeTransport {
 	return &fakeTransport{replies: map[string][][]byte{},
 		readCalls: map[string]int{}, writeCalls: map[string]int{}, subCalls: map[string]int{},
-		subs: map[string]func([]byte){}, chars: map[string]bool{}, failWrites: map[string]error{},
+		subs: map[string]func([]byte){}, chars: map[string]bool{}, readable: map[string]bool{}, failWrites: map[string]error{},
 		disc: make(chan struct{})}
 }
 func (f *fakeTransport) available(uuids ...string) {
 	for _, uuid := range uuids {
 		f.chars[uuid] = true
+		f.readable[uuid] = true
 	}
 }
-func (f *fakeTransport) HasChar(uuid string) bool { return f.chars[uuid] }
+func (f *fakeTransport) writeOnly(uuids ...string) {
+	for _, uuid := range uuids {
+		f.chars[uuid] = true
+		f.readable[uuid] = false
+	}
+}
+func (f *fakeTransport) HasChar(uuid string) bool     { return f.chars[uuid] }
+func (f *fakeTransport) CanReadChar(uuid string) bool { return f.readable[uuid] }
 func (f *fakeTransport) push(uuid, hexStr string) {
 	b, _ := hex.DecodeString(hexStr)
 	f.replies[uuid] = append(f.replies[uuid], b)

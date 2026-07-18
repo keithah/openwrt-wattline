@@ -15,10 +15,11 @@ import (
 var adapter = bluetooth.DefaultAdapter
 
 type tinygoTransport struct {
-	dev   bluetooth.Device
-	chars map[string]bluetooth.DeviceCharacteristic
-	disc  chan struct{}
-	once  sync.Once
+	dev      bluetooth.Device
+	chars    map[string]bluetooth.DeviceCharacteristic
+	readable map[string]bool
+	disc     chan struct{}
+	once     sync.Once
 }
 
 func normUUID(u string) string { return strings.ToLower(u) }
@@ -73,7 +74,7 @@ func ScanAndConnectPrefixes(prefixes []string) (Transport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
-	t := &tinygoTransport{dev: dev, chars: map[string]bluetooth.DeviceCharacteristic{}, disc: make(chan struct{})}
+	t := &tinygoTransport{dev: dev, chars: map[string]bluetooth.DeviceCharacteristic{}, readable: map[string]bool{}, disc: make(chan struct{})}
 	// Register the disconnect handler immediately after connecting, before
 	// service/characteristic discovery, so a disconnect during discovery is
 	// not lost (which would otherwise hang the connector forever waiting on
@@ -97,12 +98,33 @@ func ScanAndConnectPrefixes(prefixes []string) (Transport, error) {
 			t.chars[normUUID(ch.UUID().String())] = ch
 		}
 	}
+	// TinyGo's Linux characteristic API does not expose BlueZ's Flags
+	// inventory. Probe Current Time once while constructing the transport and
+	// cache the result. A failed probe is conservative for this connection:
+	// clock GETs remain unavailable, while writes still use characteristic
+	// presence. This discovery-time probe is deliberately separate from API
+	// endpoint I/O.
+	t.probeReadability(CharTime)
 	return t, nil
 }
 
 func (t *tinygoTransport) HasChar(uuid string) bool {
 	_, ok := t.chars[normUUID(uuid)]
 	return ok
+}
+
+func (t *tinygoTransport) CanReadChar(uuid string) bool {
+	return t.readable[normUUID(uuid)]
+}
+
+func (t *tinygoTransport) probeReadability(uuid string) {
+	ch, ok := t.chars[normUUID(uuid)]
+	if !ok {
+		return
+	}
+	buf := make([]byte, 64)
+	_, err := ch.Read(buf)
+	t.readable[normUUID(uuid)] = err == nil
 }
 
 func (t *tinygoTransport) char(uuid string) (bluetooth.DeviceCharacteristic, error) {

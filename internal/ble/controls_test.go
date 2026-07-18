@@ -58,6 +58,7 @@ func (f *timerAtomicTransport) ReadChar(string) ([]byte, error) {
 }
 func (*timerAtomicTransport) Subscribe(string, func([]byte)) error { return nil }
 func (*timerAtomicTransport) HasChar(string) bool                  { return true }
+func (*timerAtomicTransport) CanReadChar(string) bool              { return true }
 func (*timerAtomicTransport) Disconnected() <-chan struct{}        { return make(chan struct{}) }
 func (*timerAtomicTransport) Close() error                         { return nil }
 func (f *timerAtomicTransport) frames() []string {
@@ -93,6 +94,7 @@ func (f *thresholdAtomicTransport) ReadChar(string) ([]byte, error) {
 }
 func (*thresholdAtomicTransport) Subscribe(string, func([]byte)) error { return nil }
 func (*thresholdAtomicTransport) HasChar(string) bool                  { return true }
+func (*thresholdAtomicTransport) CanReadChar(string) bool              { return true }
 func (*thresholdAtomicTransport) Disconnected() <-chan struct{}        { return make(chan struct{}) }
 func (*thresholdAtomicTransport) Close() error                         { return nil }
 func (f *thresholdAtomicTransport) frames() []string {

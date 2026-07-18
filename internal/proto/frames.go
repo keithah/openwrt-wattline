@@ -63,7 +63,7 @@ func CurrentTimeAt(t time.Time, reason byte) []byte {
 // carry non-zero results even on success (live-verified) so 0x14 is exempt
 // from result failure; callers reconcile from telemetry instead.
 func ValidateReply(req, reply []byte) (result byte, payload []byte, err error) {
-	if len(req) == 0 || len(reply) < 2 {
+	if len(req) == 0 || len(reply) < 3 {
 		return 0, nil, fmt.Errorf("short frame: req=% x reply=% x", req, reply)
 	}
 	if reply[0] != req[0] {
@@ -71,9 +71,6 @@ func ValidateReply(req, reply []byte) (result byte, payload []byte, err error) {
 	}
 	if len(req) >= 2 && reply[1] != req[1]|0x80 {
 		return 0, nil, fmt.Errorf("action echo mismatch: sent %#02x got %#02x", req[1], reply[1])
-	}
-	if len(reply) < 3 {
-		return 0, nil, nil
 	}
 	result = reply[2]
 	payload = reply[3:]

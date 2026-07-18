@@ -25,6 +25,9 @@ func TestIdentitySnapshotJSONCompatibilityAndCopy(t *testing.T) {
 		FeatureSet:      proto.DecodeFeatures(3),
 		Mode:            "app",
 		Characteristics: map[string]bool{"current_time": true},
+		ReadableCharacteristics: map[string]bool{
+			"current_time": false,
+		},
 	})
 
 	snap := s.Snapshot()
@@ -44,11 +47,15 @@ func TestIdentitySnapshotJSONCompatibilityAndCopy(t *testing.T) {
 	if got := snap.Device.Characteristics["current_time"]; !got {
 		t.Fatal("identity mutation was not retained")
 	}
+	if got := snap.Device.ReadableCharacteristics["current_time"]; got {
+		t.Fatal("write-only characteristic was reported readable")
+	}
 
 	snap.Battery.Level = 1
 	snap.Device.Characteristics["current_time"] = false
+	snap.Device.ReadableCharacteristics["current_time"] = true
 	fresh := s.Snapshot()
-	if fresh.Battery.Level != 88 || !fresh.Device.Characteristics["current_time"] {
+	if fresh.Battery.Level != 88 || !fresh.Device.Characteristics["current_time"] || fresh.Device.ReadableCharacteristics["current_time"] {
 		t.Fatalf("Snapshot returned aliases into store: %+v", fresh)
 	}
 }

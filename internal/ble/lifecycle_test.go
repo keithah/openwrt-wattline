@@ -45,6 +45,24 @@ func TestClockAbsentDoesZeroIO(t *testing.T) {
 	}
 }
 
+func TestWriteOnlyClockReadDoesZeroEndpointIOButSyncRemainsAvailable(t *testing.T) {
+	s, f := newCtlSession()
+	f.writeOnly(CharTime)
+
+	if got, available, err := s.ReadClock(); err != nil || available || !got.IsZero() {
+		t.Fatalf("ReadClock = %v, %v, %v", got, available, err)
+	}
+	if f.readCalls[CharTime] != 0 {
+		t.Fatalf("write-only clock endpoint performed %d GATT reads", f.readCalls[CharTime])
+	}
+	if err := s.SyncClock(time.Date(2026, 7, 18, 10, 11, 12, 0, time.Local), 0); err != nil {
+		t.Fatalf("SyncClock on present write-only characteristic: %v", err)
+	}
+	if f.writeCalls[CharTime] != 1 {
+		t.Fatalf("SyncClock writes = %d, want 1", f.writeCalls[CharTime])
+	}
+}
+
 func TestClockReadAndCallerSuppliedReason(t *testing.T) {
 	s, f := newCtlSession()
 	f.available(CharTime)

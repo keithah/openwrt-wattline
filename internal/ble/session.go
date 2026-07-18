@@ -66,6 +66,9 @@ func (s *Session) Close() error {
 // HasChar reports whether uuid was present in the discovery inventory.
 func (s *Session) HasChar(uuid string) bool { return s.t.HasChar(strings.ToLower(uuid)) }
 
+// CanReadChar reports cached connect-time readability without performing I/O.
+func (s *Session) CanReadChar(uuid string) bool { return s.t.CanReadChar(strings.ToLower(uuid)) }
+
 // Mode is "app" for the normal firmware and "ota" for the bootloader.
 func (s *Session) Mode() string { return s.mode }
 

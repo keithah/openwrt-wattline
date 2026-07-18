@@ -329,35 +329,29 @@ func run(cfgPath string, stop <-chan struct{}) error {
 	}
 
 	var (
-		mu    sync.Mutex
-		sess  *ble.Session
-		ident ble.Identity
+		identityMu sync.Mutex
+		ident      ble.Identity
 	)
+	dial := func() (ble.Transport, error) {
+		return ble.ScanAndConnectPrefixes([]string{"Link-Power", "PeakDo-OTA"})
+	}
+	conn := ble.NewConnector(dial, store, func(_ *ble.Session, id ble.Identity) {
+		identityMu.Lock()
+		ident = id
+		identityMu.Unlock()
+		log.Printf("wattline: connected to %s (%s) fw %s", id.Model, id.MAC, id.Firmware)
+	})
 	getDev := func() actions.Device {
-		mu.Lock()
-		defer mu.Unlock()
-		if sess == nil {
-			return noDevice{}
+		if session := conn.Session(); session != nil {
+			return session
 		}
-		return sess
+		return noDevice{}
 	}
 	getSession := func() control.Session {
-		mu.Lock()
-		defer mu.Unlock()
-		if sess == nil {
-			return nil
-		}
-		return sess
+		return conn.Session()
 	}
 	exec := actions.NewExecutor(deviceFunc(getDev), "Link-Power")
 
-	dial := func() (ble.Transport, error) { return ble.ScanAndConnect("Link-Power") }
-	conn := ble.NewConnector(dial, store, func(s *ble.Session, id ble.Identity) {
-		mu.Lock()
-		sess, ident = s, id
-		mu.Unlock()
-		log.Printf("wattline: connected to %s (%s) fw %s", id.Model, id.MAC, id.Firmware)
-	})
 	go conn.Run(stop)
 	deviceControl := control.NewService(getSession, store, conn, func() bool { return live.current().Advanced })
 
@@ -399,15 +393,10 @@ func run(cfgPath string, stop <-chan struct{}) error {
 		Store: store, Engine: eng, Exec: exec, Token: cfg.Token,
 		Pairing: pairing,
 		Auth:    tokenStore, AuthStore: live.authStore, ClientPairing: clientPairing,
-		Identity:  func() ble.Identity { mu.Lock(); defer mu.Unlock(); return ident },
+		Identity:  func() ble.Identity { identityMu.Lock(); defer identityMu.Unlock(); return ident },
 		Connected: func() bool { return store.Snapshot().Connected },
 		Control: func() api.Control {
-			mu.Lock()
-			defer mu.Unlock()
-			if sess == nil {
-				return nil
-			}
-			return sess
+			return conn.Session()
 		},
 		DeviceControl: deviceControl,
 		Settings:      live.current,

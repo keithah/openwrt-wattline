@@ -82,6 +82,28 @@ func TestPreferredLANHostMatchesAdvertisedLocalName(t *testing.T) {
 	}
 }
 
+func TestProductionDialScansAppAndOTAFreshAdvertisementNames(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wiring := string(source)
+	if !strings.Contains(wiring, `ble.ScanAndConnectPrefixes([]string{"Link-Power", "PeakDo-OTA"})`) {
+		t.Fatal("production dial is not wired to scan both Link-Power and PeakDo-OTA fresh advertisement prefixes")
+	}
+}
+
+func TestProductionResolversUseConnectorAuthoritativeSession(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wiring := string(source)
+	if strings.Contains(wiring, "sess  *ble.Session") || !strings.Contains(wiring, "return conn.Session()") {
+		t.Fatal("daemon controls are not resolved through the connector's authoritative live session")
+	}
+}
+
 func TestInitGeneratesBootstrapTokenCertificateAndTokenStoreIdempotently(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "wattline")

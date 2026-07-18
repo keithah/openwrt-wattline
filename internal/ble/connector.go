@@ -35,6 +35,9 @@ type Connector struct {
 	fails  int
 	paused bool
 	resume chan struct{} // non-nil while paused; closed by Resume
+	// OTA mode does not expose DEVICE_ID. Keep the last value observed during
+	// an app-mode handshake for this connector's bootloader transition.
+	lastAppMAC string
 
 	reconnectArmed        bool
 	reconnectDelay        time.Duration
@@ -201,7 +204,14 @@ func (c *Connector) policyCurrent(policy <-chan struct{}) bool {
 	return policy == c.policyChanged && c.reconnectArmed
 }
 
-func (c *Connector) publishIdentity(id Identity, sess *Session) {
+func (c *Connector) publishIdentity(id Identity, sess *Session) Identity {
+	c.mu.Lock()
+	if id.Mode == "app" && id.MAC != "" {
+		c.lastAppMAC = id.MAC
+	} else if id.Mode == "ota" && id.MAC == "" {
+		id.MAC = c.lastAppMAC
+	}
+	c.mu.Unlock()
 	chars := make(map[string]bool)
 	for name, uuid := range map[string]string{
 		"ota": CharOTA, "command": CharCmd, "battery": CharBattery, "dc": CharDC,
@@ -216,7 +226,11 @@ func (c *Connector) publishIdentity(id Identity, sess *Session) {
 		BootloaderFirmware: id.BootloaderFirmware, MAC: id.MAC, CID: id.CID,
 		Features: id.Features, FeatureSet: proto.DecodeFeatures(id.Features), Mode: id.Mode,
 		Characteristics: chars,
+		ReadableCharacteristics: map[string]bool{
+			"current_time": sess.CanReadChar(CharTime),
+		},
 	})
+	return id
 }
 
 // pauseState returns the paused flag and the channel that unblocks waiters
@@ -370,7 +384,7 @@ func (c *Connector) Run(stop <-chan struct{}) {
 			continue
 		}
 		c.fails = 0
-		c.publishIdentity(id, sess)
+		id = c.publishIdentity(id, sess)
 		if c.onSession != nil {
 			c.onSession(sess, id)
 		}

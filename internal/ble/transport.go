@@ -31,6 +31,10 @@ type Transport interface {
 	// HasChar consults the characteristic inventory discovered at connect time.
 	// It must not perform GATT I/O.
 	HasChar(uuid string) bool
+	// CanReadChar consults readability learned at connect time. It must not
+	// perform GATT I/O; endpoint handlers use it to avoid probing write-only
+	// characteristics on every request.
+	CanReadChar(uuid string) bool
 	Disconnected() <-chan struct{}
 	// Close drops the connection, freeing the device (which accepts a single
 	// central) for pairing or other clients. Disconnected() fires afterwards.

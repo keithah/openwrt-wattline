@@ -18,7 +18,7 @@ type lifecyclePolicy interface {
 }
 
 func (s *Session) ReadClock() (time.Time, bool, error) {
-	if !s.HasChar(CharTime) {
+	if !s.CanReadChar(CharTime) {
 		return time.Time{}, false, nil
 	}
 	s.mu.Lock()

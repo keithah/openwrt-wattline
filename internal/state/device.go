@@ -25,16 +25,17 @@ const (
 const recentCommandCap = 32
 
 type Identity struct {
-	Model              string           `json:"model,omitempty"`
-	HWRev              string           `json:"hw_rev,omitempty"`
-	AppFirmware        string           `json:"app_firmware,omitempty"`
-	BootloaderFirmware string           `json:"bootloader_firmware,omitempty"`
-	MAC                string           `json:"mac,omitempty"`
-	CID                uint16           `json:"cid,omitempty"`
-	Features           uint32           `json:"features,omitempty"`
-	FeatureSet         proto.FeatureSet `json:"feature_set"`
-	Mode               string           `json:"mode,omitempty"`
-	Characteristics    map[string]bool  `json:"characteristics,omitempty"`
+	Model                   string           `json:"model,omitempty"`
+	HWRev                   string           `json:"hw_rev,omitempty"`
+	AppFirmware             string           `json:"app_firmware,omitempty"`
+	BootloaderFirmware      string           `json:"bootloader_firmware,omitempty"`
+	MAC                     string           `json:"mac,omitempty"`
+	CID                     uint16           `json:"cid,omitempty"`
+	Features                uint32           `json:"features,omitempty"`
+	FeatureSet              proto.FeatureSet `json:"feature_set"`
+	Mode                    string           `json:"mode,omitempty"`
+	Characteristics         map[string]bool  `json:"characteristics,omitempty"`
+	ReadableCharacteristics map[string]bool  `json:"readable_characteristics,omitempty"`
 }
 
 type Connection struct {
@@ -197,6 +198,12 @@ func cloneIdentity(in Identity) Identity {
 		out.Characteristics = make(map[string]bool, len(in.Characteristics))
 		for key, value := range in.Characteristics {
 			out.Characteristics[key] = value
+		}
+	}
+	if in.ReadableCharacteristics != nil {
+		out.ReadableCharacteristics = make(map[string]bool, len(in.ReadableCharacteristics))
+		for key, value := range in.ReadableCharacteristics {
+			out.ReadableCharacteristics[key] = value
 		}
 	}
 	return out

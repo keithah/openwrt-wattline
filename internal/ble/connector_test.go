@@ -1,6 +1,7 @@
 package ble
 
 import (
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -9,6 +10,40 @@ import (
 
 	"github.com/keithah/openwrt-wattline/internal/state"
 )
+
+func TestPublishedIdentityIncludesExplicitCharacteristicReadability(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		readable bool
+	}{
+		{name: "readable", readable: true},
+		{name: "write only", readable: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake()
+			if tc.readable {
+				f.available(CharTime)
+			} else {
+				f.writeOnly(CharTime)
+			}
+			store := state.NewStore()
+			c := NewConnector(nil, store, nil)
+			c.publishIdentity(Identity{Mode: "app"}, NewSession(f, store))
+			raw, err := json.Marshal(store.Snapshot().Device)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal(raw, &document); err != nil {
+				t.Fatal(err)
+			}
+			inventory, ok := document["readable_characteristics"].(map[string]any)
+			if !ok || inventory["current_time"] != tc.readable {
+				t.Fatalf("published identity readability = %s, want current_time=%v", raw, tc.readable)
+			}
+		})
+	}
+}
 
 func TestConnectorReconnects(t *testing.T) {
 	var dials int32
@@ -227,9 +262,9 @@ func TestConnectorPublishesAppAndBootloaderSessions(t *testing.T) {
 		}
 		return f, nil
 	}
-	modes := make(chan string, 2)
+	identities := make(chan Identity, 2)
 	store := state.NewStore()
-	c := NewConnector(dial, store, func(s *Session, _ Identity) { modes <- s.Mode() })
+	c := NewConnector(dial, store, func(_ *Session, id Identity) { identities <- id })
 	c.retryDelay, c.settle = time.Millisecond, 0
 	stop := make(chan struct{})
 	defer close(stop)
@@ -237,9 +272,12 @@ func TestConnectorPublishesAppAndBootloaderSessions(t *testing.T) {
 
 	for _, want := range []string{"app", "ota"} {
 		select {
-		case got := <-modes:
-			if got != want {
-				t.Fatalf("session mode = %q, want %q", got, want)
+		case got := <-identities:
+			if got.Mode != want {
+				t.Fatalf("session mode = %q, want %q", got.Mode, want)
+			}
+			if got.MAC != "DC:04:5A:EB:72:2B" {
+				t.Fatalf("%s callback MAC = %q, want stable app-mode MAC", want, got.MAC)
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timed out waiting for %s session", want)
@@ -248,8 +286,33 @@ func TestConnectorPublishesAppAndBootloaderSessions(t *testing.T) {
 	waitForConnector(t, "bootloader connection state", func() bool {
 		snap := store.Snapshot()
 		return snap.Connection != nil && snap.Connection.Phase == state.ConnectionBootloader &&
-			snap.Device != nil && snap.Device.Mode == "ota" && snap.Device.BootloaderFirmware == "2.0.2"
+			snap.Device != nil && snap.Device.Mode == "ota" && snap.Device.MAC == "DC:04:5A:EB:72:2B" &&
+			snap.Device.CID == 0x0305 && snap.Device.BootloaderFirmware == "2.0.2"
 	})
+}
+
+func TestConnectorColdBootloaderPublishesFactsWithoutInventingMAC(t *testing.T) {
+	f := newFake()
+	f.available(CharOTA, CharModel, CharHWRev, CharFWRev, CharSWRev)
+	f.push(CharOTA, "0200100000001083000000040005030100000000")
+	f.push(CharModel, "425034534c335632")
+	f.push(CharHWRev, "56352330333035")
+	f.push(CharFWRev, "322e302e32")
+	f.push(CharSWRev, "312e342e39")
+	store := state.NewStore()
+	c := NewConnector(func() (Transport, error) { return f, nil }, store, nil)
+	c.settle = 0
+	stop := make(chan struct{})
+	go c.Run(stop)
+	waitForConnector(t, "cold OTA identity", func() bool {
+		id := store.Snapshot().Device
+		return id != nil && id.Mode == "ota"
+	})
+	close(stop)
+	id := store.Snapshot().Device
+	if id.MAC != "" || id.Mode != "ota" || id.CID != 0x0305 || id.BootloaderFirmware != "2.0.2" {
+		t.Fatalf("cold OTA identity = %+v", id)
+	}
 }
 
 func TestConnectorArmReconnectDelaysRestartRedial(t *testing.T) {
