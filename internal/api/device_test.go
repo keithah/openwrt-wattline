@@ -44,6 +44,7 @@ type canonicalSession struct {
 	savePINError                               error
 	otaInfo                                    proto.OTAInfo
 	restarted, shutdown, enteredOTA, exitedOTA bool
+	entered                                    chan string
 }
 
 type orderedDCSession struct {
@@ -183,6 +184,9 @@ func (f *canonicalSession) SetBLEPIN(pin uint32) error {
 	return f.err
 }
 func (f *canonicalSession) ReadClock() (time.Time, bool, error) {
+	if f.entered != nil {
+		f.entered <- "clock-read"
+	}
 	if device := f.store.Snapshot().Device; device != nil && !device.Characteristics["current_time"] {
 		return time.Time{}, false, nil
 	}
@@ -190,11 +194,22 @@ func (f *canonicalSession) ReadClock() (time.Time, bool, error) {
 	return f.clockTime, f.clockOK, f.err
 }
 func (f *canonicalSession) SyncClock(_ time.Time, reason byte) error {
+	if f.entered != nil {
+		f.entered <- "clock-sync"
+	}
 	f.clockSyncReason = reason
 	return f.err
 }
-func (f *canonicalSession) OTAInfo() (proto.OTAInfo, error) { return f.otaInfo, f.err }
+func (f *canonicalSession) OTAInfo() (proto.OTAInfo, error) {
+	if f.entered != nil {
+		f.entered <- "ota-info"
+	}
+	return f.otaInfo, f.err
+}
 func (f *canonicalSession) EnterOTA(context.Context) error {
+	if f.entered != nil {
+		f.entered <- "ota-enter"
+	}
 	f.enteredOTA = true
 	if f.err == nil {
 		device := *f.store.Snapshot().Device
@@ -204,6 +219,9 @@ func (f *canonicalSession) EnterOTA(context.Context) error {
 	return f.err
 }
 func (f *canonicalSession) ExitOTA(context.Context) error {
+	if f.entered != nil {
+		f.entered <- "ota-exit"
+	}
 	f.exitedOTA = true
 	if f.err == nil {
 		device := *f.store.Snapshot().Device

@@ -18,6 +18,9 @@ import (
 	"github.com/keithah/openwrt-wattline/internal/auth"
 	"github.com/keithah/openwrt-wattline/internal/ble"
 	"github.com/keithah/openwrt-wattline/internal/config"
+	controlpkg "github.com/keithah/openwrt-wattline/internal/control"
+	"github.com/keithah/openwrt-wattline/internal/proto"
+	"github.com/keithah/openwrt-wattline/internal/state"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -499,9 +502,16 @@ func TestSettingsTransactionSerializesFailedAndSuccessfulUpdates(t *testing.T) {
 	bDone := make(chan result, 1)
 	go func() { aDone <- result{do(t, h, http.MethodPut, "/api/v1/settings", "tok", `{"advanced":true}`).Code} }()
 	<-aSaving
+	bAttempted := make(chan struct{})
 	go func() {
-		bDone <- result{do(t, h, http.MethodPut, "/api/v1/settings", "tok", `{"pairing_always_on":true}`).Code}
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(`{"pairing_always_on":true}`))
+		req.Header.Set("Authorization", "Bearer tok")
+		rr := httptest.NewRecorder()
+		close(bAttempted)
+		h.ServeHTTP(rr, req)
+		bDone <- result{rr.Code}
 	}()
+	<-bAttempted
 	select {
 	case <-bApplied:
 		close(releaseA)
@@ -546,9 +556,15 @@ func TestClientPairWaitsForTokenStoreCutover(t *testing.T) {
 	}()
 	<-cutoverStarted
 	pairDone := make(chan *httptest.ResponseRecorder, 1)
+	pairAttempted := make(chan struct{})
 	go func() {
-		pairDone <- do(t, h, http.MethodPost, "/api/v1/pair", "", `{"pin":"`+status.PIN+`","label":"during cutover"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/pair", strings.NewReader(`{"pin":"`+status.PIN+`","label":"during cutover"}`))
+		rr := httptest.NewRecorder()
+		close(pairAttempted)
+		h.ServeHTTP(rr, req)
+		pairDone <- rr
 	}()
+	<-pairAttempted
 	select {
 	case response := <-pairDone:
 		close(releaseCutover)
@@ -571,6 +587,99 @@ func TestClientPairWaitsForTokenStoreCutover(t *testing.T) {
 	}
 	if _, ok := f.activeStore.Authenticate(body.Token); !ok || f.activeStore != f.alternateStore {
 		t.Fatal("issued token does not authenticate in the active post-cutover store")
+	}
+}
+
+func TestClockAndOTARoutesWaitForSettingsTransaction(t *testing.T) {
+	routes := []struct {
+		method, path, body, entered string
+	}{
+		{http.MethodGet, "/api/v1/device/clock", "", "clock-read"},
+		{http.MethodPost, "/api/v1/device/clock/sync", "", "clock-sync"},
+		{http.MethodGet, "/api/v1/device/ota", "", "ota-info"},
+		{http.MethodPost, "/api/v1/device/ota/enter", `{"confirm":true}`, "ota-enter"},
+		{http.MethodPost, "/api/v1/device/ota/exit", "", "ota-exit"},
+	}
+	for _, route := range routes {
+		t.Run(route.entered, func(t *testing.T) {
+			f := newAdminFixture(t)
+			deps := f.deps
+			mode := "app"
+			if route.entered == "ota-exit" {
+				mode = "ota"
+			}
+			deps.Store.SetIdentity(state.Identity{Model: "BP4SL3V2", MAC: f.deviceID, CID: 773, Mode: mode,
+				Features: 4095, FeatureSet: proto.FeatureSet{FactoryMode: true, Shutdown: true},
+				Characteristics: map[string]bool{"command": true, "current_time": true, "ota": true}})
+			deps.Store.SetConnected(true)
+			deps.Store.SetConnection(state.Connection{Phase: state.ConnectionReady, ReconnectArmed: true, Since: time.Now()})
+			entered := make(chan string, 1)
+			session := &canonicalSession{store: deps.Store, entered: entered, clockOK: true,
+				clockTime: time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC), otaInfo: proto.OTAInfo{Mode: 1, CID: 773}}
+			deps.DeviceControl = controlpkg.NewService(func() controlpkg.Session { return session }, deps.Store, nil, func() bool { return true })
+			originalApply := deps.ApplySettings
+			applyStarted := make(chan struct{})
+			releaseApply := make(chan struct{})
+			deps.ApplySettings = func(before, after *config.Config) (func(), error) {
+				close(applyStarted)
+				<-releaseApply
+				return originalApply(before, after)
+			}
+			s := &server{d: deps}
+			var routeHandler http.HandlerFunc
+			switch route.entered {
+			case "clock-read":
+				routeHandler = s.getClock
+			case "clock-sync":
+				routeHandler = s.syncClock
+			case "ota-info":
+				routeHandler = s.otaInfo
+			case "ota-enter":
+				routeHandler = s.enterOTA
+			case "ota-exit":
+				routeHandler = s.exitOTA
+			}
+			routeHandler = s.settingsRead(routeHandler)
+			putDone := make(chan int, 1)
+			go func() {
+				req := httptest.NewRequest(http.MethodPut, "/api/v1/settings", strings.NewReader(`{"advanced":true}`))
+				rr := httptest.NewRecorder()
+				s.putSettings(rr, req)
+				putDone <- rr.Code
+			}()
+			<-applyStarted
+			requestAttempted := make(chan struct{})
+			requestDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				req := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
+				rr := httptest.NewRecorder()
+				close(requestAttempted)
+				routeHandler(rr, req)
+				requestDone <- rr
+			}()
+			<-requestAttempted
+			select {
+			case operation := <-entered:
+				close(releaseApply)
+				t.Fatalf("%s entered control seam during uncommitted settings apply", operation)
+			case <-time.After(100 * time.Millisecond):
+			}
+			close(releaseApply)
+			if got := <-putDone; got != http.StatusOK {
+				t.Fatalf("settings status %d", got)
+			}
+			select {
+			case operation := <-entered:
+				if operation != route.entered {
+					t.Fatalf("entered %q want %q", operation, route.entered)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("route did not proceed after settings commit")
+			}
+			if response := <-requestDone; response.Code != http.StatusOK {
+				t.Fatalf("route status %d: %s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 
