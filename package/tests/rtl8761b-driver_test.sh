@@ -7,6 +7,7 @@ PACKAGE_ROOT="$ROOT/package/wattline-rtl8761b"
 PAYLOAD="$PACKAGE_ROOT/usr/lib/wattline/rtl8761b"
 TMP="${TMPDIR:-/tmp}/wattline-rtl8761b-test.$$"
 REAL_PATH=/usr/bin:/bin:/usr/sbin:/sbin
+REAL_MODINFO="$(command -v modinfo)"
 
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 mkdir -p "$TMP"
@@ -30,13 +31,19 @@ assert_eq() {
 
 make_fakes() {
 	mkdir -p "$TMP/bin"
-	for command in cp mv rmmod insmod hciconfig; do
+	for command in cp mv rmmod insmod hciconfig modinfo; do
 		ln -s fake-command "$TMP/bin/$command"
 	done
 	cat >"$TMP/bin/fake-command" <<'EOF'
 #!/bin/sh
 set -eu
 command="${0##*/}"
+if [ "$command" = modinfo ]; then
+	if [ "${MODINFO_NO_FIELD:-}" = 1 ] && [ "${1:-}" = -F ]; then
+		exit 255
+	fi
+	exec "$REAL_MODINFO" "$@"
+fi
 count_file="$COUNTERS/$command"
 count=0
 [ ! -f "$count_file" ] || count="$(cat "$count_file")"
@@ -77,8 +84,9 @@ EOF
 	export LOCK_FILE="$CASE/root/var/lock/wattline-rtl8761b.lock"
 	export KERNEL_RELEASE=5.4.211 MACHINE=aarch64 PROC_MODULES="$CASE/proc-modules"
 	export SYS_USB="$CASE/root/sys/bus/usb/devices" WATTLINE_SERVICE="$CASE/wattlined"
-	export CALLS="$CASE/calls" COUNTERS="$CASE/counters" PATH="$TMP/bin:$REAL_PATH"
+	export CALLS="$CASE/calls" COUNTERS="$CASE/counters" REAL_MODINFO PATH="$TMP/bin:$REAL_PATH"
 	unset FAIL_AT
+	unset MODINFO_NO_FIELD
 }
 
 add_usb() {
@@ -93,6 +101,7 @@ run_admit_detect() {
 	"$DRIVERCTL" admit
 	[ ! -e "$STATE_DIR" ] || fail 'admit mutated state'
 	[ ! -s "$CALLS" ] || fail 'admit invoked mutating commands'
+	MODINFO_NO_FIELD=1 "$DRIVERCTL" admit
 
 	if KERNEL_RELEASE=6.6.0 "$DRIVERCTL" admit >/dev/null 2>&1; then
 		fail 'unsupported kernel admitted'

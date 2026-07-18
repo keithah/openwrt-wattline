@@ -50,6 +50,18 @@ detect() {
 	return 1
 }
 
+module_vermagic() {
+	path=$1
+	value="$(modinfo -F vermagic "$path" 2>/dev/null || true)"
+	if [ -z "$value" ]; then
+		value="$(modinfo "$path" 2>/dev/null | sed -n 's/^vermagic:[[:space:]]*//p')"
+	fi
+	if [ -z "$value" ]; then
+		value="$(strings "$path" 2>/dev/null | sed -n 's/^vermagic=//p')"
+	fi
+	printf '%s\n' "$value" | sed 's/[[:space:]]*$//'
+}
+
 admit() {
 	[ "$KERNEL_RELEASE" = "$EXPECTED_KERNEL" ] || {
 		log "unsupported kernel $KERNEL_RELEASE (requires $EXPECTED_KERNEL)"
@@ -59,7 +71,7 @@ admit() {
 		log "unsupported architecture $MACHINE (requires $EXPECTED_MACHINE)"
 		return 1
 	}
-	for command in awk chmod cmp cp dirname flock grep insmod mkdir modinfo mv rm rmmod sed sha256sum tr; do
+	for command in awk chmod cmp cp dirname flock grep insmod mkdir modinfo mv rm rmmod sed sha256sum strings tr; do
 		command -v "$command" >/dev/null 2>&1 || {
 			log "required command is unavailable: $command"
 			return 1
@@ -82,7 +94,7 @@ admit() {
 			log "missing packaged module: $path"
 			return 1
 		}
-		vermagic="$(modinfo -F vermagic "$path" | sed 's/[[:space:]]*$//')"
+		vermagic="$(module_vermagic "$path")"
 		[ "$vermagic" = "$EXPECTED_VERMAGIC" ] || {
 			log "$module vermagic is '$vermagic', expected '$EXPECTED_VERMAGIC'"
 			return 1
