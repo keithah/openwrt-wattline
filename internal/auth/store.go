@@ -73,15 +73,16 @@ func withRandom(random io.Reader) Option {
 }
 
 type Store struct {
-	mu                    sync.RWMutex
-	path                  string
-	now                   func() time.Time
-	random                io.Reader
-	fs                    fileSystem
-	records               map[string]*tokenRecord
-	revocationSubscribers map[string]map[chan struct{}]struct{}
-	lastSeenPersistedAt   time.Time
-	lastPersistenceError  error
+	mu                              sync.RWMutex
+	path                            string
+	now                             func() time.Time
+	random                          io.Reader
+	fs                              fileSystem
+	records                         map[string]*tokenRecord
+	revocationSubscribers           map[string]map[chan struct{}]struct{}
+	managedSubscriptionsInvalidated bool
+	lastSeenPersistedAt             time.Time
+	lastPersistenceError            error
 }
 
 type tokenRecord struct {
@@ -351,22 +352,25 @@ func (s *Store) Revoke(id string) error {
 	return nil
 }
 
-// SubscribeRevocation returns a channel closed after the managed token is
-// durably revoked. The caller must invoke cancel when it no longer needs the
-// notification. Bootstrap principals are not revocable and receive a nil
-// channel. A missing managed token returns an already-closed channel so a
-// caller cannot miss a revoke between authentication and subscription.
-func (s *Store) SubscribeRevocation(id string) (<-chan struct{}, func()) {
+// SubscribeRevocation atomically reports whether a token is active and, for a
+// managed token, returns a channel closed after durable revocation or runtime
+// store invalidation. The caller must invoke cancel when it no longer needs the
+// notification. Bootstrap principals are active but not revocable and receive
+// a nil channel.
+func (s *Store) SubscribeRevocation(id string) (<-chan struct{}, func(), bool) {
 	if id == bootstrapID {
-		return nil, func() {}
+		return nil, func() {}, true
 	}
 	ch := make(chan struct{})
 	s.mu.Lock()
+	if s.managedSubscriptionsInvalidated {
+		s.mu.Unlock()
+		return nil, func() {}, false
+	}
 	record, exists := s.records[id]
 	if !exists || record.Bootstrap {
-		close(ch)
 		s.mu.Unlock()
-		return ch, func() {}
+		return nil, func() {}, false
 	}
 	if s.revocationSubscribers == nil {
 		s.revocationSubscribers = make(map[string]map[chan struct{}]struct{})
@@ -386,6 +390,19 @@ func (s *Store) SubscribeRevocation(id string) (<-chan struct{}, func()) {
 			}
 		}
 		s.mu.Unlock()
+	}, true
+}
+
+// InvalidateManagedSubscribers closes all subscriptions attached to this
+// in-memory store without revoking or persisting any token. It is used after a
+// live token-store cutover commits so authenticated long-lived requests cannot
+// remain authorized by the retired runtime store.
+func (s *Store) InvalidateManagedSubscribers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.managedSubscriptionsInvalidated = true
+	for id := range s.revocationSubscribers {
+		s.notifyRevokedLocked(id)
 	}
 }
 

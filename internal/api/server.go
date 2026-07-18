@@ -45,7 +45,10 @@ type Deps struct {
 	// ApplySettings atomically applies non-restart settings (pairing policy,
 	// advanced, BLE PIN, and token store) and returns an idempotent rollback.
 	// On error it must leave runtime state unchanged.
-	ApplySettings  func(before, after *config.Config) (rollback func(), err error)
+	ApplySettings func(before, after *config.Config) (rollback func(), err error)
+	// CommitSettings publishes irreversible runtime notifications after SaveMain
+	// succeeds. It is required for a live token-store cutover.
+	CommitSettings func(before, after *config.Config)
 	TLSFingerprint func() string
 	// RotateTLS replaces the on-disk certificate and returns its DER SHA-256
 	// fingerprint. Active listeners continue using their loaded certificate
@@ -394,13 +397,13 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	cancelRevocation := func() {}
 	if principal, ok := principalFromContext(r.Context()); ok && principal.Role == auth.RoleClient {
 		if store, ok := r.Context().Value(authStoreContextKey{}).(*auth.Store); ok {
-			revoked, cancelRevocation = store.SubscribeRevocation(principal.TokenID)
-			defer cancelRevocation()
-			select {
-			case <-revoked:
+			var active bool
+			revoked, cancelRevocation, active = store.SubscribeRevocation(principal.TokenID)
+			if !active {
+				writeAPIError(w, "unauthorized")
 				return
-			default:
 			}
+			defer cancelRevocation()
 		}
 	}
 	flusher, ok := w.(http.Flusher)

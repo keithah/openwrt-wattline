@@ -144,6 +144,15 @@ func TestLiveConfigSwitchesTokenStoreTransactionally(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, managed, err := oldStore.Issue("phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidated, cancel, active := oldStore.SubscribeRevocation(managed.ID)
+	defer cancel()
+	if !active {
+		t.Fatal("managed token subscription was inactive")
+	}
 	pairing := auth.NewPairing(oldStore, 5*time.Minute, false)
 	before := &config.Config{Token: "bootstrap", TokenStore: oldPath, PairingTTL: 5 * time.Minute, BLEPIN: "020555"}
 	after := cloneConfig(before)
@@ -171,6 +180,51 @@ func TestLiveConfigSwitchesTokenStoreTransactionally(t *testing.T) {
 	}
 	if status := pairing.Status(true); status.Open {
 		t.Fatalf("rollback did not restore pairing policy: %+v", status)
+	}
+	select {
+	case <-invalidated:
+		t.Fatal("rollback invalidated old-store subscribers")
+	default:
+	}
+}
+
+func TestLiveConfigCommitInvalidatesOldStoreSubscribersWithoutRevokingTokens(t *testing.T) {
+	dir := t.TempDir()
+	oldPath, newPath := filepath.Join(dir, "old.json"), filepath.Join(dir, "new.json")
+	oldStore, err := auth.OpenStore(oldPath, "bootstrap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, managed, err := oldStore.Issue("phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidated, cancel, active := oldStore.SubscribeRevocation(managed.ID)
+	defer cancel()
+	if !active {
+		t.Fatal("managed token subscription was inactive")
+	}
+	pairing := auth.NewPairing(oldStore, 5*time.Minute, false)
+	before := &config.Config{Token: "bootstrap", TokenStore: oldPath, PairingTTL: 5 * time.Minute}
+	after := cloneConfig(before)
+	after.TokenStore = newPath
+	live := &liveConfig{cfg: cloneConfig(before), store: oldStore, pairing: pairing}
+	if _, err := live.apply(before, after); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-invalidated:
+		t.Fatal("apply invalidated subscribers before persistence commit")
+	default:
+	}
+	live.commit(before, after)
+	select {
+	case <-invalidated:
+	default:
+		t.Fatal("commit did not invalidate old-store subscribers")
+	}
+	if _, ok := oldStore.Authenticate(secret); !ok {
+		t.Fatal("subscriber invalidation revoked the old on-disk token")
 	}
 }
 

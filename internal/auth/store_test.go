@@ -290,8 +290,11 @@ func TestTokenRevokeSurvivesPostCommitDirectorySyncFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revoked, cancel := store.SubscribeRevocation(meta.ID)
+	revoked, cancel, active := store.SubscribeRevocation(meta.ID)
 	defer cancel()
+	if !active {
+		t.Fatal("issued token subscription was inactive")
+	}
 	store.fs = &faultFileSystem{fileSystem: osFileSystem{}, directorySyncErr: errors.New("directory sync failed")}
 	if err := store.Revoke(meta.ID); err != nil {
 		t.Fatalf("Revoke after committed rename: %v", err)
@@ -332,8 +335,11 @@ func TestTokenRevocationSubscriptionWaitsForCommitAndCanCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	firstRevoked, cancelFirst := store.SubscribeRevocation(firstMeta.ID)
+	firstRevoked, cancelFirst, active := store.SubscribeRevocation(firstMeta.ID)
 	defer cancelFirst()
+	if !active {
+		t.Fatal("first issued token subscription was inactive")
+	}
 	store.fs = &faultFileSystem{fileSystem: osFileSystem{}, renameErr: errors.New("rename failed")}
 	if err := store.Revoke(firstMeta.ID); err == nil {
 		t.Fatal("Revoke succeeded before atomic commit")
@@ -348,7 +354,10 @@ func TestTokenRevocationSubscriptionWaitsForCommitAndCanCancel(t *testing.T) {
 	}
 
 	store.fs = osFileSystem{}
-	secondRevoked, cancelSecond := store.SubscribeRevocation(secondMeta.ID)
+	secondRevoked, cancelSecond, active := store.SubscribeRevocation(secondMeta.ID)
+	if !active {
+		t.Fatal("second issued token subscription was inactive")
+	}
 	cancelSecond()
 	if err := store.Revoke(secondMeta.ID); err != nil {
 		t.Fatal(err)
@@ -359,17 +368,40 @@ func TestTokenRevocationSubscriptionWaitsForCommitAndCanCancel(t *testing.T) {
 	default:
 	}
 
-	missing, cancelMissing := store.SubscribeRevocation("9999999999999999")
+	missing, cancelMissing, active := store.SubscribeRevocation("9999999999999999")
 	defer cancelMissing()
-	select {
-	case <-missing:
-	default:
-		t.Fatal("missing-token subscription was not closed")
+	if active || missing != nil {
+		t.Fatal("missing-token subscription was active")
 	}
-	bootstrap, cancelBootstrap := store.SubscribeRevocation("bootstrap")
+	bootstrap, cancelBootstrap, active := store.SubscribeRevocation("bootstrap")
 	defer cancelBootstrap()
-	if bootstrap != nil {
-		t.Fatal("bootstrap received a revocation channel")
+	if !active || bootstrap != nil {
+		t.Fatal("bootstrap subscription state was incorrect")
+	}
+}
+
+func TestManagedSubscriberInvalidationRejectsFutureSubscriptionsWithoutRevoking(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "tokens.json"), "bootstrap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, meta, err := store.Issue("phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.InvalidateManagedSubscribers()
+	ch, cancel, active := store.SubscribeRevocation(meta.ID)
+	defer cancel()
+	if active || ch != nil {
+		t.Fatal("retired store accepted a new managed subscription")
+	}
+	if _, ok := store.Authenticate(secret); !ok {
+		t.Fatal("subscriber invalidation revoked the managed token")
+	}
+	bootstrap, cancelBootstrap, active := store.SubscribeRevocation("bootstrap")
+	defer cancelBootstrap()
+	if !active || bootstrap != nil {
+		t.Fatal("subscriber invalidation affected bootstrap")
 	}
 }
 

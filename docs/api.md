@@ -608,11 +608,22 @@ are SHA-256 of DER certificate bytes, rendered as 64 lowercase hexadecimal digit
 
 ### Certificate pinning and trust
 
-The certificate is self-signed. Its pin substitutes for public-CA trust only
-when the client performs explicit pin verification; accepting any self-signed
-certificate or disabling platform trust checks is not pinning. The pin is the
-SHA-256 digest of the exact leaf certificate DER bytes, not of PEM text, the
-public key, or a textual fingerprint.
+In the daemon's default pinned self-signed mode, trust requires both the exact
+leaf-certificate pin and the correlated Wattline device ID. For the advertised
+endpoint, that explicit policy replaces both public-CA chain validation and
+hostname/SAN validation; merely accepting any self-signed certificate or
+disabling platform trust checks is not pinning. The pin is the SHA-256 digest
+of the exact leaf certificate DER bytes, not of PEM text, the public key, or a
+textual fingerprint.
+
+The first-boot certificate contains the daemon's startup hostname plus
+`localhost`, `127.0.0.1`, and `::1`. A later MagicDNS name, preferred LAN name,
+or address may therefore be absent from its SANs. In pinned self-signed mode
+the client verifies the exact DER pin and correlated device ID instead of
+requiring those advertised names to match a SAN. If an operator replaces the
+certificate with one issued by a public CA, public-CA mode uses normal chain
+and hostname/SAN validation unless the client has independently enabled an
+explicit pin policy; a configured pin mismatch remains a hard failure.
 
 A client obtains the candidate pin from the QR `tls` parameter, mDNS `tls` TXT
 value, or `tls_sha256` in the public pairing response received over LAN HTTP or

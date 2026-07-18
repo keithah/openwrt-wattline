@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,27 +28,28 @@ import (
 )
 
 type adminFixture struct {
-	h              http.Handler
-	store          *auth.Store
-	activeStore    *auth.Store
-	alternateStore *auth.Store
-	pairing        *auth.Pairing
-	clientSecret   string
-	clientID       string
-	config         *config.Config
-	saves          int
-	lastSaved      *config.Config
-	deps           Deps
-	fingerprint    string
-	preferredHost  string
-	magicDNS       string
-	deviceID       string
-	eventStore     *state.Store
-	live           liveSettingsFixture
-	applyCalls     int
-	rollbacks      int
-	applyErr       error
-	saveErr        error
+	h               http.Handler
+	store           *auth.Store
+	activeStore     *auth.Store
+	alternateStore  *auth.Store
+	pairing         *auth.Pairing
+	clientSecret    string
+	clientID        string
+	config          *config.Config
+	saves           int
+	lastSaved       *config.Config
+	deps            Deps
+	fingerprint     string
+	preferredHost   string
+	magicDNS        string
+	deviceID        string
+	eventStore      *state.Store
+	live            liveSettingsFixture
+	applyCalls      int
+	rollbacks       int
+	applyErr        error
+	saveErr         error
+	pendingOldStore *auth.Store
 }
 
 type liveSettingsFixture struct {
@@ -126,11 +128,26 @@ func newAdminFixture(t *testing.T) *adminFixture {
 			if before.TokenStore != after.TokenStore {
 				previousStore := f.activeStore
 				f.activeStore = f.alternateStore
+				f.pendingOldStore = previousStore
 				pairingRollback := f.pairing.RebindStore(f.alternateStore)
-				storeRollback = func() { pairingRollback(); f.activeStore = previousStore }
+				storeRollback = func() {
+					pairingRollback()
+					f.activeStore = previousStore
+					f.pendingOldStore = nil
+				}
 			}
 			f.live = liveSettingsFixture{after.PairingTTL, after.PairingAlwaysOn, after.Advanced, after.BLEPIN, after.TokenStore}
 			return func() { storeRollback(); pairRollback(); f.live = previous; f.rollbacks++ }, nil
+		}
+		d.CommitSettings = func(before, after *config.Config) {
+			if before.TokenStore == after.TokenStore {
+				return
+			}
+			oldStore := f.pendingOldStore
+			f.pendingOldStore = nil
+			if oldStore != nil {
+				oldStore.InvalidateManagedSubscribers()
+			}
 		}
 		d.TLSFingerprint = func() string { return f.fingerprint }
 		d.PreferredHost = func() string { return f.preferredHost }
@@ -222,6 +239,94 @@ func TestRevokingManagedTokenClosesOnlyItsOpenSSE(t *testing.T) {
 			t.Fatalf("%s SSE did not remain live", name)
 		}
 	}
+}
+
+func TestSuccessfulTokenStoreCutoverClosesOldManagedSSEOnly(t *testing.T) {
+	f := newAdminFixture(t)
+	server := httptest.NewServer(f.h)
+	defer server.Close()
+
+	oldResponse, oldReader := openSSE(t, server, f.clientSecret)
+	defer oldResponse.Body.Close()
+	bootstrapResponse, bootstrapReader := openSSE(t, server, "tok")
+	defer bootstrapResponse.Body.Close()
+
+	oldDone := make(chan error, 1)
+	go func() {
+		_, err := oldReader.ReadString('\n')
+		oldDone <- err
+	}()
+	response := do(t, f.h, http.MethodPut, "/api/v1/settings", "tok", `{"token_store":"/etc/wattline/new-tokens.json"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("cutover status %d: %s", response.Code, response.Body.String())
+	}
+	select {
+	case err := <-oldDone:
+		if err == nil {
+			t.Fatal("old-store SSE produced a frame instead of closing")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successful token-store cutover did not close old managed SSE")
+	}
+
+	newSecret, _, err := f.alternateStore.Issue("new-store client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newResponse, newReader := openSSE(t, server, newSecret)
+	defer newResponse.Body.Close()
+	f.eventStore.SetBattery(proto.Battery{Level: 62})
+	for name, reader := range map[string]*bufio.Reader{"new managed": newReader, "bootstrap": bootstrapReader} {
+		line, err := reader.ReadString('\n')
+		if err != nil || !strings.HasPrefix(line, "data: ") {
+			t.Fatalf("%s SSE frame = %q, %v", name, line, err)
+		}
+	}
+	if _, ok := f.store.Authenticate(f.clientSecret); !ok {
+		t.Fatal("cutover mutated old token store on disk/in memory")
+	}
+}
+
+func TestFailedTokenStoreCutoverPreservesOldManagedSSE(t *testing.T) {
+	f := newAdminFixture(t)
+	server := httptest.NewServer(f.h)
+	defer server.Close()
+	oldResponse, oldReader := openSSE(t, server, f.clientSecret)
+	defer oldResponse.Body.Close()
+
+	f.saveErr = errors.New("disk full")
+	response := do(t, f.h, http.MethodPut, "/api/v1/settings", "tok", `{"token_store":"/etc/wattline/new-tokens.json"}`)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("failed cutover status %d: %s", response.Code, response.Body.String())
+	}
+	f.eventStore.SetBattery(proto.Battery{Level: 63})
+	line, err := oldReader.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "data: ") {
+		t.Fatalf("rolled-back old SSE frame = %q, %v", line, err)
+	}
+	if f.activeStore != f.store {
+		t.Fatal("failed cutover did not restore old authenticator")
+	}
+}
+
+func TestSSERevokedBetweenAuthenticationAndSubscriptionReturnsUnauthorized(t *testing.T) {
+	f := newAdminFixture(t)
+	principal, ok := f.store.Authenticate(f.clientSecret)
+	if !ok {
+		t.Fatal("authenticate client")
+	}
+	if err := f.store.Revoke(f.clientID); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	ctx := context.WithValue(request.Context(), principalContextKey{}, principal)
+	ctx = context.WithValue(ctx, authStoreContextKey{}, f.store)
+	recorder := httptest.NewRecorder()
+	(&server{d: f.deps}).events(recorder, request.WithContext(ctx))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d, want 401: %s", recorder.Code, recorder.Body.String())
+	}
+	exactBody(t, recorder, `{"error":{"code":"unauthorized","message":"Bearer token is missing or invalid","details":{}}}`)
 }
 
 func TestAuthRolesAndPrincipalContext(t *testing.T) {
@@ -630,6 +735,17 @@ func TestAdminSettingsRefusesLiveChangeWithoutApplicationMechanism(t *testing.T)
 	rr := do(t, h, http.MethodPut, "/api/v1/settings", "tok", `{"advanced":true}`)
 	if rr.Code != http.StatusInternalServerError || f.saves != 0 || f.config.Advanced {
 		t.Fatalf("status=%d saves=%d config=%+v", rr.Code, f.saves, f.config)
+	}
+}
+
+func TestAdminSettingsRefusesTokenStoreCutoverWithoutCommitMechanism(t *testing.T) {
+	f := newAdminFixture(t)
+	deps := f.deps
+	deps.CommitSettings = nil
+	h := NewServer(deps)
+	rr := do(t, h, http.MethodPut, "/api/v1/settings", "tok", `{"token_store":"/etc/wattline/new-tokens.json"}`)
+	if rr.Code != http.StatusInternalServerError || f.applyCalls != 0 || f.saves != 0 || f.activeStore != f.store {
+		t.Fatalf("status=%d applies=%d saves=%d active_store=%p", rr.Code, f.applyCalls, f.saves, f.activeStore)
 	}
 }
 

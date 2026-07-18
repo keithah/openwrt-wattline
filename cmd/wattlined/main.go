@@ -87,10 +87,11 @@ func initialize(cfgPath string, names []string) (serverpkg.Certificate, error) {
 }
 
 type liveConfig struct {
-	mu      sync.RWMutex
-	cfg     *config.Config
-	store   *auth.Store
-	pairing *auth.Pairing
+	mu              sync.RWMutex
+	cfg             *config.Config
+	store           *auth.Store
+	pairing         *auth.Pairing
+	pendingOldStore *auth.Store
 }
 
 // tlsIdentity distinguishes the certificate loaded by the active listener
@@ -188,9 +189,16 @@ func (l *liveConfig) apply(before, after *config.Config) (func(), error) {
 		l.mu.Lock()
 		oldStore := l.store
 		l.store = newStore
+		l.pendingOldStore = oldStore
 		l.mu.Unlock()
 		rebindRollback := l.pairing.RebindStore(newStore)
-		storeRollback = func() { rebindRollback(); l.mu.Lock(); l.store = oldStore; l.mu.Unlock() }
+		storeRollback = func() {
+			rebindRollback()
+			l.mu.Lock()
+			l.store = oldStore
+			l.pendingOldStore = nil
+			l.mu.Unlock()
+		}
 	}
 	if before.BLEPIN != after.BLEPIN {
 		ble.SetAgentPIN(after.BLEPIN)
@@ -205,6 +213,19 @@ func (l *liveConfig) apply(before, after *config.Config) (func(), error) {
 			pairRollback()
 		})
 	}, nil
+}
+
+func (l *liveConfig) commit(before, after *config.Config) {
+	if before.TokenStore == after.TokenStore {
+		return
+	}
+	l.mu.Lock()
+	oldStore := l.pendingOldStore
+	l.pendingOldStore = nil
+	l.mu.Unlock()
+	if oldStore != nil {
+		oldStore.InvalidateManagedSubscribers()
+	}
 }
 
 func listenerConfig(cfg *config.Config) serverpkg.ListenerConfig {
@@ -398,6 +419,7 @@ func run(cfgPath string, stop <-chan struct{}) error {
 			return nil
 		},
 		ApplySettings:  live.apply,
+		CommitSettings: live.commit,
 		TLSFingerprint: tlsState.fingerprint,
 		RotateTLS:      tlsState.rotate,
 		MagicDNSName:   magicDNS.Name,

@@ -66,7 +66,10 @@ func TestContractDocumentation(t *testing.T) {
 	}{
 		{"## Settings and TLS", "## mDNS", []string{
 			"Clients MUST verify the certificate before sending any bearer token",
-			"pin substitutes for public-CA trust only",
+			"replaces both public-CA chain validation and hostname/SAN validation",
+			"startup hostname plus `localhost`, `127.0.0.1`, and `::1`",
+			"public-CA mode",
+			"normal chain and hostname/SAN validation",
 			"MUST NOT silently downgrade to HTTP",
 			"old pin MUST be rejected",
 		}},

@@ -428,6 +428,10 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	if before.TokenStore != after.TokenStore && s.d.CommitSettings == nil {
+		writeAPIError(w, "internal_error")
+		return
+	}
 	rollback := func() {}
 	if liveFieldsChanged(before, &after) {
 		if s.d.ApplySettings == nil {
@@ -448,6 +452,9 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 		rollback()
 		writeAPIError(w, "internal_error")
 		return
+	}
+	if before.TokenStore != after.TokenStore {
+		s.d.CommitSettings(before, &after)
 	}
 	restart := restartFieldsChanged(before, &after)
 	writeJSON(w, http.StatusOK, s.settingsResponse(&after, &restart))
