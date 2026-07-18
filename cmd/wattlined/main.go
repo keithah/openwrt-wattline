@@ -22,10 +22,14 @@ import (
 	"github.com/keithah/openwrt-wattline/internal/ble"
 	"github.com/keithah/openwrt-wattline/internal/config"
 	"github.com/keithah/openwrt-wattline/internal/control"
+	"github.com/keithah/openwrt-wattline/internal/discovery"
 	"github.com/keithah/openwrt-wattline/internal/rules"
 	serverpkg "github.com/keithah/openwrt-wattline/internal/server"
 	"github.com/keithah/openwrt-wattline/internal/state"
 )
+
+// version is replaced with the IPK version by package/Makefile.
+var version = "dev"
 
 func main() {
 	cfgPath := flag.String("config", "/etc/config/wattline", "UCI config path")
@@ -210,6 +214,13 @@ func listenerConfig(cfg *config.Config) serverpkg.ListenerConfig {
 	}
 }
 
+func discoveryOptions(daemonVersion, hostname string, store *state.Store, live *liveConfig, tlsState *tlsIdentity) discovery.Options {
+	return discovery.Options{
+		Version: daemonVersion, Hostname: hostname, Store: store,
+		Config: live.current, TLSFingerprint: tlsState.fingerprint, Logf: log.Printf,
+	}
+}
+
 // tickOnce evaluates rules and dispatches any firings against the current device.
 func tickOnce(eng *rules.Engine, store *state.Store, dev func() actions.Device,
 	exec *actions.Executor, now time.Time) {
@@ -269,6 +280,9 @@ func run(cfgPath string, stop <-chan struct{}) error {
 	}
 
 	store := state.NewStore()
+	magicDNS := discovery.NewMagicDNSCache(discovery.Tailscale{})
+	magicDNS.Refresh(context.Background())
+	discoveryService := discovery.NewService(discoveryOptions(version, hostname, store, live, tlsState))
 	eng, err := rules.NewEngine(cfg.Rules)
 	if err != nil {
 		return err
@@ -355,12 +369,19 @@ func run(cfgPath string, stop <-chan struct{}) error {
 			}
 			return sess
 		},
-		DeviceControl:  deviceControl,
-		Settings:       live.current,
-		SaveMain:       func(next *config.Config) error { return live.save(cfgPath, next) },
+		DeviceControl: deviceControl,
+		Settings:      live.current,
+		SaveMain: func(next *config.Config) error {
+			if err := live.save(cfgPath, next); err != nil {
+				return err
+			}
+			discoveryService.Refresh()
+			return nil
+		},
 		ApplySettings:  live.apply,
 		TLSFingerprint: tlsState.fingerprint,
 		RotateTLS:      tlsState.rotate,
+		MagicDNSName:   magicDNS.Name,
 		PreferredHost: func() string {
 			if hostname != "" {
 				return hostname
@@ -406,6 +427,13 @@ func run(cfgPath string, stop <-chan struct{}) error {
 		return err
 	}
 	log.Printf("wattline: HTTP API listeners started")
+	discoveryContext, stopDiscovery := context.WithCancel(context.Background())
+	discoveryDone := make(chan error, 1)
+	go func() { discoveryDone <- discoveryService.Run(discoveryContext) }()
+	defer func() {
+		stopDiscovery()
+		<-discoveryDone
+	}()
 
 	// SIGHUP reload
 	hup := make(chan os.Signal, 1)
@@ -426,6 +454,8 @@ func run(cfgPath string, stop <-chan struct{}) error {
 			cancel()
 			return fmt.Errorf("API listener: %w", err)
 		case <-hup:
+			magicDNS.Refresh(context.Background())
+			discoveryService.Refresh()
 			if c, err := config.Load(cfgPath); err == nil {
 				if err := eng.SetRules(c.Rules); err != nil {
 					log.Printf("wattline: reload rules failed: %v", err)

@@ -48,6 +48,25 @@ func TestTickDispatchesFirings(t *testing.T) {
 	}
 }
 
+func TestDiscoveryOptionsReadDynamicConfigAndServedTLSIdentity(t *testing.T) {
+	cfg := &config.Config{HTTPEnabled: true, HTTPPort: 8377, MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}}
+	live := &liveConfig{cfg: cloneConfig(cfg)}
+	tlsState := &tlsIdentity{served: serverpkg.Certificate{SHA256: strings.Repeat("a", 64)}}
+	store := state.NewStore()
+	options := discoveryOptions("1.3.0", "router", store, live, tlsState)
+	if options.Version != "1.3.0" || options.Hostname != "router" || options.Store != store || options.Config().HTTPPort != 8377 || options.TLSFingerprint() != strings.Repeat("a", 64) {
+		t.Fatalf("options = %+v", options)
+	}
+	next := cloneConfig(cfg)
+	next.HTTPPort = 9000
+	live.mu.Lock()
+	live.cfg = next
+	live.mu.Unlock()
+	if options.Config().HTTPPort != 9000 {
+		t.Fatal("discovery config callback captured a stale config")
+	}
+}
+
 func TestInitGeneratesBootstrapTokenCertificateAndTokenStoreIdempotently(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "wattline")

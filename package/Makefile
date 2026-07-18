@@ -26,7 +26,7 @@ feed: all
 bin:
 	mkdir -p $(OUT)
 	cd .. && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
-		-ldflags "-s -w" -o package/$(BIN) ./cmd/wattlined
+		-ldflags "-s -w -X main.version=$(VERSION)" -o package/$(BIN) ./cmd/wattlined
 
 # Assemble an ipk from a staging dir: $1=pkgname $2=stagedir $3=arch
 define make_ipk
