@@ -444,7 +444,10 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-r.Context().Done():
 			return
-		case snap := <-ch:
+		case snap, ok := <-ch:
+			if !ok {
+				return
+			}
 			send(snapshotResponse(snap))
 		}
 	}

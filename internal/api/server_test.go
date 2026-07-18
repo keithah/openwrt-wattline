@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +23,50 @@ import (
 )
 
 type nopDev struct{}
+
+type stalledSSEWriter struct {
+	header         http.Header
+	mu             sync.Mutex
+	writes         int
+	initialFlushed chan struct{}
+	stalled        chan struct{}
+	release        chan struct{}
+	initialOnce    sync.Once
+	stalledOnce    sync.Once
+	releaseOnce    sync.Once
+}
+
+func newStalledSSEWriter() *stalledSSEWriter {
+	return &stalledSSEWriter{
+		header: make(http.Header), initialFlushed: make(chan struct{}),
+		stalled: make(chan struct{}), release: make(chan struct{}),
+	}
+}
+
+func (w *stalledSSEWriter) Header() http.Header { return w.header }
+func (w *stalledSSEWriter) WriteHeader(int)     {}
+func (w *stalledSSEWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.writes++
+	writes := w.writes
+	w.mu.Unlock()
+	if writes == 2 {
+		w.stalledOnce.Do(func() { close(w.stalled) })
+		<-w.release
+	}
+	return len(p), nil
+}
+func (w *stalledSSEWriter) Flush() {
+	w.mu.Lock()
+	writes := w.writes
+	w.mu.Unlock()
+	if writes == 1 {
+		w.initialOnce.Do(func() { close(w.initialFlushed) })
+	}
+}
+func (w *stalledSSEWriter) unblock() {
+	w.releaseOnce.Do(func() { close(w.release) })
+}
 
 func (nopDev) DCControl(bool) error     { return nil }
 func (nopDev) TypeCOutput(bool) error   { return nil }
@@ -417,4 +462,51 @@ func TestSSEStreamsSnapshot(t *testing.T) {
 	}
 
 	cancel()
+}
+
+func TestSSESlowSubscriberOverflowTerminatesStream(t *testing.T) {
+	h, store, _ := testServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer tok")
+	w := newStalledSSEWriter()
+	defer w.unblock()
+
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(w, req)
+		close(done)
+	}()
+	select {
+	case <-w.initialFlushed:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not flush its initial frame")
+	}
+
+	deadline := time.After(time.Second)
+	for i := 0; ; i++ {
+		store.SetIdentity(state.Identity{Model: "await-stall"})
+		select {
+		case <-w.stalled:
+			goto stalled
+		case <-deadline:
+			cancel()
+			t.Fatal("SSE handler did not reach the stalled writer")
+		default:
+			runtime.Gosched()
+		}
+	}
+
+stalled:
+	for i := 0; i < 1024; i++ {
+		store.SetIdentity(state.Identity{Model: "overflow"})
+	}
+	w.unblock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("SSE handler did not terminate after subscriber overflow")
+	}
 }

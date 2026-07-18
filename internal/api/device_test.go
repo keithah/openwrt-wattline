@@ -242,14 +242,15 @@ func canonicalServer(t *testing.T, connected, supported, advanced bool, sessionE
 	var fixtureSession *canonicalSession
 	h, store, _ := testServerWith(t, func(d *Deps) {
 		features := proto.FeatureSet{}
+		var featureBits uint32
 		chars := map[string]bool{}
 		if supported {
-			features = proto.FeatureSet{FactoryMode: true, Shutdown: true, DCOutControl: true, DCOutScheduler: true, USBPort: true,
-				USBPowerLimit: true, USBOutputControl: true, DCBypass: true, DCBypassControl: true}
+			featureBits = 0x7fff
+			features = proto.DecodeFeatures(featureBits)
 			chars = map[string]bool{"command": true, "dc": true, "typec": true, "current_time": true, "ota": true, "factory": true}
 		}
 		d.Store.SetIdentity(state.Identity{Model: "BP4SL3V2", HWRev: "V2", AppFirmware: "1.4.9",
-			BootloaderFirmware: "1.0.3", MAC: "DC:04:5A:EB:72:2B", CID: 773, Features: 4095,
+			BootloaderFirmware: "1.0.3", MAC: "DC:04:5A:EB:72:2B", CID: 773, Features: featureBits,
 			FeatureSet: features, Mode: "app", Characteristics: chars})
 		phase := state.ConnectionDisconnected
 		if connected {
@@ -298,8 +299,41 @@ func TestDeviceIdentityExactJSON(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
 	}
-	want := `{"id":"DC:04:5A:EB:72:2B","model":"BP4SL3V2","hardware_revision":"V2","application_firmware":"1.4.9","ota_firmware":"1.0.3","cid":773,"features_raw":4095,"features":{"shutdown":true,"dc_bypass":true,"dc_bypass_control":true,"running_mode":true,"barrier_free":true,"usb_firmware":true,"ble_pin":true},"available":{"current_time":true,"ota":true,"dc":true,"usbc":true},"mode":"app","connection":{"connected":true,"phase":"ready","reconnect":"armed"},"commands":{"active":[],"recent":[]},"magic_dns_name":"wattline.example.ts.net"}`
+	want := `{"id":"DC:04:5A:EB:72:2B","model":"BP4SL3V2","hardware_revision":"V2","application_firmware":"1.4.9","ota_firmware":"1.0.3","cid":773,"features_raw":32767,"features":{"display":true,"factory_mode":true,"sleep":true,"shutdown":true,"battery_capacity":true,"dc_out_port":true,"dc_out_control":true,"dc_out_scheduler":true,"usb_port":true,"usb_power_limit":true,"usb_output_control":true,"dc_bypass":true,"dc_bypass_control":true,"usb_dc_input":true,"usb_dc_input_power":true,"running_mode":true,"barrier_free":true,"usb_firmware":true,"ble_pin":true},"available":{"current_time":true,"ota":true,"dc":true,"usbc":true},"mode":"app","connection":{"connected":true,"phase":"ready","reconnect":"armed"},"commands":{"active":[],"recent":[]},"magic_dns_name":"wattline.example.ts.net"}`
 	exactBody(t, rr, want)
+}
+
+func TestDeviceIdentityMapsEveryDecodedFeatureBit(t *testing.T) {
+	h, store, _ := canonicalServer(t, true, true, true, nil)
+	featureNames := []string{
+		"display", "factory_mode", "sleep", "shutdown", "battery_capacity",
+		"dc_out_port", "dc_out_control", "dc_out_scheduler", "usb_port",
+		"usb_power_limit", "usb_output_control", "dc_bypass", "dc_bypass_control",
+		"usb_dc_input", "usb_dc_input_power",
+	}
+	for bit, wantName := range featureNames {
+		t.Run(wantName, func(t *testing.T) {
+			identity := *store.Snapshot().Device
+			identity.Features = 1 << bit
+			identity.FeatureSet = proto.DecodeFeatures(identity.Features)
+			store.SetIdentity(identity)
+			rr := do(t, h, http.MethodGet, "/api/v1/device", "tok", "")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+			}
+			var body struct {
+				Features map[string]bool `json:"features"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range featureNames {
+				if got, want := body.Features[name], name == wantName; got != want {
+					t.Errorf("bit %d feature %q = %t, want %t", bit, name, got, want)
+				}
+			}
+		})
+	}
 }
 
 func TestDeviceCachedWhileDisconnected(t *testing.T) {

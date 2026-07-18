@@ -10,13 +10,25 @@ import (
 )
 
 type deviceFeatures struct {
-	Shutdown        bool `json:"shutdown"`
-	DCBypass        bool `json:"dc_bypass"`
-	DCBypassControl bool `json:"dc_bypass_control"`
-	RunningMode     bool `json:"running_mode"`
-	BarrierFree     bool `json:"barrier_free"`
-	USBFirmware     bool `json:"usb_firmware"`
-	BLEPIN          bool `json:"ble_pin"`
+	Display          bool `json:"display"`
+	FactoryMode      bool `json:"factory_mode"`
+	Sleep            bool `json:"sleep"`
+	Shutdown         bool `json:"shutdown"`
+	BatteryCapacity  bool `json:"battery_capacity"`
+	DCOutPort        bool `json:"dc_out_port"`
+	DCOutControl     bool `json:"dc_out_control"`
+	DCOutScheduler   bool `json:"dc_out_scheduler"`
+	USBPort          bool `json:"usb_port"`
+	USBPowerLimit    bool `json:"usb_power_limit"`
+	USBOutputControl bool `json:"usb_output_control"`
+	DCBypass         bool `json:"dc_bypass"`
+	DCBypassControl  bool `json:"dc_bypass_control"`
+	USBDCInput       bool `json:"usb_dc_input"`
+	USBDCInputPower  bool `json:"usb_dc_input_power"`
+	RunningMode      bool `json:"running_mode"`
+	BarrierFree      bool `json:"barrier_free"`
+	USBFirmware      bool `json:"usb_firmware"`
+	BLEPIN           bool `json:"ble_pin"`
 }
 
 type deviceAvailable struct {
@@ -136,9 +148,20 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, deviceView{
 		ID: id.MAC, Model: id.Model, HardwareRevision: id.HWRev, ApplicationFirmware: id.AppFirmware,
 		OTAFirmware: id.BootloaderFirmware, CID: id.CID, FeaturesRaw: id.Features,
-		Features: deviceFeatures{Shutdown: id.FeatureSet.Shutdown, DCBypass: id.FeatureSet.DCBypass,
-			DCBypassControl: id.FeatureSet.DCBypassControl, RunningMode: id.FeatureSet.FactoryMode,
-			BarrierFree: id.Characteristics["command"], USBFirmware: id.FeatureSet.USBPort, BLEPIN: id.Characteristics["command"]},
+		Features: deviceFeatures{
+			Display: id.FeatureSet.Display, FactoryMode: id.FeatureSet.FactoryMode,
+			Sleep: id.FeatureSet.Sleep, Shutdown: id.FeatureSet.Shutdown,
+			BatteryCapacity: id.FeatureSet.BatteryCapacity, DCOutPort: id.FeatureSet.DCOutPort,
+			DCOutControl: id.FeatureSet.DCOutControl, DCOutScheduler: id.FeatureSet.DCOutScheduler,
+			USBPort: id.FeatureSet.USBPort, USBPowerLimit: id.FeatureSet.USBPowerLimit,
+			USBOutputControl: id.FeatureSet.USBOutputControl, DCBypass: id.FeatureSet.DCBypass,
+			DCBypassControl: id.FeatureSet.DCBypassControl, USBDCInput: id.FeatureSet.USBDCInput,
+			USBDCInputPower: id.FeatureSet.USBDCInputPower,
+			// Compatibility/advanced-operation booleans are derived separately from
+			// the exact FEATURES flags above.
+			RunningMode: id.FeatureSet.FactoryMode, BarrierFree: id.Characteristics["command"],
+			USBFirmware: id.FeatureSet.USBPort, BLEPIN: id.Characteristics["command"],
+		},
 		Available: deviceAvailable{CurrentTime: id.Characteristics["current_time"], OTA: id.Characteristics["ota"],
 			DC: id.Characteristics["dc"], USBC: id.Characteristics["typec"]},
 		Mode: id.Mode, Connection: deviceConnection{Connected: snap.Connected, Phase: phase, Reconnect: reconnect},

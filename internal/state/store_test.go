@@ -80,6 +80,60 @@ func TestSubscribeSaturationRetainsFinalTerminalState(t *testing.T) {
 	}
 }
 
+func TestSubscribeOverflowEvictsSlowSubscriberWithoutBlockingMutations(t *testing.T) {
+	s := NewStore()
+	ch, cancel := s.Subscribe()
+	defer cancel()
+
+	const queueCapacity = snapshotSubscriberQueueCapacity
+	mutationsDone := make(chan struct{})
+	go func() {
+		for i := 0; i <= queueCapacity; i++ {
+			s.SetIdentity(Identity{Model: fmt.Sprintf("model-%03d", i)})
+		}
+		close(mutationsDone)
+	}()
+	select {
+	case <-mutationsDone:
+	case <-time.After(time.Second):
+		t.Fatal("store mutations blocked on a slow subscriber")
+	}
+
+	for i := 0; i < queueCapacity; i++ {
+		select {
+		case snap, ok := <-ch:
+			if !ok {
+				t.Fatalf("slow subscriber closed before queued snapshot %d", i)
+			}
+			want := fmt.Sprintf("model-%03d", i)
+			if snap.Device == nil || snap.Device.Model != want {
+				t.Fatalf("snapshot %d out of order: %+v", i, snap.Device)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out reading queued snapshot %d", i)
+		}
+	}
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("overflowing snapshot was delivered instead of terminating the slow subscriber")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("overflow did not close the slow subscriber")
+	}
+
+	postOverflow := make(chan struct{})
+	go func() {
+		s.SetConnected(true)
+		close(postOverflow)
+	}()
+	select {
+	case <-postOverflow:
+	case <-time.After(time.Second):
+		t.Fatal("mutation blocked after slow-subscriber eviction")
+	}
+}
+
 func TestSubscribeDeliversEveryCommandTransitionInOrderWhenConsumerBlocked(t *testing.T) {
 	s := NewStore()
 	ch, cancel := s.Subscribe()
@@ -116,8 +170,8 @@ func TestSubscribeDeliversEveryCommandTransitionInOrderWhenConsumerBlocked(t *te
 
 func TestSubscribeCancelInterruptsBlockedDelivery(t *testing.T) {
 	s := NewStore()
-	_, cancel := s.Subscribe()
-	s.SetConnected(true) // pump blocks until a consumer receives or cancellation wins
+	ch, cancel := s.Subscribe()
+	s.SetConnected(true) // queued until a consumer receives or cancellation wins
 	done := make(chan struct{})
 	go func() {
 		cancel()
@@ -128,6 +182,14 @@ func TestSubscribeCancelInterruptsBlockedDelivery(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("cancel did not stop a subscriber blocked on delivery")
+	}
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("canceled subscriber delivered a snapshot")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancel did not close the subscriber channel")
 	}
 
 	mutationDone := make(chan struct{})

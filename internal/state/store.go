@@ -69,7 +69,10 @@ func (s *Store) publishLocked(recordHistory bool) {
 		s.record()
 	}
 	for subscriber := range s.subs {
-		subscriber.enqueue(cloneSnapshot(s.snap))
+		if !subscriber.enqueue(cloneSnapshot(s.snap)) {
+			delete(s.subs, subscriber)
+			subscriber.overflow()
+		}
 	}
 	for waiter := range s.waiters {
 		waiter.enqueue(cloneSnapshot(s.snap))
@@ -161,88 +164,47 @@ func (s *Store) Subscribe() (<-chan Snapshot, func()) {
 	s.mu.Unlock()
 	return subscriber.out, func() {
 		s.mu.Lock()
-		delete(s.subs, subscriber)
+		if _, ok := s.subs[subscriber]; ok {
+			delete(s.subs, subscriber)
+			subscriber.cancel()
+		}
 		s.mu.Unlock()
-		subscriber.stop()
 	}
 }
 
+const snapshotSubscriberQueueCapacity = 128
+
 type snapshotSubscriber struct {
-	mu       sync.Mutex
-	queue    []Snapshot
-	ready    chan struct{}
-	out      chan Snapshot
-	done     chan struct{}
-	stopped  chan struct{}
-	stopOnce sync.Once
+	out chan Snapshot
 }
 
 func newSnapshotSubscriber() *snapshotSubscriber {
-	subscriber := &snapshotSubscriber{
-		ready:   make(chan struct{}, 1),
-		out:     make(chan Snapshot),
-		done:    make(chan struct{}),
-		stopped: make(chan struct{}),
-	}
-	go subscriber.pump()
-	return subscriber
+	return &snapshotSubscriber{out: make(chan Snapshot, snapshotSubscriberQueueCapacity)}
 }
 
-func (s *snapshotSubscriber) enqueue(snap Snapshot) {
-	s.mu.Lock()
-	s.queue = append(s.queue, snap)
+// enqueue is called only while Store.mu is held, serializing it with close.
+func (s *snapshotSubscriber) enqueue(snap Snapshot) bool {
 	select {
-	case s.ready <- struct{}{}:
+	case s.out <- snap:
+		return true
 	default:
+		return false
 	}
-	s.mu.Unlock()
 }
 
-func (s *snapshotSubscriber) pump() {
-	defer close(s.stopped)
+// overflow preserves every frame accepted before the subscriber exceeded its
+// bound, then reports termination by closing the channel.
+func (s *snapshotSubscriber) overflow() { close(s.out) }
+
+// cancel discards queued frames before closing. It is called only after the
+// subscriber is removed while Store.mu is held, so no publisher can race close.
+func (s *snapshotSubscriber) cancel() {
 	for {
-		snap, ok := s.next()
-		if !ok {
-			return
-		}
 		select {
-		case s.out <- snap:
-		case <-s.done:
-			return
-		}
-	}
-}
-
-func (s *snapshotSubscriber) next() (Snapshot, bool) {
-	select {
-	case <-s.done:
-		return Snapshot{}, false
-	default:
-	}
-	select {
-	case <-s.done:
-		return Snapshot{}, false
-	case <-s.ready:
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.queue) == 0 {
-		return Snapshot{}, true
-	}
-	snap := s.queue[0]
-	s.queue[0] = Snapshot{}
-	s.queue = s.queue[1:]
-	if len(s.queue) > 0 {
-		select {
-		case s.ready <- struct{}{}:
+		case <-s.out:
 		default:
+			close(s.out)
+			return
 		}
 	}
-	return snap, true
-}
-
-func (s *snapshotSubscriber) stop() {
-	s.stopOnce.Do(func() { close(s.done) })
-	<-s.stopped
 }
