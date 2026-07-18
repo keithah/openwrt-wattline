@@ -4,6 +4,7 @@ package ble
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -70,6 +71,19 @@ func (p *bluezPairer) deviceObj(mac string) dbus.BusObject {
 	return p.conn.Object("org.bluez", p.devicePath(mac))
 }
 
+func discoveryInProgress(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dbusErr *dbus.Error
+	if errors.As(err, &dbusErr) {
+		return dbusErr.Name == "org.bluez.Error.InProgress"
+	}
+	message := err.Error()
+	return strings.Contains(message, "InProgress") ||
+		strings.Contains(message, "Operation already in progress")
+}
+
 // wattlineDevice reports whether an advertised name looks like a Link-Power
 // (app mode) or PeakDo-OTA (bootloader). Matches the PWA's scan filter.
 func wattlineDevice(name string) bool {
@@ -84,7 +98,7 @@ func (p *bluezPairer) startDiscovery() (func(), error) {
 	ad.Call("org.bluez.Adapter1.SetDiscoveryFilter", 0,
 		map[string]dbus.Variant{"Transport": dbus.MakeVariant("le")})
 	if call := ad.Call("org.bluez.Adapter1.StartDiscovery", 0); call.Err != nil {
-		if !strings.Contains(call.Err.Error(), "InProgress") {
+		if !discoveryInProgress(call.Err) {
 			return nil, fmt.Errorf("StartDiscovery: %w", call.Err)
 		}
 		return func() {}, nil
