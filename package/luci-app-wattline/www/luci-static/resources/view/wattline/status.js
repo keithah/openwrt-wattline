@@ -9,15 +9,46 @@
 
 var GREEN = '#25b45f', ORANGE = '#f5a623', GREY = '#9aa0a6', RED = '#e5533c';
 
-function api(token, port, method, path, body) {
-	var base = window.location.protocol + '//' + window.location.hostname + ':' + port + '/api/v1';
-	return fetch(base + path, {
-		method: method,
-		headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-		body: body ? JSON.stringify(body) : null
-	}).then(function (r) {
-		if (!r.ok) return r.text().then(function (t) { throw new Error((t || '').trim() || ('HTTP ' + r.status)); });
-		return r.json();
+function transports(config) {
+	var host = window.location.hostname;
+	var urls = [];
+	if (config.httpsEnabled) urls.push('https://' + host + ':' + config.httpsPort + '/api/v1');
+	if (config.httpEnabled) urls.push('http://' + host + ':' + config.httpPort + '/api/v1');
+	return urls;
+}
+
+function apiFetch(token, config, method, path, body) {
+	var bases = transports(config), index = 0;
+	function attempt(lastError) {
+		if (index >= bases.length) return Promise.reject(lastError || new Error(_('No API listener is enabled')));
+		var base = bases[index++];
+		return fetch(base + path, {
+			method: method,
+			headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+			body: body == null ? null : JSON.stringify(body),
+			cache: 'no-store'
+		}).catch(attempt);
+	}
+	return attempt();
+}
+
+function canonicalError(response) {
+	return response.json().then(function (payload) {
+		var detail = payload && payload.error;
+		var error = new Error(detail && detail.message ? detail.message : ('HTTP ' + response.status));
+		error.code = detail && detail.code;
+		error.status = response.status;
+		throw error;
+	}).catch(function (error) {
+		if (error && error.status) throw error;
+		throw new Error('HTTP ' + response.status);
+	});
+}
+
+function api(token, config, method, path, body) {
+	return apiFetch(token, config, method, path, body).then(function (response) {
+		if (!response.ok) return canonicalError(response);
+		return response.json();
 	});
 }
 
@@ -48,10 +79,17 @@ function css() {
 '.wl-msg{text-align:center;color:#9aa0a6;padding:26px 10px}' +
 '.wl-btn{padding:8px 18px;border-radius:8px;font-size:14px;cursor:pointer;border:1px solid #d0d4d9;background:#fff;color:#3c4043}' +
 '.wl-btn.primary{border:none;background:#25b45f;color:#fff}' +
+'.wl-btn.danger{border-color:#c94332;color:#b53225}' +
 '.wl-btn[disabled]{opacity:.5;cursor:default}' +
 '.wl-devrow{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-radius:10px;cursor:pointer;margin-top:6px;border:1px solid #e4e7eb}' +
 '.wl-devrow.sel{border:2px solid #25b45f;padding:9px 11px}' +
-'.wl-pin{width:90px;padding:7px 9px;font-size:14px;border:1px solid #d0d4d9;border-radius:8px;margin-top:2px}';
+'.wl-pin{width:90px;padding:7px 9px;font-size:14px;border:1px solid #d0d4d9;border-radius:8px;margin-top:2px}' +
+'.wl-grid{display:grid;grid-template-columns:minmax(120px,1fr) minmax(0,2fr);gap:7px 14px;margin-top:10px}' +
+'.wl-key{color:#717780;font-size:12px}.wl-value{font-size:12px;overflow-wrap:anywhere}' +
+'.wl-token{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-top:1px solid #e8eaed}' +
+'.wl-qr{display:block;width:180px;height:180px;margin:12px auto;border:1px solid #d7dadd;border-radius:8px}' +
+'.wl-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}' +
+'@media(max-width:420px){.wl-grid{grid-template-columns:1fr}.wl-key{margin-top:5px}}';
 }
 
 function hm(min) {
@@ -66,7 +104,12 @@ return view.extend({
 	load: function () { return uci.load('wattline'); },
 	render: function () {
 		var token = uci.get('wattline', 'main', 'token') || '';
-		var port = uci.get('wattline', 'main', 'port') || '8377';
+		var port = {
+			httpsEnabled: uci.get('wattline', 'main', 'https_enabled') !== '0',
+			httpsPort: uci.get('wattline', 'main', 'https_port') || '8378',
+			httpEnabled: uci.get('wattline', 'main', 'http_enabled') !== '0',
+			httpPort: uci.get('wattline', 'main', 'port') || '8377'
+		};
 
 		var conn = E('span', { 'class': 'wl-pill' }, _('…'));
 		var dev = E('div', { 'class': 'wl-dev' }, 'Link-Power');
@@ -75,10 +118,11 @@ return view.extend({
 		// connect and after a control action — NOT on every 2s telemetry poll —
 		// so its text inputs keep focus while the user types.
 		var extra = E('div', {});
+		var admin = E('div', {}, E('div', { 'class': 'wl-card' }, E('div', { 'class': 'wl-msg' }, _('Loading device administration…'))));
 		var wrap = E('div', { 'class': 'wl-wrap' }, [
 			E('style', {}, css()),
 			E('div', { 'class': 'wl-head' }, [E('div', {}, [E('div', { 'class': 'wl-title' }, 'Wattline'), dev]), conn]),
-			body, extra
+			body, extra, admin
 		]);
 
 		function act(action) { api(token, port, 'POST', '/device/action', { action: action }).catch(function () {}); }
@@ -208,7 +252,7 @@ return view.extend({
 		function buildPairCard(p) {
 			var busy = p.stage === 'scanning' || p.stage === 'pairing';
 			var kids = [
-				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Pair your Link-Power'))),
+				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Pair Link-Power over BLE'))),
 				E('div', { 'class': 'wl-sub' }, _('Power on the Link-Power, keep it near the router, then scan. Make sure no phone or laptop app is connected to it.'))
 			];
 			var scanBtn = E('button', { 'class': 'wl-btn', style: 'margin-top:12px' },
@@ -263,6 +307,158 @@ return view.extend({
 			return e;
 		}
 		function metric(v, l) { return E('div', { 'class': 'wl-metric' }, [E('b', {}, v), E('span', {}, l)]); }
+
+		/* Router/API administration is intentionally separate from BLE-device
+		   pairing. The bootstrap token is sent only in the Authorization header;
+		   enrollment images are short-lived object URLs and never data/query URIs. */
+		var qrObjectURL = null, qrExpires = '', pairingExpiresAt = null;
+		var countdown = E('span', { 'class': 'wl-pill' }, _('Closed'));
+		function clearQR() {
+			if (qrObjectURL) URL.revokeObjectURL(qrObjectURL);
+			qrObjectURL = null; qrExpires = '';
+		}
+		window.addEventListener('pagehide', clearQR, { once: true });
+
+		function formatDate(value) {
+			if (!value) return _('Never');
+			var date = new Date(value);
+			return isNaN(date.getTime()) ? value : date.toLocaleString();
+		}
+		function rows(items) {
+			var children = [];
+			items.forEach(function (item) {
+				children.push(E('div', { 'class': 'wl-key' }, item[0]));
+				children.push(E('div', { 'class': 'wl-value' }, item[1] == null || item[1] === '' ? '—' : String(item[1])));
+			});
+			return E('div', { 'class': 'wl-grid' }, children);
+		}
+		function adminAction(method, path, payload, confirmText) {
+			if (confirmText && !window.confirm(confirmText)) return Promise.resolve();
+			return api(token, port, method, path, payload).then(function () { refreshAdmin(); })
+				.catch(function (error) { window.alert(error.message); });
+		}
+		function loadQR(image, expiresAt) {
+			if (!expiresAt || (qrObjectURL && qrExpires === expiresAt)) {
+				if (qrObjectURL) image.src = qrObjectURL;
+				return;
+			}
+		apiFetch(token, port, 'GET', '/pairing-mode/qr.png').then(function (response) {
+			if (!response.ok) return canonicalError(response);
+			return response.blob();
+		}).then(function (blob) {
+			clearQR();
+			qrObjectURL = URL.createObjectURL(blob);
+			qrExpires = expiresAt;
+			image.src = qrObjectURL;
+		}).catch(function (error) { image.replaceWith(E('div', { 'class': 'wl-note' }, error.message)); });
+		}
+		function updateCountdown() {
+			if (!pairingExpiresAt) { countdown.textContent = _('Closed'); countdown.className = 'wl-pill'; return; }
+			var seconds = Math.max(0, Math.ceil((pairingExpiresAt.getTime() - Date.now()) / 1000));
+			countdown.textContent = seconds > 0 ? Math.floor(seconds / 60) + ':' + ('0' + (seconds % 60)).slice(-2) : _('Expired');
+			countdown.className = seconds > 0 ? 'wl-pill on' : 'wl-pill';
+		}
+		function renderAdmin(deviceInfo, settingsInfo, tokenInfo, pairInfo) {
+			admin.innerHTML = '';
+			var features = deviceInfo.features || {};
+			var capabilityNames = Object.keys(features).filter(function (key) { return features[key]; })
+				.map(function (key) { return key.replace(/_/g, ' '); }).join(', ') || _('None reported');
+			var active = deviceInfo.commands && deviceInfo.commands.active || [];
+			var identity = E('div', { 'class': 'wl-card' }, [
+				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Device identity'))),
+				rows([
+					[_('Model'), deviceInfo.model], [_('Hardware / variant'), deviceInfo.hardware_revision],
+					[_('Application firmware'), deviceInfo.application_firmware], [_('OTA bootloader'), deviceInfo.ota_firmware],
+					[_('Device ID / MAC'), deviceInfo.id], [_('CID'), deviceInfo.cid],
+					[_('Capabilities'), capabilityNames], [_('Connection state'), deviceInfo.connection && deviceInfo.connection.phase],
+					[_('Pending commands'), active.length ? active.map(function (command) { return command.operation + ' · ' + command.phase; }).join(', ') : _('None')],
+					[_('MagicDNS'), deviceInfo.magic_dns_name], [_('TLS certificate SHA-256'), settingsInfo.tls && settingsInfo.tls.sha256]
+				])
+			]);
+			admin.appendChild(identity);
+
+			var pairKids = [
+				E('div', { 'class': 'wl-cardhead' }, [E('div', { 'class': 't' }, _('Pair an API client')), countdown]),
+				E('div', { 'class': 'wl-sub' }, _('Open a short enrollment window, then scan this QR in a Wattline client. This is separate from Pair Link-Power over BLE.'))
+			];
+			if (settingsInfo.pairing_always_on) pairKids.push(E('div', { 'class': 'wl-note', style: 'color:' + RED },
+				_('Pairing is always available to anyone with the PIN. Disable always-on pairing for a smaller attack window.')));
+			pairingExpiresAt = pairInfo.open && pairInfo.expires_at ? new Date(pairInfo.expires_at) : null;
+			if (pairInfo.open) {
+				pairKids.push(E('div', { style: 'text-align:center;margin-top:10px' }, [
+					E('div', { 'class': 'wl-sub' }, _('Enrollment PIN')),
+					E('div', { style: 'font:600 30px ui-monospace,SFMono-Regular,monospace;letter-spacing:.14em' }, pairInfo.pin)
+				]));
+				var image = E('img', { 'class': 'wl-qr', alt: _('API-client enrollment QR code') });
+				pairKids.push(image);
+				var close = E('button', { 'class': 'wl-btn danger' }, _('Close pairing window'));
+				close.addEventListener('click', function () { adminAction('DELETE', '/pairing-mode', null); });
+				pairKids.push(E('div', { 'class': 'wl-actions' }, close));
+				loadQR(image, pairInfo.expires_at);
+			} else {
+				clearQR();
+				var open = E('button', { 'class': 'wl-btn primary' }, _('Pair an API client'));
+				open.addEventListener('click', function () { adminAction('POST', '/pairing-mode', null); });
+				pairKids.push(E('div', { 'class': 'wl-actions' }, open));
+			}
+			admin.appendChild(E('div', { 'class': 'wl-card' }, pairKids));
+			updateCountdown();
+
+			var tokenKids = [E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('API clients'))),
+				E('div', { 'class': 'wl-sub' }, _('Token secrets are shown only once to the client. This list contains metadata only.'))];
+			(tokenInfo || []).forEach(function (entry) {
+				var actions = E('span', {});
+				if (!entry.bootstrap) {
+					var revoke = E('button', { 'class': 'wl-btn danger' }, _('Revoke'));
+					revoke.addEventListener('click', function () {
+						adminAction('DELETE', '/tokens/' + encodeURIComponent(entry.id), null,
+							_('Revoke this API client token immediately? The client will be disconnected.'));
+					});
+					actions.appendChild(revoke);
+				} else actions.textContent = _('Administrator');
+				tokenKids.push(E('div', { 'class': 'wl-token' }, [
+					E('div', {}, [E('b', {}, entry.label), E('div', { 'class': 'wl-sub' },
+						_('Created') + ' ' + formatDate(entry.created_at) + ' · ' + _('Last seen') + ' ' + formatDate(entry.last_seen_at))]), actions
+				]));
+			});
+			admin.appendChild(E('div', { 'class': 'wl-card' }, tokenKids));
+
+			var securityKids = [
+				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Security and advanced actions'))),
+				E('div', { 'class': 'wl-note' }, settingsInfo.wan_access ? _('WAN access is insecure — use TLS/VPN.') : _('WAN access is off. Remote access remains available through Tailscale or another VPN.'))
+			];
+			var rotate = E('button', { 'class': 'wl-btn' }, _('Rotate TLS certificate'));
+			rotate.addEventListener('click', function () { adminAction('POST', '/tls/rotate', { confirm: true }, _('Rotate TLS certificate? Saved clients must accept and pin the new fingerprint after wattlined restarts.')); });
+			var shutdown = E('button', { 'class': 'wl-btn danger' }, _('Shut down Link-Power'));
+			shutdown.addEventListener('click', function () { adminAction('POST', '/device/shutdown', { confirm: true }, _('Shut down Link-Power? It will disarm reconnect and remain off until physically powered on.')); });
+			securityKids.push(E('div', { 'class': 'wl-actions' }, [rotate, shutdown]));
+			if (settingsInfo.advanced) {
+				var ota = E('button', { 'class': 'wl-btn danger' }, _('Enter OTA mode'));
+				ota.addEventListener('click', function () { adminAction('POST', '/device/ota/enter', { confirm: true }, _('Enter OTA mode? Wattline does not flash firmware; use this only for diagnostics.')); });
+				var running = E('button', { 'class': 'wl-btn danger' }, _('Factory running mode'));
+				running.addEventListener('click', function () {
+					var mode = window.prompt(_('Factory running mode value (device enum):'), '1');
+					if (mode != null && window.confirm(_('Set Factory running mode to ') + mode + '?')) adminAction('PUT', '/device/advanced/running-mode', { mode: Number(mode) });
+				});
+				var blePIN = E('button', { 'class': 'wl-btn danger' }, _('Set BLE PIN'));
+				blePIN.addEventListener('click', function () {
+					var nextPIN = window.prompt(_('New six-digit BLE PIN:'));
+					if (nextPIN != null && window.confirm(_('Set BLE PIN? Existing BLE clients may need to pair again.'))) adminAction('PUT', '/device/advanced/ble-pin', { pin: nextPIN });
+				});
+				securityKids.push(E('div', { 'class': 'wl-actions' }, [ota, running, blePIN]));
+			}
+			admin.appendChild(E('div', { 'class': 'wl-card' }, securityKids));
+		}
+		function refreshAdmin() {
+			Promise.all([
+				api(token, port, 'GET', '/device'), api(token, port, 'GET', '/settings'),
+				api(token, port, 'GET', '/tokens'), api(token, port, 'GET', '/pairing-mode')
+			]).then(function (values) { renderAdmin(values[0], values[1], values[2], values[3]); })
+				.catch(function (error) {
+					admin.innerHTML = '';
+					admin.appendChild(E('div', { 'class': 'wl-card' }, E('div', { 'class': 'wl-msg' }, error.message)));
+				});
+		}
 
 		function refresh() {
 			var myGen = ++gen;
@@ -358,7 +554,10 @@ return view.extend({
 			});
 		}
 		refresh();
+		refreshAdmin();
 		poll.add(refresh, 2);
+		poll.add(refreshAdmin, 10);
+		poll.add(updateCountdown, 1);
 		return wrap;
 	},
 	handleSaveApply: null, handleSave: null, handleReset: null

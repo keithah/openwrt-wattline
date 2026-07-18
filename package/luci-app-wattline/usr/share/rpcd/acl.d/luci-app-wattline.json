@@ -6,7 +6,8 @@
 			"ubus": { "service": ["list"] }
 		},
 		"write": {
-			"uci": ["wattline"]
+			"uci": ["wattline"],
+			"ubus": { "service": ["set"] }
 		}
 	}
 }
