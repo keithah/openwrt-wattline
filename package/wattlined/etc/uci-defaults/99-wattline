@@ -1,9 +1,40 @@
 #!/bin/sh
-# Generate an API token on first install if unset.
-tok="$(uci -q get wattline.main.token)"
-if [ -z "$tok" ]; then
-	newtok="$(head -c 24 /dev/urandom | md5sum | cut -c1-32)"
-	uci set wattline.main.token="$newtok"
-	uci commit wattline
+set -eu
+
+WATTLINE_BIN="${WATTLINE_BIN:-/usr/bin/wattlined}"
+"$WATTLINE_BIN" -init -config /etc/config/wattline
+
+changed=0
+set_default() {
+	key="$1"
+	value="$2"
+	if ! uci -q get "wattline.main.$key" >/dev/null 2>&1; then
+		uci -q set "wattline.main.$key=$value"
+		changed=1
+	fi
+}
+
+set_default http_enabled 1
+set_default http_addr4 0.0.0.0
+set_default http_addr6 ::
+set_default port 8377
+set_default https_enabled 1
+set_default https_addr4 0.0.0.0
+set_default https_addr6 ::
+set_default https_port 8378
+set_default tls_cert /etc/wattline/tls/server.crt
+set_default tls_key /etc/wattline/tls/server.key
+set_default token_store /etc/wattline/tokens.json
+set_default pairing_ttl 5m
+set_default pairing_always_on 0
+set_default advanced 0
+set_default mdns_enabled 1
+set_default wan_access 0
+
+if ! uci -q get wattline.main.mdns_interface >/dev/null 2>&1; then
+	uci -q add_list wattline.main.mdns_interface=br-lan
+	changed=1
 fi
+
+[ "$changed" -eq 0 ] || uci -q commit wattline
 exit 0

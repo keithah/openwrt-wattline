@@ -1,6 +1,10 @@
 #!/bin/sh
-[ -n "$IPKG_INSTROOT" ] || {
+set -e
+[ -n "${IPKG_INSTROOT:-}" ] || {
+	mkdir -p /etc/wattline/tls
+	chmod 0700 /etc/wattline /etc/wattline/tls
 	/etc/uci-defaults/99-wattline
+	/usr/lib/wattline/firewall-sync
 	/etc/init.d/wattlined enable
 	# restart (not start) so an upgrade picks up the new binary and the
 	# freshly-generated token; restart also starts a stopped service.

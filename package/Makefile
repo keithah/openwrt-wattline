@@ -4,7 +4,7 @@
 # An OpenWrt .ipk is a GZIPPED TAR (not an ar/.deb archive) wrapping
 # ./debian-binary + ./control.tar.gz + ./data.tar.gz. The router's opkg
 # (verified on GL-X3000, opkg 2021-06-13) segfaults on the ar/.deb form.
-VERSION := 1.2.0
+VERSION := 1.3.0
 ARCH := aarch64_cortex-a53
 # GNU tar required for --owner/--group/--mode normalization (macOS: brew
 # install gnu-tar); BSD tar lacks --mode and emits pax headers opkg rejects.
@@ -32,6 +32,12 @@ bin:
 define make_ipk
 	rm -rf $(OUT)/stage-$(1)
 	cp -r $(2) $(OUT)/stage-$(1)
+	# Normalize a restrictive or permissive host umask without widening the
+	# credential directories shipped by wattlined.
+	chmod -R u+rwX,go+rX,go-w $(OUT)/stage-$(1)
+	if [ -d $(OUT)/stage-$(1)/etc/wattline ]; then \
+		chmod 0700 $(OUT)/stage-$(1)/etc/wattline $(OUT)/stage-$(1)/etc/wattline/tls; \
+	fi
 	mkdir -p $(OUT)/stage-$(1)/CONTROL
 	# Inject VERSION into the control's Version: field so the .ipk filename,
 	# the control metadata, and the feed index all agree — otherwise opkg sees
@@ -43,9 +49,9 @@ define make_ipk
 	#   (typeflag 'x'/0x78), which macOS BSD tar emits by default.
 	# COPYFILE_DISABLE: keep BSD tar from injecting AppleDouble (._*) entries.
 	COPYFILE_DISABLE=1 $(TAR) --format ustar --owner=0 --group=0 --numeric-owner \
-		--mode='u+rwX,go+rX,go-w' --exclude=CONTROL -czf $(OUT)/data.tar.gz -C $(OUT)/stage-$(1) .
+		--mode='go-w' --exclude=CONTROL -czf $(OUT)/data.tar.gz -C $(OUT)/stage-$(1) .
 	COPYFILE_DISABLE=1 $(TAR) --format ustar --owner=0 --group=0 --numeric-owner \
-		--mode='u+rwX,go+rX,go-w' -czf $(OUT)/control.tar.gz -C $(OUT)/stage-$(1)/CONTROL .
+		--mode='go-w' -czf $(OUT)/control.tar.gz -C $(OUT)/stage-$(1)/CONTROL .
 	echo "2.0" > $(OUT)/debian-binary
 	# Outer wrapper is a gzipped ustar tar (OpenWrt ipk format), NOT ar.
 	( cd $(OUT) && COPYFILE_DISABLE=1 $(TAR) --format ustar -czf $(1)_$(VERSION)_$(3).ipk \
@@ -58,8 +64,13 @@ ipk-wattlined: bin
 	mkdir -p $(OUT)/stage/usr/bin
 	cp $(BIN) $(OUT)/stage/usr/bin/wattlined
 	cp -r wattlined/etc $(OUT)/stage/
+	cp -r wattlined/usr $(OUT)/stage/
 	cp -r wattlined/CONTROL $(OUT)/stage/
-	chmod +x $(OUT)/stage/etc/init.d/wattlined $(OUT)/stage/etc/uci-defaults/99-wattline $(OUT)/stage/CONTROL/postinst
+	mkdir -p $(OUT)/stage/etc/wattline/tls
+	chmod 0700 $(OUT)/stage/etc/wattline $(OUT)/stage/etc/wattline/tls
+	chmod +x $(OUT)/stage/etc/init.d/wattlined $(OUT)/stage/etc/uci-defaults/99-wattline \
+		$(OUT)/stage/etc/hotplug.d/iface/95-wattline $(OUT)/stage/usr/lib/wattline/firewall-sync \
+		$(OUT)/stage/CONTROL/postinst
 	$(call make_ipk,wattlined,$(OUT)/stage,$(ARCH))
 
 ipk-bt:
