@@ -1,292 +1,210 @@
 # openwrt-wattline
 
-Monitor and automate a **PeakDo Link-Power** portable power station (LinkPower 2 /
-LP1 / LP+) from an **OpenWrt / GL.iNet router**, over Bluetooth LE.
+`wattlined` connects an OpenWrt router to a PeakDo Link-Power portable power
+station over Bluetooth LE. It exposes local HTTP and HTTPS APIs, keeps telemetry,
+runs rules and webhooks, publishes LAN discovery, and ships both LuCI and native
+GL.iNet administration panels. It sends no telemetry off-box and has no cloud
+dependency.
 
-`wattlined` is a small static Go daemon that speaks the Link-Power's BLE (GATT)
-protocol and runs configurable automation rules — *"shut down after 10 min of no
-input power"*, low-battery webhooks, scheduled actions — with no cloud and no
-account. It exposes a local HTTP API (telemetry, rules, manual control) and ships
-two web UIs: a **native GL.iNet admin-panel app** (under Applications) and a
-**LuCI** app.
+The project targets the GL.iNet Spitz AX (GL-X3000) and other
+`aarch64_cortex-a53` OpenWrt routers. Most routers require a USB Bluetooth
+adapter. CSR8510 adapters work with the stock driver; RTL8761B adapters need the
+kernel-module and firmware work described in [`dongle-rtl8761b/`](dongle-rtl8761b/).
 
-Built for the GL.iNet Spitz AX (GL-X3000) but portable to any aarch64 OpenWrt
-target. The BLE protocol reference is in [`docs/API.md`](docs/API.md)
-(reverse-engineered and live-verified).
+The authoritative client contract is [`docs/api.md`](docs/api.md). The separate
+[`docs/API.md`](docs/API.md) is the read-only Link-Power BLE protocol reference;
+it is not a REST API.
 
-> **Bluetooth adapter:** most GL routers have no onboard BLE — you need a USB
-> dongle. Use a **CSR8510** adapter (TP-Link **UB400** / any "CSR 4.0" dongle):
-> it works with the stock kernel `btusb`, no firmware needed. An **RTL8761B**
-> dongle (TP-Link **UB500**) does **not** work out of the box on the GL-X3000's
-> 5.4 kernel — see [`dongle-rtl8761b/`](dongle-rtl8761b/) if you're stuck with one.
+## Build the packages
 
-## Building the OpenWrt packages
-
-The packages are built without the full OpenWrt SDK — a plain Go
-cross-compile plus a hand-rolled `.ipk`. An OpenWrt `.ipk` is a **gzipped
-tar** of `debian-binary`, `control.tar.gz`, `data.tar.gz` (not an ar/.deb
-archive — see the format note below).
+The host needs Go, gzip, and GNU tar (`gtar` on macOS):
 
 ```sh
-make -C package all
-ls -la package/out/*.ipk
+make -C package clean all
+package/check-ipk-metadata.sh package/out/*.ipk
 ```
 
-This produces:
+The default version is `1.3.0`. Override it consistently with, for example,
+`make -C package VERSION=1.3.1 all`. A build produces:
 
-- `package/out/wattlined_1.0.0_aarch64_cortex-a53.ipk` — the daemon, procd
-  init script, UCI defaults, and a uci-defaults token generator.
-- `package/out/wattline-bt_1.0.0_all.ipk` — a metapackage pulling in
-  `bluez-daemon`, `dbus`, `kmod-bluetooth` (the Bluetooth stack for a USB BLE
-  dongle on routers without onboard BLE, e.g. the Spitz AX). `kmod-bluetooth`
-  ships `btusb.ko`; there is no separate `kmod-btusb` in the GL feed.
-- `package/out/luci-app-wattline_1.0.0_all.ipk` — the LuCI web UI (see below).
-- `package/out/gl-app-wattline_1.0.0_all.ipk` — native GL.iNet admin-panel app
-  (adds an entry under **Applications** in the GL UI; see Web UI below).
+- `wattlined_VERSION_aarch64_cortex-a53.ipk`: daemon, procd service,
+  first-boot initialization, firewall reconciliation, and interface hotplug;
+- `wattline-bt_VERSION_all.ipk`: BlueZ and kernel Bluetooth dependencies;
+- `luci-app-wattline_VERSION_all.ipk`: LuCI panel; and
+- `gl-app-wattline_VERSION_all.ipk`: native GL.iNet panel.
 
-`ARCH` in `package/Makefile` targets `aarch64_cortex-a53` (GL.iNet Spitz AX /
-similar aarch64 OpenWrt targets). Adjust it if you're packaging for a
-different target.
+These OpenWrt packages are gzip-compressed outer tar archives containing
+`debian-binary`, `control.tar.gz`, and `data.tar.gz`. Both the outer and inner
+archives use ustar. They are deliberately not ar/deb archives: the GL-X3000
+opkg version rejects pax headers and has crashed on ar-form packages.
 
-### `.ipk` format (verified on-target)
+## Install or upgrade a router
 
-Two things that only surface on the real router (GL-X3000, opkg 2021-06-13):
-
-- The outer wrapper must be a **gzipped tar**, not an `ar`/.deb archive —
-  opkg **segfaults** on ar-format ipks. The Makefile uses `tar czf`.
-- Tar members must be **ustar** format (`--format ustar`); opkg rejects the
-  pax extended headers macOS BSD tar emits by default (`Unknown typeflag
-  0x78`). All package paths are well under ustar's 100-char limit.
-
-When iterating on the router, note `opkg install` **skips a same-version
-reinstall** — use `opkg install --force-reinstall` (or bump the version) to
-load a rebuilt binary.
-
-## Install order on the router
-
-`wattlined` depends on `wattline-bt`, so install the Bluetooth metapackage
-first:
+Dropbear may not provide an scp server, so stream the files over SSH:
 
 ```sh
-# scp isn't available on OpenWrt dropbear; pipe over ssh instead
-for f in package/out/*.ipk; do ssh root@192.168.8.1 "cat > /tmp/$(basename $f)" < "$f"; done
+for f in package/out/*.ipk; do
+  ssh root@192.168.8.1 "cat > /tmp/$(basename "$f")" < "$f"
+done
+
 ssh root@192.168.8.1 'opkg update && opkg install \
-  /tmp/wattline-bt_1.0.0_all.ipk \
-  /tmp/wattlined_1.0.0_aarch64_cortex-a53.ipk \
-  /tmp/luci-app-wattline_1.0.0_all.ipk'
+  /tmp/wattline-bt_1.3.0_all.ipk \
+  /tmp/wattlined_1.3.0_aarch64_cortex-a53.ipk \
+  /tmp/luci-app-wattline_1.3.0_all.ipk \
+  /tmp/gl-app-wattline_1.3.0_all.ipk'
 ```
 
-With feed access, opkg pulls the bluez stack automatically; installs clean
-with no `--force` flags (verified on a Spitz AX). `wattlined`'s `postinst`
-runs `/etc/uci-defaults/99-wattline` (generates a random API token into
-`/etc/config/wattline` if unset), then enables and **restart**s the procd
-service (restart, so an upgrade picks up the new binary and token).
+For a rebuilt package with the same version, use
+`opkg install --force-reinstall /tmp/PACKAGE.ipk`; otherwise opkg skips it.
+Release builds should bump `VERSION`. `make -C package VERSION=1.3.1 feed`
+also creates `Packages` and `Packages.gz` for a normal opkg feed.
 
-### Updating without a manual reinstall (opkg feed)
-
-Copying ipks by hand is only for first-time/dev installs. For updates, host
-the packages as an **opkg feed** (an HTTP dir with a `Packages.gz` index) —
-the same mechanism GL's own apps and the unofficial Speedify use — then the
-router upgrades with `opkg upgrade` (or the GL **Plug-ins** page).
+Installation creates an admin bootstrap token, a managed-token store, and an
+ECDSA P-256 self-signed certificate, then enables and restarts the daemon.
+Private credential directories and files are mode `0700`/`0600`. Confirm startup:
 
 ```sh
-# Build all ipks + the feed index. BUMP THE VERSION each release so opkg
-# detects an upgrade (the Version: field, filename, and index must all match —
-# the Makefile injects VERSION into all three).
-make -C package VERSION=1.0.1 feed
-# → package/out/{*.ipk, Packages, Packages.gz}
+ssh root@192.168.8.1 '/etc/init.d/wattlined status; logread -e wattline | tail -n 50'
 ```
 
-Host `package/out/` somewhere the router can reach (GitHub Pages/Releases, a
-VPS, etc.), then register it once on the router:
+## Configuration
 
-```sh
-echo 'src/gz wattline https://your-host/wattline-feed' >> /etc/opkg/customfeeds.conf
-opkg update
-opkg install wattlined luci-app-wattline   # first time (pulls deps by name)
-opkg upgrade wattlined luci-app-wattline    # thereafter — no reinstall
-```
+The main UCI section is `/etc/config/wattline`:
 
-Verified on a GL-X3000: bumping to 1.0.1 and `opkg upgrade` moved the install
-from 1.0.0 → 1.0.1 with no `--force` flag, and `postinst` restarted the daemon
-onto the new binary. (Note: `opkg install` of a *same-version* local ipk is a
-no-op — use `--force-reinstall` when iterating on an unchanged version, or just
-bump `VERSION`.)
-
-### USB BLE dongle requirement
-
-Most GL.iNet routers (including the Spitz AX / GL-X3000) have no onboard
-Bluetooth radio — you need a USB BLE dongle. `wattline-bt` pulls the driver
-stack (`kmod-bluetooth` ships `btusb.ko`). **Use a generic CSR8510-class
-dongle:** the GL-X3000 kernel builds `btusb` but has the RTL/BCM/MTK btusb
-sub-drivers disabled (`CONFIG_BT_HCIBTUSB_RTL` etc. unset), so an RTL8761B
-dongle likely won't work. After plugging in, confirm the adapter with
-`hciconfig` / `bluetoothctl list`; the daemon logs `adapter /org/bluez/hci0
-does not exist` and retries until one appears.
-
-## Config keys (`/etc/config/wattline`)
-
-```
+```text
 config wattline 'main'
-	option device_mac ''      # BLE MAC of the Link-Power; blank = scan by name
-	option pin '020555'       # BLE pairing PIN
-	option port '8377'        # HTTP API port
-	option lan_api '1'        # 1 = bind 0.0.0.0 (LAN-reachable); 0 = 127.0.0.1 only
-	option token ''           # bearer token; auto-generated on first install if blank
-
-config rule 'no_input_shutdown'
-	option enabled '0'
-	option condition 'input_power'
-	option state 'absent'
-	option hold '10m'
-	list action 'webhook:https://ntfy.sh/CHANGME?msg=input+lost'
-	list action 'shutdown'
-	option confirm_shutdown '1'
+	option device_mac ''
+	option pin '020555'
+	option token ''
+	option http_enabled '1'
+	option http_addr4 '0.0.0.0'
+	option http_addr6 '::'
+	option port '8377'
+	option https_enabled '1'
+	option https_addr4 '0.0.0.0'
+	option https_addr6 '::'
+	option https_port '8378'
+	option tls_cert '/etc/wattline/tls/server.crt'
+	option tls_key '/etc/wattline/tls/server.key'
+	option token_store '/etc/wattline/tokens.json'
+	option pairing_ttl '5m'
+	option pairing_always_on '0'
+	option advanced '0'
+	option mdns_enabled '1'
+	list mdns_interface 'br-lan'
+	option wan_access '0'
 ```
 
-Rules can also be managed live through the API (see below); edits made via
-the API are persisted back to this UCI file, and the running daemon is
-reloaded with `SIGHUP` (procd's `service_triggers`/`reload_service` wire this
-up automatically on `uci commit wattline` + `ubus call service reload`, or
-manually via `/etc/init.d/wattlined reload`).
+`pin` is the six-digit Link-Power BLE PIN (returned as `ble_pin` by the settings
+API). `token` is the
+non-revocable bootstrap administrator secret. The first-boot initializer fills
+blank credentials and missing modern keys without replacing existing values.
+Legacy `port` and `lan_api` continue to load; new installations should use the
+listener keys above.
 
-## API
+HTTP and HTTPS bind IPv4 and IPv6 independently. Both default to all addresses,
+which makes LAN, `tailscale0`, and other WireGuard/VPN interfaces reachable.
+That does not open the OpenWrt WAN firewall. `wan_access=0` is the safe default.
+Setting it to `1` installs TCP WAN rules for enabled listeners and logs
+`insecure — use TLS/VPN`; direct plain-HTTP WAN exposure is unsafe.
 
-All endpoints require `Authorization: Bearer <token>`, where `<token>` is
-`uci get wattline.main.token` (auto-generated on install; rotate it by
-setting `option token` and running `uci commit wattline` + a service
-restart).
+Apply UCI changes with:
 
 ```sh
-TOKEN=$(ssh root@192.168.8.1 uci get wattline.main.token)
-
-# Live telemetry (battery %, watts in/out, port states, connection status)
-curl -s -H "Authorization: Bearer $TOKEN" http://192.168.8.1:8377/api/v1/telemetry
-
-# Daemon/BLE session status
-curl -s -H "Authorization: Bearer $TOKEN" http://192.168.8.1:8377/api/v1/status
-
-# Recent telemetry history / rule-fire event log
-curl -s -H "Authorization: Bearer $TOKEN" http://192.168.8.1:8377/api/v1/history
-curl -s -H "Authorization: Bearer $TOKEN" http://192.168.8.1:8377/api/v1/events
-
-# Rules: list, create, update, delete
-curl -s -H "Authorization: Bearer $TOKEN" http://192.168.8.1:8377/api/v1/rules
-curl -s -H "Authorization: Bearer $TOKEN" -X POST -d @rule.json \
-	http://192.168.8.1:8377/api/v1/rules
-curl -s -H "Authorization: Bearer $TOKEN" -X PUT -d @rule.json \
-	http://192.168.8.1:8377/api/v1/rules/no_input_shutdown
-curl -s -H "Authorization: Bearer $TOKEN" -X DELETE \
-	http://192.168.8.1:8377/api/v1/rules/no_input_shutdown
-
-# Manual device control (DC output, Type-C output, bypass, restart, shutdown)
-curl -s -H "Authorization: Bearer $TOKEN" -X POST \
-	-d '{"action":"shutdown"}' http://192.168.8.1:8377/api/v1/device/action
-
-# Device settings (require a live connection; 503 when disconnected)
-# USB-C output power limit — read all types, set output cap, or clear to default
-curl -s -H "Authorization: Bearer $TOKEN" \
-	http://192.168.8.1:8377/api/v1/device/usbc-limit
-curl -s -H "Authorization: Bearer $TOKEN" -X POST \
-	-d '{"type":"output","watts":100}' http://192.168.8.1:8377/api/v1/device/usbc-limit
-curl -s -H "Authorization: Bearer $TOKEN" -X POST \
-	-d '{"type":"output","clear":true}' http://192.168.8.1:8377/api/v1/device/usbc-limit
-# DC bypass engage-voltage threshold
-curl -s -H "Authorization: Bearer $TOKEN" \
-	http://192.168.8.1:8377/api/v1/device/bypass-threshold
-curl -s -H "Authorization: Bearer $TOKEN" -X POST \
-	-d '{"volts":19.6}' http://192.168.8.1:8377/api/v1/device/bypass-threshold
-# On-device schedules (timers that fire even when the router/BLE is down)
-curl -s -H "Authorization: Bearer $TOKEN" \
-	http://192.168.8.1:8377/api/v1/device/schedules
-# add: type 0=once,1=daily,2=weekly,3=monthly; action 0=off,1=on (omit id to add)
-curl -s -H "Authorization: Bearer $TOKEN" -X POST \
-	-d '{"type":1,"hour":22,"minute":30,"action":0}' \
-	http://192.168.8.1:8377/api/v1/device/schedules
-curl -s -H "Authorization: Bearer $TOKEN" -X DELETE \
-	http://192.168.8.1:8377/api/v1/device/schedules/0
-
-# Pairing (first-run setup; also driven by the GL panel / LuCI UI)
-curl -s -H "Authorization: Bearer $TOKEN" -X POST \
-	http://192.168.8.1:8377/api/v1/pairing/scan            # async, ~12 s
-curl -s -H "Authorization: Bearer $TOKEN" \
-	http://192.168.8.1:8377/api/v1/pairing/status          # stage + devices found
-curl -s -H "Authorization: Bearer $TOKEN" -X POST \
-	-d '{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}' \
-	http://192.168.8.1:8377/api/v1/pairing/pair            # async pair + trust
-curl -s -H "Authorization: Bearer $TOKEN" -X DELETE \
-	http://192.168.8.1:8377/api/v1/pairing/device/DC:04:5A:EB:72:2B
+uci commit wattline
+/etc/init.d/wattlined reload
 ```
 
-Pairing runs asynchronously: poll `/pairing/status` for
-`idle|scanning|pairing|paired|error`. While a scan or pair is in flight the
-daemon pauses its auto-reconnect loop (the Link-Power accepts one BLE central
-at a time). On success the MAC and PIN are persisted to `/etc/config/wattline`
-and the connector reconnects; treat `/api/v1/status` reporting
-`"connected": true` as the real success signal (see
-[`docs/pairing-design.md`](docs/pairing-design.md)).
+Rule-only changes use SIGHUP and retain the BLE link. A changed main section is
+restarted so listeners, authentication, discovery, and firewall policy cannot
+drift. The settings API reports `restart_required` for changes that need this.
 
-If `lan_api` is `1`, these are reachable from any LAN host at the router's
-address; set it to `0` to restrict the API to `localhost` on the router.
+## Connect and enroll clients
 
-## Web UI
-
-Two UIs ship, both thin clients over the API above:
-
-- **GL.iNet admin panel** (`gl-app-wattline`) — a native entry under
-  **Applications → Wattline** in the GL UI (`http://<router>`), matching how
-  Speedify/Tailscale integrate. Loads with the panel session (no separate
-  login, no iframe): the view calls an oui-httpd RPC for the API token, then
-  polls the daemon directly. GL's oui frontend is closed-source, so this was
-  reverse-engineered — the full mechanism is in
-  [`docs/gl-panel-integration.md`](docs/gl-panel-integration.md).
-- **LuCI** (`luci-app-wattline`) — open LuCI (System → Advanced Settings, or
-  `http://<router>/cgi-bin/luci/`) → **Services → Wattline** for a live Status
-  page, Rules editor, and Settings.
-
-## Local/macOS development
-
-The BLE transport (`internal/ble/tinygo.go`, using `tinygo.org/x/bluetooth`
-over BlueZ/D-Bus) and the BlueZ pairing agent (`internal/ble/agent.go`) are
-built only under `//go:build linux` — this is the production path on
-OpenWrt. On non-Linux hosts, `internal/ble/unsupported.go` is compiled in
-instead and returns an explicit "BLE transport is Linux/BlueZ only" error
-from `ScanAndConnect`, so `go run ./cmd/wattlined` on macOS today will start
-the HTTP API and rules engine but will not connect to a real Link-Power over
-CoreBluetooth.
-
-Everything above the transport boundary (config/UCI parsing, the rules
-engine, the HTTP API, and device actions) is plain Go and fully testable on
-macOS:
+Read the bootstrap token on the router and test both transports:
 
 ```sh
-cd router
-go build ./...
-go test ./...
-go run ./cmd/wattlined -config ./testdata/wattline   # API + rules only, no BLE
+TOKEN=$(ssh root@192.168.8.1 'uci -q get wattline.main.token')
+ssh root@192.168.8.1 'cat /etc/wattline/tls/server.crt' > wattline-server.crt
+curl -H "Authorization: Bearer $TOKEN" \
+  http://192.168.8.1:8377/api/v1/device
+curl --cacert wattline-server.crt -H "Authorization: Bearer $TOKEN" \
+  https://192.168.8.1:8378/api/v1/device
 ```
 
-To exercise real device I/O against a Link-Power from a macOS dev machine,
-either:
-
-- run `go run ./cmd/wattlined` on a Linux host/VM/container with a BLE
-  adapter and BlueZ (`bluetoothd` running, adapter powered), or
-- extend `internal/ble/tinygo.go`'s build tag to include `darwin` — the
-  underlying `tinygo.org/x/bluetooth` library does support a CoreBluetooth
-  backend on macOS — and validate `RegisterPairingAgent`'s BlueZ-specific
-  D-Bus calls are gated appropriately for that platform before relying on it
-  for anything beyond scan/connect.
-
-## Verifying on hardware (Spitz AX)
-
-See `package/` install steps above, then:
+For app enrollment, an administrator opens pairing mode and displays its PIN or
+QR. Each client exchanges the short-lived PIN for its own token:
 
 ```sh
-ssh root@192.168.8.1 'logread -e wattline | tail'
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://192.168.8.1:8377/api/v1/pairing-mode
+curl -H "Authorization: Bearer $TOKEN" \
+  http://192.168.8.1:8377/api/v1/pairing-mode/qr.png > wattline-pair.png
+curl -H 'Content-Type: application/json' \
+  -d '{"pin":"123456","label":"Keith iPhone"}' \
+  http://192.168.8.1:8377/api/v1/pair
 ```
 
-Expect log lines for adapter enable, scan, connect, and identity handshake.
-Enable the `no_input_shutdown` rule (with a real webhook URL), unplug input
-power, and confirm the webhook fires and the unit shuts down after the
-configured `hold` (10m default); confirm plugging PD input back in wakes the
-unit.
+The pair response returns a new `wlt_...` client token only once, the HTTP/HTTPS
+base URLs, MagicDNS name when available, and the DER-certificate SHA-256 for
+pinning. List metadata or revoke a managed token with admin authentication:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" http://192.168.8.1:8377/api/v1/tokens
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  http://192.168.8.1:8377/api/v1/tokens/TOKEN_ID
+```
+
+`pairing_always_on=1` removes the explicit UI-button requirement but leaves an
+enrollment PIN continuously available and rotating. Use it only when that local
+attack-surface tradeoff is acceptable. It does not expose the BLE PIN.
+
+## Discovery and VPN reachability
+
+After the BLE identity is known, the daemon advertises `_wattline._tcp` on the
+configured LAN interfaces. Its TXT record includes API/version, device MAC,
+model, CID, features, authentication mode, and TLS fingerprint. It never
+advertises on WAN or tunnel interfaces. Browse it from a LAN host with:
+
+```sh
+dns-sd -B _wattline._tcp local
+avahi-browse -rt _wattline._tcp
+```
+
+mDNS is LAN-only. Remote clients save their issued token and use the router's
+Tailscale MagicDNS name or another VPN address. The mDNS `id` correlates the LAN
+advertisement with the same remote device. Binding all interfaces is sufficient
+for Tailscale and ordinary WireGuard interfaces when their own ACL/firewall
+policy permits the connection. `tailscale serve` is optional, not required.
+
+## BLE-device pairing and operation
+
+The LuCI and GL panels can scan, pair, trust, and remove a Link-Power. Pairing is
+asynchronous: poll `GET /api/v1/pairing/status` until `paired` or `error`, then
+use `GET /api/v1/device` as the authoritative connection result. The default BLE
+PIN is `020555`; it is distinct from the short-lived API-client pairing PIN.
+
+Both panels also expose identity, controls, pairing PIN/QR, token revocation,
+listener/TLS/reachability policy, and advanced settings. Rules, webhooks,
+telemetry history, and SSE remain available through the versioned API.
+
+The API exposes OTA mode INFO plus enter and exit operations. It does **not**
+download, erase, program, verify, upload, or flash firmware.
+
+## Development and verification
+
+Transport-independent code runs on any Go development host:
+
+```sh
+go test -count=1 ./...
+go test -race -count=1 ./internal/state/ ./internal/ble/ ./internal/control/ \
+  ./internal/auth/ ./internal/api/ ./internal/server/ ./internal/discovery/
+go vet ./...
+```
+
+Production BLE uses Linux/BlueZ. Non-Linux builds use the explicit unsupported
+transport, so a macOS daemon can exercise API/rules behavior but cannot validate
+real Link-Power traffic. Follow the
+[`GL-X3000 verification checklist`](docs/gl-x3000-verification.md) for the
+remaining on-target and real-BLE checks. No item in that checklist is considered
+verified merely because unit tests pass.

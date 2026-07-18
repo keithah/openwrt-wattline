@@ -7,7 +7,8 @@ All JSON examples are normative. Unless an endpoint explicitly says otherwise,
 requests and replies use `application/json`, unknown request fields and trailing
 JSON values are rejected, timestamps are RFC 3339 UTC strings, and an omitted
 request body means zero bytes (not `{}`). Boolean control mutations return the
-device-observed value, not an optimistic echo.
+device-observed value, not an optimistic echo. JSON examples omit the final LF
+that Go's JSON encoder appends to every JSON response body.
 
 ## Versioning and base URLs
 
@@ -33,7 +34,8 @@ Access-Control-Max-Age: 600
 ```
 
 Preflight performs no BLE I/O. Actual requests still require bearer
-authentication except public `POST /api/v1/pair`.
+authentication except public `POST /api/v1/pair`; successful and error responses
+also carry the four `Access-Control-*` headers above.
 
 ## Authentication roles
 
@@ -142,8 +144,9 @@ Each command object is exactly:
 ```
 
 `phase` is `pending`, `confirmed`, `timeout`, or `failed`. `recent` retains at
-most 32 terminal records. Endpoint-specific errors: only authentication errors.
-BLE I/O: none; this is cached state and remains available while disconnected.
+most 32 terminal records. Endpoint-specific errors: `400 invalid_request` for a
+nonempty body. BLE I/O: none; this is cached state and remains available while
+disconnected.
 
 ## Telemetry, history, and SSE
 
@@ -180,6 +183,8 @@ data as that Snapshot schema evolves additively).
 
 ```text
 Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
 
 data: {complete snapshot JSON}\n
 \n
@@ -281,7 +286,8 @@ Role: admin. Request `{"volts":19.6}`. Success `200 OK` is the observed result:
 
 Role: client. Request: none. Success `200 OK`:
 `{"status":"restarting","reconnect":"armed"}`. Errors:
-`409 capability_unsupported`, `503 device_disconnected`,
+`400 invalid_request` for a nonempty body, `409 capability_unsupported`,
+`503 device_disconnected`,
 `502 ble_operation_failed` only when failure is not the expected disconnect.
 BLE I/O: restart command; disconnect (including a write error caused by it) is
 success and automatic reconnect is armed for approximately 15 seconds later.
@@ -316,7 +322,8 @@ weekly uses bits 1=Monday through 7=Sunday, and monthly uses bits 1=day 1 throug
 
 Role: client. Request: none. Success `200 OK`:
 `[{"id":3,"status":1,"type":2,"hour":6,"minute":30,"repeat":62,"action":1}]`
-(empty is `[]`). Errors: `409 capability_unsupported`,
+(empty is `[]`). Errors: `400 invalid_request` for a nonempty body,
+`409 capability_unsupported`,
 `503 device_disconnected`, `502 ble_operation_failed`. BLE I/O: list then GET
 each timer under one serialized ownership.
 
@@ -361,6 +368,8 @@ support is tested before administrative enablement: unavailable returns
 `409 capability_unsupported`; supported but disabled returns
 `403 advanced_disabled`. Other shared errors are `403 admin_required`,
 `503 device_disconnected`, and `502 ble_operation_failed` when BLE I/O occurs.
+Malformed JSON, an invalid value, or a nonempty body on a bodyless route returns
+`400 invalid_request`.
 
 ### `GET /api/v1/device/ota`
 
@@ -436,7 +445,8 @@ omitted):
 Conditions are `input_power` (`state`: `present|absent`), `battery_level`
 (`op`: `below|above`, `percent`), `port_power` (`port`: `dc|usbc`, `op`,
 `watts`), and `schedule` (`cron`, five fields). Durations are Go JSON duration
-nanoseconds. Actions are `dc_on`, `dc_off`, `usbc_on`, `usbc_off`, `bypass_on`,
+nanoseconds. `repeat_every` is optional and omitted when zero. Actions are
+`dc_on`, `dc_off`, `usbc_on`, `usbc_off`, `bypass_on`,
 `bypass_off`, `restart`, `shutdown`, and `webhook:URL`. Shutdown requires
 `confirm_shutdown:true`.
 
@@ -458,46 +468,61 @@ These authenticated routes pair the router to a Link-Power over BlueZ. They use
 
 | Endpoint | Role | Request | Success | Endpoint-specific errors | BLE I/O |
 |---|---|---|---|---|---|
-| `GET /api/v1/pairing/status` | client | none | `200 {"stage":"idle","devices":[]}`; optional `error`, `target`; device entries are `{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}` | `409 capability_unsupported` when BlueZ pairing is unavailable | none |
-| `POST /api/v1/pairing/scan` | client | none | `202 {"status":"scanning"}` | `409 operation_in_progress`, `409 capability_unsupported`, `502 ble_operation_failed` | asynchronous BlueZ scan |
+| `GET /api/v1/pairing/status` | client | none | `200 {"stage":"idle","devices":[]}`; optional `error`, `target`; device entries are `{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}` | `400 invalid_request` for a nonempty body; `409 capability_unsupported` when BlueZ pairing is unavailable | none |
+| `POST /api/v1/pairing/scan` | client | none | `202 {"status":"scanning"}` | `400 invalid_request` for a nonempty body; `409 operation_in_progress`, `409 capability_unsupported`, `502 ble_operation_failed` | asynchronous BlueZ scan |
 | `POST /api/v1/pairing/pair` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` (`pin` may be empty to retain configured PIN) | `202 {"status":"pairing"}` | `400 invalid_request`, `409 operation_in_progress`, `409 capability_unsupported` | asynchronous BlueZ pair/trust and BLE reconnect proof; asynchronous failure appears in status |
-| `DELETE /api/v1/pairing/device/{mac}` | client | none | `200 {"status":"removed"}` | `400 invalid_request`, `409 capability_unsupported`, `502 ble_operation_failed` | BlueZ unpair, not a device command |
+| `DELETE /api/v1/pairing/device/{mac}` | client | none | `200 {"status":"removed"}` | `400 invalid_request` for an invalid MAC or nonempty body, `409 capability_unsupported`, `502 ble_operation_failed` | BlueZ unpair, not a device command |
 
 ## API-client pairing
 
 `pairing_pin` is a random, zero-padded six-digit enrollment PIN. Opening mode
 defaults to a five-minute TTL. `pairing_always_on=1` keeps enrollment available
-but rotates the PIN every five minutes. Per-source and global failure limits
-apply. No pairing status or log exposes a PIN to non-admins.
+but rotates the PIN at the configured TTL. A valid PIN may enroll multiple
+clients while its window is open; every exchange issues a distinct token.
+Failures are limited to five per source IP and twenty globally per minute;
+proxy headers do not override the TCP source. Wrong, expired, closed,
+rate-limited, and source-capacity failures are indistinguishable. No pairing
+status or log exposes a PIN to non-admins.
 
 ### `POST /api/v1/pair`
 
-Role: public. Request `{"pin":"123456","label":"Keith's iPhone"}`. Success
+Role: public. Request `{"pin":"123456","label":"Keith's iPhone"}`. `label`
+is nonempty valid UTF-8, at most 128 bytes, has no leading/trailing whitespace,
+and contains no control characters. Success
 `201 Created`; this is the one and only return of the 256-bit secret:
 
 ```json
 {"token":"wlt_7dd64d22b0c14e7bb86af967b63835f9f971b4234e83277b646d58e184a44af5","token_metadata":{"id":"7dd64d22b0c14e7b","label":"Keith's iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false},"device_id":"DC:04:5A:EB:72:2B","base_urls":{"https":"https://wattline.lan:8378/api/v1","http":"http://wattline.lan:8377/api/v1"},"tls_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","magic_dns_name":"wattline.example.ts.net"}
 ```
 
-Errors: `400 invalid_request`, `401 invalid_or_expired_pin`. BLE I/O: none.
+`base_urls` contains only enabled listeners. `tls_sha256` is the served
+certificate's lowercase DER SHA-256, or an empty string when HTTPS is disabled;
+`magic_dns_name` is empty when Tailscale MagicDNS cannot be resolved.
+
+Errors: `400 invalid_request`, `401 invalid_or_expired_pin`, and
+`500 internal_error` when enrollment persistence or connection metadata is
+unavailable. BLE I/O: none.
 
 ### `GET /api/v1/pairing-mode`
 
 Role: admin. Request: none. Success `200 OK`:
 `{"open":true,"expires_at":"2026-07-17T20:05:00Z","pin":"123456"}`. When
 closed: `{"open":false,"expires_at":"0001-01-01T00:00:00Z"}` (PIN omitted).
-Errors: authentication/role only. BLE I/O: none.
+Errors: `400 invalid_request` for a nonempty body, authentication/role errors,
+or `500 internal_error` if pairing administration is unavailable. BLE I/O: none.
 
 ### `POST /api/v1/pairing-mode`
 
 Role: admin. Request: none. Success `200 OK`:
 `{"open":true,"expires_at":"2026-07-17T20:05:00Z","pin":"123456"}`. Errors:
-authentication/role only. BLE I/O: none.
+`400 invalid_request` for a nonempty body, authentication/role errors, or
+`500 internal_error` if pairing administration is unavailable. BLE I/O: none.
 
 ### `DELETE /api/v1/pairing-mode`
 
 Role: admin. Request: none. Success `200 OK`: `{"open":false}`. Errors:
-authentication/role only. BLE I/O: none.
+`400 invalid_request` for a nonempty body, authentication/role errors, or
+`500 internal_error` if pairing administration is unavailable. BLE I/O: none.
 
 ### `GET /api/v1/pairing-mode/qr.png`
 
@@ -505,7 +530,8 @@ Role: admin. Request: none and no query PIN is accepted. Success `200 OK` is a
 PNG encoding the current QR payload, with `Content-Type: image/png` and
 `Cache-Control: no-store`. Errors: `400 invalid_request` for any query PIN,
 `409 capability_unsupported` when pairing mode is closed, plus auth/role errors.
-BLE I/O: none.
+An unavailable pairing manager or connection metadata returns
+`500 internal_error`. BLE I/O: none.
 
 ## Tokens
 
@@ -517,18 +543,21 @@ Role: admin. Request: none. Success `200 OK` returns metadata only:
 [{"id":"bootstrap","label":"Bootstrap administrator","created_at":"2026-07-17T19:00:00Z","last_seen_at":"2026-07-17T20:00:00Z","bootstrap":true},{"id":"7dd64d22b0c14e7b","label":"Keith's iPhone","created_at":"2026-07-17T20:00:00Z","last_seen_at":null,"bootstrap":false}]
 ```
 
-No token secret or hash is returned. Errors: auth/role only. BLE I/O: none.
+No token secret or hash is returned. Errors: `400 invalid_request` for a
+nonempty body, plus auth/role errors. BLE I/O: none.
 
 ### `DELETE /api/v1/tokens/{id}`
 
 Role: admin. Request: none. Success `200 OK`:
 `{"revoked":"7dd64d22b0c14e7b"}`; revocation is immediate. Errors:
-`400 invalid_request` for ID `bootstrap`, `404 not_found`, plus auth/role errors.
-BLE I/O: none.
+`400 invalid_request` for ID `bootstrap`, an empty ID, or a nonempty body;
+`404 not_found`; `500 internal_error` on persistence failure; plus auth/role
+errors. BLE I/O: none.
 
 Managed secrets are random 256-bit values. The mode-`0600` token store defaults
 to `/etc/wattline/tokens.json` and contains IDs, labels, timestamps, and lowercase
-SHA-256 secret hashes only. Last-seen persistence is coalesced to limit flash wear.
+SHA-256 secret hashes only. Authentication updates last-seen in memory;
+persistence is coalesced to at most once per hour to limit flash wear.
 
 ## Settings and TLS
 
@@ -540,8 +569,9 @@ Role: admin. Request: none. Success `200 OK`:
 {"http":{"enabled":true,"addr4":"0.0.0.0","addr6":"::","port":8377},"https":{"enabled":true,"addr4":"0.0.0.0","addr6":"::","port":8378},"tls":{"cert":"/etc/wattline/tls/server.crt","key":"/etc/wattline/tls/server.key","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"token_store":"/etc/wattline/tokens.json","pairing_ttl":"5m0s","pairing_always_on":false,"advanced":false,"mdns":{"enabled":true,"interfaces":["br-lan"]},"wan_access":false,"ble_pin":"020555"}
 ```
 
-Bearer secrets and private-key bytes are never included. Errors: auth/role only.
-BLE I/O: none.
+Bearer secrets and private-key bytes are never included. Errors:
+`400 invalid_request` for a nonempty body, `500 internal_error` when settings are
+unavailable, plus auth/role errors. BLE I/O: none.
 
 ### `PUT /api/v1/settings`
 
@@ -577,8 +607,8 @@ The daemon publishes `_wattline._tcp` only on configured LAN interfaces
 handshake. The advertised port is HTTPS when enabled, otherwise HTTP. The in-process
 responder updates identity/TLS data atomically and never publishes on WAN.
 
-TXT keys are exactly `ver`, `api`, `id`, `model`, `cid`, `features`, `tls`, and
-`auth`; no other key is part of v1:
+TXT keys are exactly `ver`, `api`, `id`, `model`, `cid`, `features`, `tls`, and `auth`;
+no other key is part of v1:
 
 ```text
 ver=1.3.0
@@ -621,8 +651,7 @@ optional parameter is distinct from a value of zero or `none`.
 
 ## Compatibility routes
 
-This inventory is exhaustive for the routes registered by
-`internal/api/server.go` when this contract was written. Successful bodies remain
+This inventory is exhaustive for the routes registered by the daemon. Successful bodies remain
 wire-compatible; all errors use the exact `E(code)` bodies in the error-envelope
 section. Every row can also return `401 E(unauthorized)` when its bearer token is
 missing or invalid. Admin rows can additionally return `403 E(admin_required)`
@@ -632,7 +661,7 @@ for a valid client token. “No body” means an exactly zero-byte request body.
 
 | Endpoint | Role | Exact request | Exact success | Additional errors (status, body, condition) | BLE I/O |
 |---|---|---|---|---|---|
-| `GET /api/v1/status` | client | no body | `200 {"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"V2","firmware":"1.4.9","mac":"DC:04:5A:EB:72:2B","cid":773,"features":4095},"rules":[]}` | none | none |
+| `GET /api/v1/status` | client | no body | `200 {"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"V2","firmware":"1.4.9","bootloader_firmware":"1.0.3","mac":"DC:04:5A:EB:72:2B","cid":773,"features":4095,"mode":"app"},"rules":[]}` | none | none |
 | `GET /api/v1/telemetry` | client | no body | `200` with exactly the one complete cached Snapshot JSON defined under the primary `GET /api/v1/telemetry` section, including its top-level `identity` and `commands`; this compatibility contract is not a reduced subset | none | none |
 | `GET /api/v1/history` | client | no body | `200 [{"at":"2026-07-17T19:59:00Z","level":77,"status":1,"dc_w":12.0,"typec_w":20.0}]` (empty is exactly `[]`) | none | none |
 | `GET /api/v1/events` | client | no body | `200`, `Content-Type: text/event-stream`, then the exact complete-snapshot framing specified above | before streaming begins, `500 E(internal_error)` if response streaming is unavailable; after `200` begins, transport failure/disconnect only terminates the stream and has no JSON error body | none |
@@ -654,10 +683,10 @@ The exact rule used in the rows below is
 
 | Endpoint | Role | Exact request | Exact success | Additional errors (status, body, condition) | BLE I/O |
 |---|---|---|---|---|---|
-| `GET /api/v1/pairing/status` | client | no body | `200 {"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}]}` | `409 E(capability_unsupported)` when platform/adapter pairing support is unavailable | none |
-| `POST /api/v1/pairing/scan` | client | no body | `202 {"status":"scanning"}` | `409 E(operation_in_progress)` while scan/pair is active; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` if the scan cannot be started | asynchronous BlueZ scan, not a device command |
+| `GET /api/v1/pairing/status` | client | no body | `200 {"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}]}` | `400 E(invalid_request)` for a nonempty body; `409 E(capability_unsupported)` when platform/adapter pairing support is unavailable | none |
+| `POST /api/v1/pairing/scan` | client | no body | `202 {"status":"scanning"}` | `400 E(invalid_request)` for a nonempty body; `409 E(operation_in_progress)` while scan/pair is active; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` if the scan cannot be started | asynchronous BlueZ scan, not a device command |
 | `POST /api/v1/pairing/pair` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` | `202 {"status":"pairing"}` | `400 E(invalid_request)` for malformed JSON, invalid MAC, or a PIN string containing non-digits or more than six digits (empty is allowed); `409 E(operation_in_progress)` while scan/pair is active; `409 E(capability_unsupported)` when pairing support is unavailable | asynchronous BlueZ pair/trust and BLE reconnect proof; later failure is reported by status |
-| `DELETE /api/v1/pairing/device/{mac}` | client | no body; for path `/api/v1/pairing/device/DC:04:5A:EB:72:2B` | `200 {"status":"removed"}` | `400 E(invalid_request)` for invalid MAC; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` when BlueZ unpair fails | BlueZ unpair, not a device command |
+| `DELETE /api/v1/pairing/device/{mac}` | client | no body; for path `/api/v1/pairing/device/DC:04:5A:EB:72:2B` | `200 {"status":"removed"}` | `400 E(invalid_request)` for invalid MAC or a nonempty body; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` when BlueZ unpair fails | BlueZ unpair, not a device command |
 
 ### Deprecated device-control aliases
 

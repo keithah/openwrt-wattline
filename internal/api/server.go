@@ -69,63 +69,106 @@ func (s *server) now() time.Time {
 func NewServer(d Deps) http.Handler {
 	s := &server{d: d}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/status", s.auth(s.status))
-	mux.HandleFunc("GET /api/v1/telemetry", s.auth(s.telemetry))
-	mux.HandleFunc("GET /api/v1/history", s.auth(s.history))
-	mux.HandleFunc("GET /api/v1/events", s.auth(s.events))
-	mux.HandleFunc("GET /api/v1/device", s.auth(s.device))
-	mux.HandleFunc("POST /api/v1/device/dc", s.auth(s.setDC))
-	mux.HandleFunc("POST /api/v1/device/usbc/output", s.auth(s.setTypeCOutput))
-	mux.HandleFunc("GET /api/v1/device/usbc/limit/{type}", s.auth(s.getLimit))
-	mux.HandleFunc("PUT /api/v1/device/usbc/limit/{type}", s.auth(s.putLimit))
-	mux.HandleFunc("DELETE /api/v1/device/usbc/limit/{type}", s.auth(s.deleteLimit))
-	mux.HandleFunc("POST /api/v1/device/dc/bypass", s.auth(s.setBypass))
-	mux.HandleFunc("GET /api/v1/device/dc/bypass/threshold", s.admin(s.settingsRead(s.getThreshold)))
-	mux.HandleFunc("PUT /api/v1/device/dc/bypass/threshold", s.admin(s.settingsRead(s.putThreshold)))
-	mux.HandleFunc("GET /api/v1/device/timers", s.auth(s.listTimers))
-	mux.HandleFunc("POST /api/v1/device/timers", s.auth(s.addTimer))
-	mux.HandleFunc("GET /api/v1/device/timers/{id}", s.auth(s.getTimer))
-	mux.HandleFunc("PUT /api/v1/device/timers/{id}", s.auth(s.putTimer))
-	mux.HandleFunc("DELETE /api/v1/device/timers/{id}", s.auth(s.deleteTimer))
-	mux.HandleFunc("GET /api/v1/device/clock", s.admin(s.settingsRead(s.getClock)))
-	mux.HandleFunc("POST /api/v1/device/clock/sync", s.admin(s.settingsRead(s.syncClock)))
-	mux.HandleFunc("POST /api/v1/device/restart", s.auth(s.restart))
-	mux.HandleFunc("POST /api/v1/device/shutdown", s.auth(s.shutdown))
-	mux.HandleFunc("GET /api/v1/device/ota", s.admin(s.settingsRead(s.otaInfo)))
-	mux.HandleFunc("POST /api/v1/device/ota/enter", s.admin(s.settingsRead(s.enterOTA)))
-	mux.HandleFunc("POST /api/v1/device/ota/exit", s.admin(s.settingsRead(s.exitOTA)))
-	mux.HandleFunc("PUT /api/v1/device/advanced/running-mode", s.admin(s.settingsRead(s.putRunningMode)))
-	mux.HandleFunc("GET /api/v1/device/advanced/barrier-free", s.admin(s.settingsRead(s.getBarrierFree)))
-	mux.HandleFunc("PUT /api/v1/device/advanced/barrier-free", s.admin(s.settingsRead(s.putBarrierFree)))
-	mux.HandleFunc("GET /api/v1/device/advanced/usb-fw-version", s.admin(s.settingsRead(s.getUSBFirmware)))
-	mux.HandleFunc("PUT /api/v1/device/advanced/ble-pin", s.admin(s.settingsRead(s.putBLEPIN)))
-	mux.HandleFunc("GET /api/v1/rules", s.auth(s.getRules))
-	mux.HandleFunc("POST /api/v1/rules", s.auth(s.postRule))
-	mux.HandleFunc("PUT /api/v1/rules/{name}", s.auth(s.putRule))
-	mux.HandleFunc("DELETE /api/v1/rules/{name}", s.auth(s.deleteRule))
-	mux.HandleFunc("POST /api/v1/device/action", s.auth(s.deviceAction))
-	mux.HandleFunc("GET /api/v1/pairing/status", s.auth(s.settingsRead(s.pairing(s.pairingStatus))))
-	mux.HandleFunc("POST /api/v1/pairing/scan", s.auth(s.settingsRead(s.pairing(s.pairingScan))))
-	mux.HandleFunc("POST /api/v1/pairing/pair", s.auth(s.settingsRead(s.pairing(s.pairingPair))))
-	mux.HandleFunc("DELETE /api/v1/pairing/device/{mac}", s.auth(s.settingsRead(s.pairing(s.pairingUnpair))))
-	mux.HandleFunc("GET /api/v1/device/usbc-limit", s.auth(s.getUSBCLimit))
-	mux.HandleFunc("POST /api/v1/device/usbc-limit", s.auth(s.setUSBCLimit))
-	mux.HandleFunc("GET /api/v1/device/bypass-threshold", s.admin(s.settingsRead(s.getBypassThreshold)))
-	mux.HandleFunc("POST /api/v1/device/bypass-threshold", s.admin(s.settingsRead(s.setBypassThreshold)))
-	mux.HandleFunc("GET /api/v1/device/schedules", s.auth(s.getSchedules))
-	mux.HandleFunc("POST /api/v1/device/schedules", s.auth(s.postSchedule))
-	mux.HandleFunc("DELETE /api/v1/device/schedules/{id}", s.auth(s.deleteSchedule))
-	mux.HandleFunc("POST /api/v1/pair", s.clientPair)
-	mux.HandleFunc("GET /api/v1/pairing-mode", s.admin(s.pairingModeStatus))
-	mux.HandleFunc("POST /api/v1/pairing-mode", s.admin(s.openPairingMode))
-	mux.HandleFunc("DELETE /api/v1/pairing-mode", s.admin(s.closePairingMode))
-	mux.HandleFunc("GET /api/v1/pairing-mode/qr.png", s.admin(s.pairingQRCode))
-	mux.HandleFunc("GET /api/v1/tokens", s.admin(s.listTokens))
-	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.admin(s.revokeToken))
-	mux.HandleFunc("GET /api/v1/settings", s.admin(s.getSettings))
-	mux.HandleFunc("PUT /api/v1/settings", s.admin(s.putSettings))
-	mux.HandleFunc("POST /api/v1/tls/rotate", s.admin(s.rotateTLS))
+	for _, route := range routeDescriptors {
+		route := route
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			route.handler(s, w, r)
+		})
+		mux.HandleFunc(route.method+" "+route.path, route.middleware(s, handler))
+	}
 	return cors(mux)
+}
+
+type routeDescriptor struct {
+	method        string
+	path          string
+	handler       func(*server, http.ResponseWriter, *http.Request)
+	middleware    func(*server, http.HandlerFunc) http.HandlerFunc
+	compatibility bool
+}
+
+func publicRoute(_ *server, next http.HandlerFunc) http.HandlerFunc { return next }
+func clientRoute(s *server, next http.HandlerFunc) http.HandlerFunc { return s.auth(next) }
+func adminRoute(s *server, next http.HandlerFunc) http.HandlerFunc  { return s.admin(next) }
+func adminSettingsRoute(s *server, next http.HandlerFunc) http.HandlerFunc {
+	return s.admin(s.settingsRead(next))
+}
+func clientSettingsRoute(s *server, next http.HandlerFunc) http.HandlerFunc {
+	return s.auth(s.settingsRead(next))
+}
+
+func pairingStatusRoute(s *server, w http.ResponseWriter, r *http.Request) {
+	s.pairing(s.pairingStatus)(w, r)
+}
+func pairingScanRoute(s *server, w http.ResponseWriter, r *http.Request) {
+	s.pairing(s.pairingScan)(w, r)
+}
+func pairingPairRoute(s *server, w http.ResponseWriter, r *http.Request) {
+	s.pairing(s.pairingPair)(w, r)
+}
+func pairingUnpairRoute(s *server, w http.ResponseWriter, r *http.Request) {
+	s.pairing(s.pairingUnpair)(w, r)
+}
+
+// routeDescriptors is the single inventory used to register and document the
+// HTTP API. Keeping aliases here makes accidental undocumented routes visible.
+var routeDescriptors = []routeDescriptor{
+	{"GET", "/api/v1/status", (*server).status, clientRoute, true},
+	{"GET", "/api/v1/telemetry", (*server).telemetry, clientRoute, true},
+	{"GET", "/api/v1/history", (*server).history, clientRoute, true},
+	{"GET", "/api/v1/events", (*server).events, clientRoute, true},
+	{"GET", "/api/v1/device", (*server).device, clientRoute, false},
+	{"POST", "/api/v1/device/dc", (*server).setDC, clientRoute, false},
+	{"POST", "/api/v1/device/usbc/output", (*server).setTypeCOutput, clientRoute, false},
+	{"GET", "/api/v1/device/usbc/limit/{type}", (*server).getLimit, clientRoute, false},
+	{"PUT", "/api/v1/device/usbc/limit/{type}", (*server).putLimit, clientRoute, false},
+	{"DELETE", "/api/v1/device/usbc/limit/{type}", (*server).deleteLimit, clientRoute, false},
+	{"POST", "/api/v1/device/dc/bypass", (*server).setBypass, clientRoute, false},
+	{"GET", "/api/v1/device/dc/bypass/threshold", (*server).getThreshold, adminSettingsRoute, false},
+	{"PUT", "/api/v1/device/dc/bypass/threshold", (*server).putThreshold, adminSettingsRoute, false},
+	{"GET", "/api/v1/device/timers", (*server).listTimers, clientRoute, false},
+	{"POST", "/api/v1/device/timers", (*server).addTimer, clientRoute, false},
+	{"GET", "/api/v1/device/timers/{id}", (*server).getTimer, clientRoute, false},
+	{"PUT", "/api/v1/device/timers/{id}", (*server).putTimer, clientRoute, false},
+	{"DELETE", "/api/v1/device/timers/{id}", (*server).deleteTimer, clientRoute, false},
+	{"GET", "/api/v1/device/clock", (*server).getClock, adminSettingsRoute, false},
+	{"POST", "/api/v1/device/clock/sync", (*server).syncClock, adminSettingsRoute, false},
+	{"POST", "/api/v1/device/restart", (*server).restart, clientRoute, false},
+	{"POST", "/api/v1/device/shutdown", (*server).shutdown, clientRoute, false},
+	{"GET", "/api/v1/device/ota", (*server).otaInfo, adminSettingsRoute, false},
+	{"POST", "/api/v1/device/ota/enter", (*server).enterOTA, adminSettingsRoute, false},
+	{"POST", "/api/v1/device/ota/exit", (*server).exitOTA, adminSettingsRoute, false},
+	{"PUT", "/api/v1/device/advanced/running-mode", (*server).putRunningMode, adminSettingsRoute, false},
+	{"GET", "/api/v1/device/advanced/barrier-free", (*server).getBarrierFree, adminSettingsRoute, false},
+	{"PUT", "/api/v1/device/advanced/barrier-free", (*server).putBarrierFree, adminSettingsRoute, false},
+	{"GET", "/api/v1/device/advanced/usb-fw-version", (*server).getUSBFirmware, adminSettingsRoute, false},
+	{"PUT", "/api/v1/device/advanced/ble-pin", (*server).putBLEPIN, adminSettingsRoute, false},
+	{"GET", "/api/v1/rules", (*server).getRules, clientRoute, true},
+	{"POST", "/api/v1/rules", (*server).postRule, clientRoute, true},
+	{"PUT", "/api/v1/rules/{name}", (*server).putRule, clientRoute, true},
+	{"DELETE", "/api/v1/rules/{name}", (*server).deleteRule, clientRoute, true},
+	{"POST", "/api/v1/device/action", (*server).deviceAction, clientRoute, true},
+	{"GET", "/api/v1/pairing/status", pairingStatusRoute, clientSettingsRoute, true},
+	{"POST", "/api/v1/pairing/scan", pairingScanRoute, clientSettingsRoute, true},
+	{"POST", "/api/v1/pairing/pair", pairingPairRoute, clientSettingsRoute, true},
+	{"DELETE", "/api/v1/pairing/device/{mac}", pairingUnpairRoute, clientSettingsRoute, true},
+	{"GET", "/api/v1/device/usbc-limit", (*server).getUSBCLimit, clientRoute, true},
+	{"POST", "/api/v1/device/usbc-limit", (*server).setUSBCLimit, clientRoute, true},
+	{"GET", "/api/v1/device/bypass-threshold", (*server).getBypassThreshold, adminSettingsRoute, true},
+	{"POST", "/api/v1/device/bypass-threshold", (*server).setBypassThreshold, adminSettingsRoute, true},
+	{"GET", "/api/v1/device/schedules", (*server).getSchedules, clientRoute, true},
+	{"POST", "/api/v1/device/schedules", (*server).postSchedule, clientRoute, true},
+	{"DELETE", "/api/v1/device/schedules/{id}", (*server).deleteSchedule, clientRoute, true},
+	{"POST", "/api/v1/pair", (*server).clientPair, publicRoute, false},
+	{"GET", "/api/v1/pairing-mode", (*server).pairingModeStatus, adminRoute, false},
+	{"POST", "/api/v1/pairing-mode", (*server).openPairingMode, adminRoute, false},
+	{"DELETE", "/api/v1/pairing-mode", (*server).closePairingMode, adminRoute, false},
+	{"GET", "/api/v1/pairing-mode/qr.png", (*server).pairingQRCode, adminRoute, false},
+	{"GET", "/api/v1/tokens", (*server).listTokens, adminRoute, false},
+	{"DELETE", "/api/v1/tokens/{id}", (*server).revokeToken, adminRoute, false},
+	{"GET", "/api/v1/settings", (*server).getSettings, adminRoute, false},
+	{"PUT", "/api/v1/settings", (*server).putSettings, adminRoute, false},
+	{"POST", "/api/v1/tls/rotate", (*server).rotateTLS, adminRoute, false},
 }
 
 // cors lets the LuCI web UI (served on port 80) call the API on port 8377 —
