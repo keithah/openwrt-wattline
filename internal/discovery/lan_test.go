@@ -12,7 +12,7 @@ func TestParseOpenWrtLANStatusUsesAuthoritativeDevices(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, []string{"br-lan"}) {
 		t.Fatalf("members=%#v err=%v", got, err)
 	}
-	for _, raw := range []string{`{`, `{}`, `{"device":""}`} {
+	for _, raw := range []string{`{`, `{}`, `{"device":""}`, `{"device":"br-lan"}`, `{"up":false,"device":"br-lan"}`} {
 		if _, err := ParseOpenWrtLANStatus([]byte(raw)); err == nil {
 			t.Fatalf("accepted %s", raw)
 		}
@@ -34,7 +34,7 @@ func TestOpenWrtLANMembershipFailsClosedAndUsesBoundedUbusCall(t *testing.T) {
 			if executable != "/sbin/ubus" || !reflect.DeepEqual(args, []string{"-S", "call", "network.interface.lan", "status"}) {
 				t.Fatalf("command=%q args=%#v", executable, args)
 			}
-			return []byte(`{"device":"br-lan","l3_device":"br-lan"}`), nil
+			return []byte(`{"up":true,"device":"br-lan","l3_device":"br-lan"}`), nil
 		},
 	}
 	if got, err := membership.LANInterfaces(); err != nil || !reflect.DeepEqual(got, []string{"br-lan"}) {

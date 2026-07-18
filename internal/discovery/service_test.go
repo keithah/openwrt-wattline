@@ -43,6 +43,23 @@ func (membership fakeLANMembership) LANInterfaces() ([]string, error) {
 
 func lanOnly(names ...string) LANMembershipSource { return fakeLANMembership{names: names} }
 
+type dynamicLANMembership struct {
+	mu    sync.RWMutex
+	names []string
+}
+
+func (membership *dynamicLANMembership) LANInterfaces() ([]string, error) {
+	membership.mu.RLock()
+	defer membership.mu.RUnlock()
+	return append([]string(nil), membership.names...), nil
+}
+
+func (membership *dynamicLANMembership) set(names ...string) {
+	membership.mu.Lock()
+	membership.names = append([]string(nil), names...)
+	membership.mu.Unlock()
+}
+
 func TestResolveInterfacesMatchesOnlyConfiguredNamesOrAddresses(t *testing.T) {
 	source := fakeInterfaces{
 		interfaces: []net.Interface{
@@ -54,11 +71,11 @@ func TestResolveInterfacesMatchesOnlyConfiguredNamesOrAddresses(t *testing.T) {
 			{Index: 6, Name: "internet", Flags: net.FlagUp | net.FlagMulticast},
 		},
 		addresses: map[int][]net.Addr{
-			2: {fakeAddr("192.168.8.1/24"), fakeAddr("fd00::1/64")},
 			3: {fakeAddr("100.64.0.1/32")},
 			4: {fakeAddr("fe80::1%wan/64")},
 			5: {fakeAddr("192.168.9.1/24")},
 			6: {fakeAddr("192.168.10.1/24")},
+			2: {fakeAddr("192.168.8.1/24"), fakeAddr("fd00::1/64"), fakeAddr("2001:db8::1/64")},
 		},
 	}
 	source.addresses[2] = append(source.addresses[2], fakeAddr("fe80::1%br-lan/64"))
@@ -98,6 +115,10 @@ func TestResolveInterfacesMatchesOnlyConfiguredNamesOrAddresses(t *testing.T) {
 	got, err = ResolveInterfaces([]string{"192.168.9.1"}, source, lanOnly("br-lan", "eth0"))
 	if err != nil || len(got) != 1 || got[0].Name != "eth0" {
 		t.Fatalf("authoritative LAN address selector = %#v, %v", got, err)
+	}
+	got, err = ResolveInterfaces([]string{"2001:db8::1"}, source, membership)
+	if err != nil || len(got) != 1 || got[0].Name != "br-lan" {
+		t.Fatalf("authoritative LAN global selector = %#v, %v", got, err)
 	}
 	if _, err := ResolveInterfaces([]string{"br-lan"}, source, fakeLANMembership{err: errors.New("ubus unavailable")}); err == nil {
 		t.Fatal("LAN membership failure did not fail closed")
@@ -402,4 +423,62 @@ func TestServiceDoesNotRetryWithoutMACOrAfterNilRegistration(t *testing.T) {
 	timers.wait(t, 1) // nil registrations are failures, not an active responder.
 	cancel()
 	<-done
+}
+
+func TestServicePeriodicallyRevalidatesAndWithdrawsLostLANMembership(t *testing.T) {
+	store := state.NewStore()
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
+	registrar := &fakeRegistrar{}
+	membership := &dynamicLANMembership{names: []string{"br-lan"}}
+	healthyTimers, retryTimers := &manualTimerFactory{}, &manualTimerFactory{}
+	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
+	service := NewService(Options{
+		Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar,
+		Interfaces:    fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}},
+		LANMembership: membership, NewRetryTimer: retryTimers.New, NewRevalidateTimer: healthyTimers.New,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	calls := waitCalls(t, registrar, 1)
+	revalidate := healthyTimers.wait(t, 1)
+	if retryTimers.count() != 0 {
+		t.Fatal("healthy service entered failure retry")
+	}
+	membership.set()
+	revalidate.ch <- time.Now()
+	retry := retryTimers.wait(t, 1)
+	if calls[0].registration.shutdowns() != 1 {
+		t.Fatal("registration remained active after LAN membership was removed")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !retry.stopped.Load() {
+		t.Fatal("failure retry was not stopped on shutdown")
+	}
+}
+
+func TestServiceStopsHealthyRevalidationTimerOnShutdown(t *testing.T) {
+	store := state.NewStore()
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
+	healthyTimers := &manualTimerFactory{}
+	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
+	service := NewService(Options{
+		Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: &fakeRegistrar{},
+		Interfaces:    fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}},
+		LANMembership: lanOnly("br-lan"), NewRevalidateTimer: healthyTimers.New,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	healthy := healthyTimers.wait(t, 1)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !healthy.stopped.Load() {
+		t.Fatal("healthy revalidation timer was not stopped")
+	}
 }

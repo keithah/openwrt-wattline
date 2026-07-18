@@ -73,10 +73,6 @@ func multicastCapable(iface net.Interface) bool {
 	return true
 }
 
-func localSelector(selector addressSelector) bool {
-	return selector.address.IsPrivate() || selector.address.IsLinkLocalUnicast()
-}
-
 // ResolveInterfaces returns only existing interfaces explicitly named by UCI,
 // or owning an explicitly configured IPv4/IPv6 address. It never substitutes
 // all interfaces when a name is absent.
@@ -103,9 +99,6 @@ func ResolveInterfaces(configured []string, source InterfaceSource, membership L
 	wantedIPs := make([]addressSelector, 0, len(configured))
 	for _, value := range configured {
 		if selector, ok := parseAddress(value); ok {
-			if !localSelector(selector) {
-				return nil, fmt.Errorf("mDNS address %q is not LAN-local", value)
-			}
 			if selector.address.Is6() && selector.address.IsLinkLocalUnicast() && selector.zone == "" {
 				return nil, fmt.Errorf("link-local mDNS address %q requires an interface zone", value)
 			}
@@ -165,21 +158,23 @@ func ResolveInterfaces(configured []string, source InterfaceSource, membership L
 // Options supplies cached state and runtime settings. None of these callbacks
 // may perform BLE I/O.
 type Options struct {
-	Version        string
-	Hostname       string
-	Store          *state.Store
-	Config         func() *config.Config
-	TLSFingerprint func() string
-	Registrar      Registrar
-	Interfaces     InterfaceSource
-	LANMembership  LANMembershipSource
-	Logf           func(string, ...any)
-	NewRetryTimer  func(time.Duration) RetryTimer
-	RetryDelay     func(int) time.Duration
+	Version            string
+	Hostname           string
+	Store              *state.Store
+	Config             func() *config.Config
+	TLSFingerprint     func() string
+	Registrar          Registrar
+	Interfaces         InterfaceSource
+	LANMembership      LANMembershipSource
+	Logf               func(string, ...any)
+	NewRetryTimer      func(time.Duration) RetryTimer
+	RetryDelay         func(int) time.Duration
+	NewRevalidateTimer func(time.Duration) RetryTimer
+	RevalidateInterval time.Duration
 }
 
-// RetryTimer permits deterministic failure-only retry tests and explicit stop
-// on shutdown. Healthy and identity-less services do not create timers.
+// RetryTimer permits deterministic failure/revalidation tests and explicit
+// cleanup on shutdown. Identity-less services do not create timers.
 type RetryTimer interface {
 	C() <-chan time.Time
 	Stop()
@@ -223,6 +218,12 @@ func NewService(options Options) *Service {
 	}
 	if options.RetryDelay == nil {
 		options.RetryDelay = defaultRetryDelay
+	}
+	if options.NewRevalidateTimer == nil {
+		options.NewRevalidateTimer = func(delay time.Duration) RetryTimer { return systemRetryTimer{time.NewTimer(delay)} }
+	}
+	if options.RevalidateInterval <= 0 {
+		options.RevalidateInterval = 30 * time.Second
 	}
 	return &Service{options: options, refresh: make(chan struct{}, 1)}
 }
@@ -322,6 +323,8 @@ func (service *Service) Run(ctx context.Context) error {
 	var retry RetryTimer
 	var retryChannel <-chan time.Time
 	retryAttempt := 0
+	var revalidate RetryTimer
+	var revalidateChannel <-chan time.Time
 	stopRetry := func(reset bool) {
 		if retry != nil {
 			retry.Stop()
@@ -331,8 +334,15 @@ func (service *Service) Run(ctx context.Context) error {
 			retryAttempt = 0
 		}
 	}
+	stopRevalidate := func() {
+		if revalidate != nil {
+			revalidate.Stop()
+			revalidate, revalidateChannel = nil, nil
+		}
+	}
 	defer func() {
 		stopRetry(false)
+		stopRevalidate()
 		if active != nil {
 			active.Shutdown()
 		}
@@ -349,10 +359,20 @@ func (service *Service) Run(ctx context.Context) error {
 		retryChannel = retry.C()
 		retryAttempt++
 	}
+	scheduleRevalidate := func() {
+		if revalidate != nil {
+			return
+		}
+		revalidate = service.options.NewRevalidateTimer(service.options.RevalidateInterval)
+		if revalidate != nil {
+			revalidateChannel = revalidate.C()
+		}
+	}
 
 	reconcile := func() {
 		desired, publish, err := service.desired()
 		if err != nil {
+			stopRevalidate()
 			if active != nil {
 				active.Shutdown()
 				active, activeKey = nil, ""
@@ -365,6 +385,7 @@ func (service *Service) Run(ctx context.Context) error {
 		}
 		if !publish {
 			stopRetry(true)
+			stopRevalidate()
 			if active != nil {
 				active.Shutdown()
 				active, activeKey = nil, ""
@@ -373,6 +394,7 @@ func (service *Service) Run(ctx context.Context) error {
 		}
 		if desired.key == activeKey {
 			stopRetry(true)
+			scheduleRevalidate()
 			return
 		}
 		next, err := service.options.Registrar.Register(desired.instance, serviceType, "local.", desired.port, desired.txt, desired.interfaces)
@@ -380,6 +402,7 @@ func (service *Service) Run(ctx context.Context) error {
 			err = errors.New("registrar returned no registration")
 		}
 		if err != nil {
+			stopRevalidate()
 			if service.options.Logf != nil {
 				service.options.Logf("wattline: mDNS registration: %v", err)
 			}
@@ -387,11 +410,13 @@ func (service *Service) Run(ctx context.Context) error {
 			return
 		}
 		stopRetry(true)
+		stopRevalidate()
 		previous := active
 		active, activeKey = next, desired.key
 		if previous != nil {
 			previous.Shutdown()
 		}
+		scheduleRevalidate()
 	}
 
 	identityKey := ""
@@ -410,9 +435,13 @@ func (service *Service) Run(ctx context.Context) error {
 			}
 		case <-service.refresh:
 			stopRetry(true)
+			stopRevalidate()
 			reconcile()
 		case <-retryChannel:
 			retry, retryChannel = nil, nil
+			reconcile()
+		case <-revalidateChannel:
+			revalidate, revalidateChannel = nil, nil
 			reconcile()
 		}
 	}

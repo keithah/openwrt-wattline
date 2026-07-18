@@ -29,8 +29,8 @@ func ParseOpenWrtLANStatus(raw []byte) ([]string, error) {
 	if err := json.Unmarshal(raw, &status); err != nil {
 		return nil, fmt.Errorf("decode ubus LAN status: %w", err)
 	}
-	if status.Up != nil && !*status.Up {
-		return nil, errors.New("OpenWrt LAN interface is down")
+	if status.Up == nil || !*status.Up {
+		return nil, errors.New("OpenWrt LAN interface is not explicitly up")
 	}
 	seen := make(map[string]struct{}, 2)
 	for _, name := range []string{strings.TrimSpace(status.Device), strings.TrimSpace(status.L3Device)} {
