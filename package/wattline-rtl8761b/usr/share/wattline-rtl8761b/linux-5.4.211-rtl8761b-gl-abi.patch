@@ -1,0 +1,69 @@
+--- a/drivers/bluetooth/btrtl.c
++++ b/drivers/bluetooth/btrtl.c
+@@ -130,12 +130,23 @@
+ 	  .cfg_name = "rtl_bt/rtl8821c_config" },
+ 
+ 	/* 8761A */
+-	{ IC_MATCH_FL_LMPSUBV, RTL_ROM_LMP_8761A, 0x0,
++	{ IC_INFO(RTL_ROM_LMP_8761A, 0xa),
+ 	  .config_needed = false,
+ 	  .has_rom_version = true,
+ 	  .fw_name  = "rtl_bt/rtl8761a_fw.bin",
+ 	  .cfg_name = "rtl_bt/rtl8761a_config" },
+ 
++	/* 8761B / 8761BU (backported from upstream ~5.8+):
++	 * TP-Link UB500 (2357:0604) reports lmp_subver 0x8761, hci_rev 0xb.
++	 * Uses the V1 "Realtech" epatch path via RTL_ROM_LMP_8761A dispatch.
++	 * cfg_name has no ".bin"; the driver appends it (-> rtl8761b_config.bin).
++	 */
++	{ IC_INFO(RTL_ROM_LMP_8761A, 0xb),
++	  .config_needed = true,
++	  .has_rom_version = true,
++	  .fw_name  = "rtl_bt/rtl8761bu_fw.bin",
++	  .cfg_name = "rtl_bt/rtl8761bu_config" },
++
+ 	/* 8822C with USB interface */
+ 	{ IC_INFO(RTL_ROM_LMP_8822B, 0xc),
+ 	  .config_needed = false,
+@@ -255,6 +266,7 @@
+ 		{ RTL_ROM_LMP_8723B, 9 },	/* 8723D */
+ 		{ RTL_ROM_LMP_8821A, 10 },	/* 8821C */
+ 		{ RTL_ROM_LMP_8822B, 13 },	/* 8822C */
++		{ RTL_ROM_LMP_8761A, 14 },	/* 8761B (backported from upstream) */
+ 	};
+ 
+ 	min_size = sizeof(struct rtl_epatch_header) + sizeof(extension_sig) + 3;
+--- a/drivers/bluetooth/btusb.c
++++ b/drivers/bluetooth/btusb.c
+@@ -59,6 +59,15 @@
+ #define BTUSB_MEDIATEK		0x200000
+ 
+ static const struct usb_device_id btusb_table[] = {
++	/* RTL8761B USB dongles (e.g. TP-Link UB500).  Must precede the generic
++	 * class matchers below, since usb_match_id() returns the FIRST match and
++	 * the generic entries would otherwise bind these with driver_info=0,
++	 * skipping the Realtek firmware-load path.  2357:0604 is the UB500's
++	 * pre-firmware id; 0bda:8771 is the post-firmware re-enumeration id.
++	 */
++	{ USB_DEVICE(0x2357, 0x0604), .driver_info = BTUSB_REALTEK },
++	{ USB_DEVICE(0x0bda, 0x8771), .driver_info = BTUSB_REALTEK },
++
+ 	/* Generic Bluetooth USB device */
+ 	{ USB_DEVICE_INFO(0xe0, 0x01, 0x01) },
+ 
+--- a/include/linux/timer.h
++++ b/include/linux/timer.h
+@@ -18,6 +18,13 @@
+ 	void			(*function)(struct timer_list *);
+ 	u32			flags;
+ 
++	/* GL/MTK X3000 kernel ABI: their struct timer_list is 8 bytes larger
++	 * than vanilla 5.4.211 (empirically: each delayed_work in struct
++	 * hci_dev is +8, 6 of them => +48, shifting hdev->open 4112->4160).
++	 * Match it so sideloaded btusb/btrtl compute GL-compatible offsets.
++	 */
++	unsigned long		__gl_abi_pad;
++
+ #ifdef CONFIG_LOCKDEP
+ 	struct lockdep_map	lockdep_map;
+ #endif
