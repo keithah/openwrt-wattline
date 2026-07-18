@@ -38,4 +38,4 @@ jobs:
       - name: Build packages (ipks + metadata check)
         run: make -C package feed
       - name: Release inventory
-        run: sh package/tests/release-inventory_test.sh package/out 0.1.0
+        run: sh package/tests/release-inventory_test.sh package/out 0.1.1
