@@ -64,14 +64,28 @@ func ensureTrustedParent(parent string) error {
 		infos = append(infos, info)
 	}
 	for i, info := range infos {
-		if info.Mode().Perm()&0o022 == 0 {
+		stat := info.Sys().(*syscall.Stat_t)
+		if !writableByUntrusted(info.Mode(), stat.Gid) {
 			continue
 		}
-		if info.Mode()&os.ModeSticky == 0 || i+1 >= len(infos) || infos[i+1].Mode().Perm()&0o022 != 0 {
+		if info.Mode()&os.ModeSticky == 0 || i+1 >= len(infos) {
+			return fmt.Errorf("TLS ancestor %q is unsafely writable", components[i])
+		}
+		nextStat := infos[i+1].Sys().(*syscall.Stat_t)
+		if writableByUntrusted(infos[i+1].Mode(), nextStat.Gid) {
 			return fmt.Errorf("TLS ancestor %q is unsafely writable", components[i])
 		}
 	}
 	return syncDirectory(parent)
+}
+
+// GID 0 is part of the privileged trust boundary alongside UID 0. GL.iNet's
+// overlay intentionally presents /etc as root:root 0775; its group-write bit
+// grants no access to an unprivileged group. World-write and write access for
+// every other group remain untrusted.
+func writableByUntrusted(mode os.FileMode, gid uint32) bool {
+	permissions := mode.Perm()
+	return permissions&0o002 != 0 || (permissions&0o020 != 0 && gid != 0)
 }
 
 func absoluteComponents(path string) []string {
