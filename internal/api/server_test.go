@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,50 @@ type stalledSSEWriter struct {
 	initialOnce    sync.Once
 	stalledOnce    sync.Once
 	releaseOnce    sync.Once
+}
+
+type deadlineSSEWriter struct {
+	header         http.Header
+	mu             sync.Mutex
+	writes         int
+	deadline       time.Time
+	deadlines      int
+	initialFlushed chan struct{}
+	initialOnce    sync.Once
+}
+
+func newDeadlineSSEWriter() *deadlineSSEWriter {
+	return &deadlineSSEWriter{header: make(http.Header), initialFlushed: make(chan struct{})}
+}
+
+func (w *deadlineSSEWriter) Header() http.Header { return w.header }
+func (w *deadlineSSEWriter) WriteHeader(int)     {}
+func (w *deadlineSSEWriter) SetWriteDeadline(deadline time.Time) error {
+	w.mu.Lock()
+	w.deadline = deadline
+	if !deadline.IsZero() {
+		w.deadlines++
+	}
+	w.mu.Unlock()
+	return nil
+}
+func (w *deadlineSSEWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.writes++
+	writes, deadline := w.writes, w.deadline
+	w.mu.Unlock()
+	if writes > 1 && !deadline.IsZero() {
+		return 0, errors.New("simulated write deadline")
+	}
+	return len(p), nil
+}
+func (w *deadlineSSEWriter) Flush() {
+	w.mu.Lock()
+	writes := w.writes
+	w.mu.Unlock()
+	if writes == 1 {
+		w.initialOnce.Do(func() { close(w.initialFlushed) })
+	}
 }
 
 func newStalledSSEWriter() *stalledSSEWriter {
@@ -135,6 +180,49 @@ func TestAuth(t *testing.T) {
 	}
 	if rr := do(t, h, "GET", "/api/v1/status", "tok", ""); rr.Code != 200 {
 		t.Fatalf("good token: %d", rr.Code)
+	}
+}
+
+func TestBodylessRoutesRejectChunkedRequestBodies(t *testing.T) {
+	h, _, saved := testServer(t)
+	*saved = []config.Rule{{Name: "existing", Enabled: true}}
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/status"},
+		{http.MethodGet, "/api/v1/telemetry"},
+		{http.MethodGet, "/api/v1/history"},
+		{http.MethodGet, "/api/v1/rules"},
+		{http.MethodGet, "/api/v1/events"},
+		{http.MethodDelete, "/api/v1/rules/existing"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("unexpected"))
+			req.ContentLength = -1 // force chunked/unknown-length handling
+			req.Header.Set("Authorization", "Bearer tok")
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+			}
+			var body apiErrorBody
+			if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil || body.Error.Code != "invalid_request" {
+				t.Fatalf("error = %q (%v), want invalid_request", body.Error.Code, err)
+			}
+		})
+	}
+}
+
+func TestBodylessRouteRejectsOversizedChunkedBody(t *testing.T) {
+	h, _, _ := testServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", strings.NewReader(strings.Repeat("x", int(maxRequestBodyBytes)+1)))
+	req.ContentLength = -1
+	req.Header.Set("Authorization", "Bearer tok")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -508,5 +596,34 @@ stalled:
 	case <-time.After(time.Second):
 		cancel()
 		t.Fatal("SSE handler did not terminate after subscriber overflow")
+	}
+}
+
+func TestSSEWriteDeadlineTerminatesStalledStream(t *testing.T) {
+	h, store, _ := testServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	w := newDeadlineSSEWriter()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(w, req)
+		close(done)
+	}()
+	select {
+	case <-w.initialFlushed:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not flush its initial frame")
+	}
+	store.SetIdentity(state.Identity{Model: "trigger-timeout"})
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler ignored a timed-out write")
+	}
+	w.mu.Lock()
+	deadlines := w.deadlines
+	w.mu.Unlock()
+	if deadlines < 2 {
+		t.Fatalf("write deadlines = %d, want one for every SSE frame", deadlines)
 	}
 }

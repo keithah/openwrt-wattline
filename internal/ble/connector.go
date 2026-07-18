@@ -269,6 +269,11 @@ func (c *Connector) clearSession(sess *Session) {
 	c.publishConnection(state.ConnectionDisconnected)
 }
 
+func (c *Connector) handleDisconnect(sess *Session) {
+	sess.cancelContext()
+	c.clearSession(sess)
+}
+
 type handshakeResult struct {
 	id  Identity
 	err error
@@ -406,12 +411,7 @@ func (c *Connector) Run(stop <-chan struct{}) {
 			c.closeSession(sess)
 			return
 		case <-t.Disconnected():
-			sess.cancelContext()
-			c.store.SetConnected(false)
-			c.mu.Lock()
-			c.sess = nil
-			c.mu.Unlock()
-			c.publishConnection(state.ConnectionDisconnected)
+			c.handleDisconnect(sess)
 			log.Printf("wattline: device disconnected")
 			reconnect = true
 		}

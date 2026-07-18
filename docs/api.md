@@ -10,12 +10,21 @@ request body means zero bytes (not `{}`). Boolean control mutations return the
 device-observed value, not an optimistic echo. JSON examples omit the final LF
 that Go's JSON encoder appends to every JSON response body.
 
-Request bodies are limited to 64 KiB. Protected routes authenticate before
-applying that limit, so missing/invalid credentials still return `401` and a
-managed token on an admin route still returns `403`; an oversized authenticated
-or public request returns `400 invalid_request`. Each listener has a 15-second
-request-read deadline. There is no response write deadline because SSE streams
-are intentionally long-lived.
+On registered, non-`OPTIONS` API routes, request bodies are limited to 64 KiB.
+Protected routes authenticate before applying that limit, so missing/invalid
+credentials still return `401` and a managed token on an admin route still
+returns `403`; an oversized authenticated or public request returns `400
+invalid_request`. Every registered `GET` and `DELETE` route requires an exactly
+zero-byte body; after authentication/authorization, any nonempty body, including
+an unknown-length chunked body, returns `400 invalid_request`. Body-limit,
+empty-body, authentication, and role errors are global and are omitted from
+endpoint-specific error lists and “Additional errors” table columns unless
+explicitly repeated. CORS preflight `OPTIONS` requests bypass body validation
+and return `204`; unmatched routes use the HTTP mux response and are outside this
+API contract. Each listener has a 15-second request-read deadline. There is no
+server-wide response write timeout because SSE streams are intentionally
+long-lived; each individual SSE frame must write and flush within 10 seconds or
+that stream is terminated.
 
 ## Versioning and base URLs
 
@@ -174,7 +183,7 @@ Role: client. Request: none. Success: `200 OK` with the complete cached snapshot
 {"battery":{"enabled":true,"status":1,"full":false,"max_wh":221.0,"wh":170.2,"level":77,"volts":25.6,"amps":1.2,"watts":30.7,"remain_min":332},"dc":{"enabled":true,"status":0,"volts":24.0,"amps":0.5,"watts":12.0,"bypass":false},"typec":{"enabled":true,"status":0,"volts":20.0,"amps":1.0,"watts":20.0,"temp_c":35.0,"mode":3,"dc_input":false},"connected":true,"updated_at":"2026-07-17T20:00:00Z","identity":{"id":"DC:04:5A:EB:72:2B","mode":"app"},"commands":{"active":[],"recent":[]}}
 ```
 
-Endpoint-specific errors: only authentication errors. BLE I/O: none.
+Errors: global request-body and authentication errors only. BLE I/O: none.
 
 ### `GET /api/v1/history`
 
@@ -184,8 +193,8 @@ Role: client. Request: none. Success: `200 OK` with an array (empty as `[]`):
 [{"at":"2026-07-17T19:59:00Z","level":77,"status":1,"dc_w":12.0,"typec_w":20.0}]
 ```
 
-History is the bounded, approximately one-point-per-minute cache. Endpoint-specific
-errors: only authentication errors. BLE I/O: none.
+History is the bounded, approximately one-point-per-minute cache. Errors: global
+request-body and authentication errors only. BLE I/O: none.
 
 ### `GET /api/v1/events`
 
@@ -214,11 +223,14 @@ the managed token that authenticated a live stream ends that stream promptly.
 A successful token-store cutover similarly ends streams authenticated by
 managed tokens from the old store. Streams authenticated by other current-store
 managed tokens or the bootstrap token remain open. Authentication errors occur
-before streaming begins. To bound router memory, slow subscribers are disconnected
-after 128 queued complete snapshots; accepted snapshots are delivered in order and
-are never silently coalesced. The stream then ends without an SSE error frame, and
-the client reconnects to receive a fresh initial snapshot. BLE I/O: none; BLE
-notifications update the store independently.
+before streaming begins. Subscription and capture of the first complete snapshot
+are atomic, so an initial frame can never be newer than a subsequently queued
+frame. To bound router memory, slow subscribers are disconnected after 128 queued
+complete snapshots; a frame that cannot write and flush within 10 seconds also
+terminates its stream. Accepted snapshots are delivered in order and are never
+silently coalesced. The stream then ends without an SSE error frame, and the client
+reconnects to receive a fresh initial snapshot. BLE I/O: none; BLE notifications
+update the store independently.
 
 ## Granular controls
 
@@ -475,7 +487,7 @@ nanoseconds. `repeat_every` is optional and omitted when zero. Actions are
 
 | Endpoint | Role | Request | Success | Endpoint-specific errors | BLE I/O |
 |---|---|---|---|---|---|
-| `GET /api/v1/rules` | client | none | `200` array, empty `[]` | auth only | none |
+| `GET /api/v1/rules` | client | none | `200` array, empty `[]` | none beyond global body/auth errors | none |
 | `POST /api/v1/rules` | admin | complete rule object | `200` stored rule; zero hysteresis defaults to `5` | `400 invalid_request`, `500 internal_error` | none |
 | `PUT /api/v1/rules/{name}` | admin | complete rule object; URL name wins | `200` stored rule | `400 invalid_request`, `500 internal_error` | none |
 | `DELETE /api/v1/rules/{name}` | admin | none | `200 {"deleted":"low_battery"}` | `404 not_found`, `500 internal_error` | none |
@@ -764,11 +776,14 @@ optional parameter is distinct from a value of zero or `none`.
 
 ## Compatibility routes
 
-This inventory is exhaustive for the routes registered by the daemon. Successful bodies remain
-wire-compatible; all errors use the exact `E(code)` bodies in the error-envelope
-section. Every row can also return `401 E(unauthorized)` when its bearer token is
-missing or invalid. Admin rows can additionally return `403 E(admin_required)`
-for a valid client token. “No body” means an exactly zero-byte request body.
+This inventory is exhaustive for the routes registered by the daemon. Successful
+bodies remain wire-compatible; all errors use the exact `E(code)` bodies in the
+error-envelope section. Every row inherits the global request-body and
+authentication errors: a nonempty `GET`/`DELETE` body returns `400
+E(invalid_request)`, and a missing or invalid bearer token returns `401
+E(unauthorized)`. Admin rows also inherit `403 E(admin_required)` for a valid
+client token. Those inherited errors are omitted from “Additional errors.” “No
+body” means an exactly zero-byte request body.
 
 ### Cached state compatibility routes
 

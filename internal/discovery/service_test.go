@@ -157,6 +157,25 @@ type fakeRegistrar struct {
 	nilRegistration bool
 }
 
+type blockingRegistrar struct {
+	base      *fakeRegistrar
+	blockNext atomic.Bool
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func newBlockingRegistrar() *blockingRegistrar {
+	return &blockingRegistrar{base: &fakeRegistrar{}, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *blockingRegistrar) Register(instance, service, domain string, port int, txt []string, interfaces []net.Interface) (Registration, error) {
+	if r.blockNext.CompareAndSwap(true, false) {
+		close(r.entered)
+		<-r.release
+	}
+	return r.base.Register(instance, service, domain, port, txt, interfaces)
+}
+
 func (r *fakeRegistrar) Register(instance, service, domain string, port int, txt []string, interfaces []net.Interface) (Registration, error) {
 	r.mu.Lock()
 	if r.fail > 0 {
@@ -312,6 +331,91 @@ func TestServiceSuppressesUntilMACAndReregistersOnlyOnMeaningfulChange(t *testin
 	}
 	if calls[3].registration.shutdowns() != 1 {
 		t.Fatalf("active registration shutdowns = %d", calls[3].registration.shutdowns())
+	}
+}
+
+func TestServiceResubscribesAfterStateSubscriberOverflow(t *testing.T) {
+	store := state.NewStore()
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B", Features: 1})
+	registrar := newBlockingRegistrar()
+	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
+	service := NewService(Options{
+		Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar,
+		Interfaces:    fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}},
+		LANMembership: lanOnly("br-lan"),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	waitCalls(t, registrar.base, 1)
+
+	registrar.blockNext.Store(true)
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B", Features: 2})
+	select {
+	case <-registrar.entered:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("service did not enter blocking registration")
+	}
+	// Overflow the subscription with snapshots whose discovery key is still 2.
+	// The later identity update therefore cannot be recovered by reconciling an
+	// accepted queued frame; Run must observe closure and resubscribe atomically.
+	for update := 0; update < 200; update++ {
+		store.SetConnected(update%2 == 0)
+	}
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B", Features: 200})
+	close(registrar.release)
+
+	deadline := time.Now().Add(3 * time.Second)
+	foundLatest := false
+	for time.Now().Before(deadline) {
+		for _, call := range registrar.base.snapshot() {
+			for _, entry := range call.txt {
+				if entry == "features=000000c8" {
+					foundLatest = true
+					break
+				}
+			}
+		}
+		if foundLatest {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !foundLatest {
+		cancel()
+		<-done
+		t.Fatal("service did not publish the latest identity after overflow")
+	}
+	// Prove the replacement subscription remains live after its atomic catch-up.
+	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B", Features: 201})
+	deadline = time.Now().Add(time.Second)
+	foundFuture := false
+	for time.Now().Before(deadline) {
+		for _, call := range registrar.base.snapshot() {
+			for _, entry := range call.txt {
+				if entry == "features=000000c9" {
+					foundFuture = true
+					break
+				}
+			}
+		}
+		if foundFuture {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service did not stop after subscriber overflow")
+	}
+	if !foundFuture {
+		t.Fatal("service did not resubscribe and publish a future identity after overflow")
 	}
 }
 

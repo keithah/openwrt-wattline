@@ -38,6 +38,8 @@ func TestContractDocumentation(t *testing.T) {
 		"## Authentication roles",
 		"## Error envelope",
 		"64 KiB",
+		"unknown-length chunked body",
+		"CORS preflight `OPTIONS` requests bypass body validation",
 		"15-second request-read deadline",
 		"data: {complete snapshot JSON}\\n",
 		"slow subscribers are disconnected",

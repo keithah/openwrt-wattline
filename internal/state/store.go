@@ -158,11 +158,20 @@ func (s *Store) History() []HistoryPoint {
 }
 
 func (s *Store) Subscribe() (<-chan Snapshot, func()) {
+	updates, _, cancel := s.SubscribeWithSnapshot()
+	return updates, cancel
+}
+
+// SubscribeWithSnapshot atomically captures the current state and registers a
+// subscriber for every later update. Consumers can emit initial before reading
+// updates without ever delivering newer state followed by an older snapshot.
+func (s *Store) SubscribeWithSnapshot() (<-chan Snapshot, Snapshot, func()) {
 	subscriber := newSnapshotSubscriber()
 	s.mu.Lock()
+	initial := cloneSnapshot(s.snap)
 	s.subs[subscriber] = struct{}{}
 	s.mu.Unlock()
-	return subscriber.out, func() {
+	return subscriber.out, initial, func() {
 		s.mu.Lock()
 		if _, ok := s.subs[subscriber]; ok {
 			delete(s.subs, subscriber)

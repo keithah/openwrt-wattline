@@ -134,6 +134,27 @@ func TestSubscribeOverflowEvictsSlowSubscriberWithoutBlockingMutations(t *testin
 	}
 }
 
+func TestSubscribeWithSnapshotOrdersInitialBeforeFutureUpdates(t *testing.T) {
+	s := NewStore()
+	s.SetIdentity(Identity{Model: "initial"})
+
+	ch, initial, cancel := s.SubscribeWithSnapshot()
+	defer cancel()
+	s.SetIdentity(Identity{Model: "future"})
+
+	if initial.Device == nil || initial.Device.Model != "initial" {
+		t.Fatalf("atomic initial snapshot = %+v", initial.Device)
+	}
+	select {
+	case update := <-ch:
+		if update.Device == nil || update.Device.Model != "future" {
+			t.Fatalf("first queued update = %+v, want future state", update.Device)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("future update was not delivered")
+	}
+}
+
 func TestSubscribeDeliversEveryCommandTransitionInOrderWhenConsumerBlocked(t *testing.T) {
 	s := NewStore()
 	ch, cancel := s.Subscribe()

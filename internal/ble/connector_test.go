@@ -125,6 +125,31 @@ func TestConnectedSetAfterSessionPublished(t *testing.T) {
 	}
 }
 
+func TestDisconnectClearsSessionBeforePublishingDisconnected(t *testing.T) {
+	store := state.NewStore()
+	c := NewConnector(nil, store, nil)
+	sess := NewSession(newFake(), store)
+	c.mu.Lock()
+	c.sess = sess
+	c.mu.Unlock()
+	store.SetConnected(true)
+	updates, _, cancel := store.SubscribeWithSnapshot()
+	defer cancel()
+
+	c.handleDisconnect(sess)
+	select {
+	case snapshot := <-updates:
+		if snapshot.Connected {
+			t.Fatalf("disconnect snapshot still connected: %+v", snapshot)
+		}
+		if c.Session() != nil {
+			t.Fatal("disconnected snapshot became visible before the stale session was cleared")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("disconnect state was not published")
+	}
+}
+
 func TestConnectorBackoffOnDialError(t *testing.T) {
 	var dials int32
 	dial := func() (Transport, error) {

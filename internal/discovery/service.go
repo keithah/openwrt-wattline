@@ -316,11 +316,12 @@ func (service *Service) Run(ctx context.Context) error {
 	default:
 	}
 	var updates <-chan state.Snapshot
+	var initial state.Snapshot
 	cancelSubscription := func() {}
 	if service.options.Store != nil {
-		updates, cancelSubscription = service.options.Store.Subscribe()
+		updates, initial, cancelSubscription = service.options.Store.SubscribeWithSnapshot()
 	}
-	defer cancelSubscription()
+	defer func() { cancelSubscription() }()
 	var active Registration
 	activeKey := ""
 	activeInterfaceKey := ""
@@ -432,14 +433,18 @@ func (service *Service) Run(ctx context.Context) error {
 
 	identityKey := ""
 	if service.options.Store != nil {
-		identityKey = discoveryIdentityKey(service.options.Store.Snapshot())
+		identityKey = discoveryIdentityKey(initial)
 	}
 	reconcile()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case snapshot := <-updates:
+		case snapshot, ok := <-updates:
+			if !ok {
+				cancelSubscription()
+				updates, snapshot, cancelSubscription = service.options.Store.SubscribeWithSnapshot()
+			}
 			if key := discoveryIdentityKey(snapshot); key != identityKey {
 				identityKey = key
 				reconcile()

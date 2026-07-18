@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -78,9 +79,22 @@ func NewServer(d Deps) http.Handler {
 		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			route.handler(s, w, r)
 		})
+		if route.method == http.MethodGet || route.method == http.MethodDelete {
+			handler = requireEmptyRequestBody(handler)
+		}
 		mux.HandleFunc(route.method+" "+route.path, route.middleware(s, limitRequestBody(handler)))
 	}
 	return cors(mux)
+}
+
+func requireEmptyRequestBody(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireNoBody(r) != nil {
+			writeAPIError(w, "invalid_request")
+			return
+		}
+		next(w, r)
+	}
 }
 
 type routeDescriptor struct {
@@ -418,7 +432,7 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 			defer cancelRevocation()
 		}
 	}
-	flusher, ok := w.(http.Flusher)
+	_, ok := w.(http.Flusher)
 	if !ok {
 		writeAPIError(w, "internal_error")
 		return
@@ -427,16 +441,28 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	send := func(v any) {
-		b, _ := json.Marshal(v)
-		fmt.Fprintf(w, "data: %s\n\n", b)
-		flusher.Flush()
+	controller := http.NewResponseController(w)
+	send := func(v any) bool {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return false
+		}
+		if err := controller.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return false
+		}
+		defer controller.SetWriteDeadline(time.Time{})
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+			return false
+		}
+		return controller.Flush() == nil
 	}
 
-	ch, cancel := s.d.Store.Subscribe()
+	ch, initial, cancel := s.d.Store.SubscribeWithSnapshot()
 	defer cancel()
 
-	send(snapshotResponse(s.d.Store.Snapshot())) // initial frame, flushed before blocking on subscription
+	if !send(snapshotResponse(initial)) { // initial frame, flushed before blocking on subscription
+		return
+	}
 
 	for {
 		select {
@@ -448,7 +474,9 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			send(snapshotResponse(snap))
+			if !send(snapshotResponse(snap)) {
+				return
+			}
 		}
 	}
 }
