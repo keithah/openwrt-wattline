@@ -46,8 +46,8 @@ make -C package clean all
 package/check-ipk-metadata.sh package/out/*.ipk
 ```
 
-The default version is `1.3.0`. Override it consistently with, for example,
-`make -C package VERSION=1.3.1 all`. A build produces:
+The default version is `0.1.0`. Override it consistently with, for example,
+`make -C package VERSION=0.1.1 all`. A build produces:
 
 - `wattlined_VERSION_aarch64_cortex-a53.ipk`: daemon, procd service,
   first-boot initialization, firewall reconciliation, and interface hotplug;
@@ -67,7 +67,7 @@ builds the four packages and feed index, publishes a GitHub release, and updates
 the `gh-pages` feed. The tag supplies the package version after stripping `v`:
 
 ```sh
-git tag v1.3.0 && git push origin v1.3.0
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
 ### `.ipk` format (verified on-target)
@@ -144,7 +144,7 @@ opkg update && opkg install /tmp/wattline-bt_*.ipk /tmp/wattlined_*.ipk \
   /tmp/luci-app-wattline_*.ipk /tmp/gl-app-wattline_*.ipk'
 ```
 
-Replace `VER` with the release version (for example `1.3.0`). The release
+Replace `VER` with the release version (for example `0.1.0`). The release
 assets are flat files, so they can also be registered directly as an opkg feed:
 
 ```sh
@@ -164,7 +164,7 @@ router upgrades with `opkg upgrade` (or the GL **Plug-ins** page).
 # Build all ipks + the feed index. BUMP THE VERSION each release so opkg
 # detects an upgrade (the Version: field, filename, and index must all match —
 # the Makefile injects VERSION into all three).
-make -C package VERSION=1.3.0 feed
+make -C package VERSION=0.1.0 feed
 # → package/out/{*.ipk, Packages, Packages.gz}
 ```
 

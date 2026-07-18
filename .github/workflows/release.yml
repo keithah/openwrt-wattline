@@ -1,6 +1,6 @@
 name: Release
 
-# Tag a release to trigger:  git tag v1.3.0 && git push origin v1.3.0
+# Tag a release to trigger:  git tag v0.1.0 && git push origin v0.1.0
 on:
   push:
     tags: ['v*']

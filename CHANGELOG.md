@@ -5,6 +5,8 @@ versions built from `package/Makefile`.
 
 ## Unreleased
 
+## 0.1.0
+
 - Added a dedicated **Power-loss shutdown** card to LuCI and the native GL
   panel. The reserved preset defaults to ten minutes of continuous input loss,
   resets when input returns or BLE disconnects, preserves compatible rule

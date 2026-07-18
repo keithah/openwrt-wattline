@@ -736,7 +736,7 @@ TXT keys are exactly `ver`, `api`, `id`, `model`, `cid`, `features`, `tls`, and 
 no other key is part of v1:
 
 ```text
-ver=1.3.0
+ver=0.1.0
 api=1
 id=DC:04:5A:EB:72:2B
 model=BP4SL3V2
