@@ -1,7 +1,11 @@
 #!/bin/sh
 
+FIREWALL_SYNC="${FIREWALL_SYNC:-/usr/lib/wattline/firewall-sync}"
+VPN_REPAIR="${VPN_REPAIR:-/usr/lib/wattline/vpn-firewall-repair}"
+
 case "${ACTION:-}" in
-	ifup|ifupdate)
-		/usr/lib/wattline/firewall-sync
+	ifup|ifupdate|ifdown)
+		"$FIREWALL_SYNC" || exit 1
+		[ ! -x "$VPN_REPAIR" ] || "$VPN_REPAIR" || true
 		;;
 esac

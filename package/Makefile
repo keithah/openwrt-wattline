@@ -71,6 +71,7 @@ ipk-wattlined: bin
 	chmod 0700 $(OUT)/stage/etc/wattline $(OUT)/stage/etc/wattline/tls
 	chmod +x $(OUT)/stage/etc/init.d/wattlined $(OUT)/stage/etc/uci-defaults/99-wattline \
 		$(OUT)/stage/etc/hotplug.d/iface/95-wattline $(OUT)/stage/usr/lib/wattline/firewall-sync \
+		$(OUT)/stage/usr/lib/wattline/vpn-firewall-repair \
 		$(OUT)/stage/CONTROL/postinst
 	$(call make_ipk,wattlined,$(OUT)/stage,$(ARCH))
 

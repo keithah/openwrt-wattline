@@ -24,6 +24,7 @@ jobs:
           set -eu
           for test in \
             package/tests/firewall-sync_test.sh \
+            package/tests/vpn-firewall-repair_test.sh \
             package/tests/provisioning_test.sh \
             package/tests/luci_contract_test.sh \
             package/tests/gl_contract_test.sh \

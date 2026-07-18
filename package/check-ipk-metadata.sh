@@ -52,7 +52,7 @@ for ipk in "$@"; do
 				echo "$ipk: /etc/config/wattline is not declared persistent" >&2
 				failed=1
 			fi
-			for path in ./etc/init.d/wattlined ./etc/uci-defaults/99-wattline ./etc/hotplug.d/iface/95-wattline ./usr/lib/wattline/firewall-sync; do
+			for path in ./etc/init.d/wattlined ./etc/uci-defaults/99-wattline ./etc/hotplug.d/iface/95-wattline ./usr/lib/wattline/firewall-sync ./usr/lib/wattline/vpn-firewall-repair; do
 				if ! awk -v path="$path" '$1 == "-rwxr-xr-x" && $6 == path { found = 1 } END { exit !found }' "$listing"; then
 					echo "$ipk: $path is missing or not mode 0755" >&2
 					failed=1

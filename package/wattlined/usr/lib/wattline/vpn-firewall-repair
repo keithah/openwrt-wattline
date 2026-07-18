@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+TAILSCALE_INIT="${TAILSCALE_INIT:-/etc/init.d/tailscale}"
+IPTABLES="${IPTABLES:-iptables}"
+UCI="${UCI:-uci}"
+LOGGER="${LOGGER:-logger}"
+
+# Tailscale owns dynamic ts-* chains that an OpenWrt fw3 reload can flush.
+# GL-X3000 reloads fw3 after late WWAN/Speedify interface events, after
+# tailscaled has already started. Repair only that observed partial state;
+# ordinary WireGuard interfaces are managed by netifd/fw3 and need no restart.
+[ -x "$TAILSCALE_INIT" ] || exit 0
+[ "$($UCI -q get tailscale.settings.enabled 2>/dev/null || true)" = 1 ] || exit 0
+command -v "$IPTABLES" >/dev/null 2>&1 || exit 0
+
+if "$IPTABLES" -nL ts-input >/dev/null 2>&1 && \
+	"$IPTABLES" -C INPUT -j ts-input >/dev/null 2>&1; then
+	exit 0
+fi
+
+if "$TAILSCALE_INIT" restart; then
+	"$LOGGER" -t wattline 'restored Tailscale firewall integration after OpenWrt reload'
+	exit 0
+fi
+
+"$LOGGER" -t wattline 'failed to restore Tailscale firewall integration'
+exit 1

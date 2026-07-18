@@ -77,13 +77,15 @@ grep -Fq 'kill -HUP' "$INIT"
 grep -Fq 'procd_set_param respawn' "$INIT"
 grep -Fq 'procd_set_param stdout 1' "$INIT"
 grep -Fq 'procd_set_param stderr 1' "$INIT"
+grep -Fq '"$VPN_REPAIR"' "$INIT"
 
 FIREWALL_SYNC="$TMP/firewall-sync"
+VPN_REPAIR="$TMP/vpn-repair"
 SERVICE_SCRIPT="$TMP/service"
 PGREP="$TMP/pgrep"
 RUNTIME_DIR="$TMP/run"
 DAEMON_STATE="$RUNTIME_DIR/daemon-state"
-export FIREWALL_SYNC SERVICE_SCRIPT PGREP RUNTIME_DIR DAEMON_STATE
+export FIREWALL_SYNC VPN_REPAIR SERVICE_SCRIPT PGREP RUNTIME_DIR DAEMON_STATE
 cat > "$FIREWALL_SYNC" <<'EOF'
 #!/bin/sh
 printf 'sync\n' >> "$CALLS"
@@ -92,12 +94,16 @@ cat > "$SERVICE_SCRIPT" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$CALLS"
 EOF
+cat > "$VPN_REPAIR" <<'EOF'
+#!/bin/sh
+printf 'vpn-repair\n' >> "$CALLS"
+EOF
 cat > "$PGREP" <<'EOF'
 #!/bin/sh
 printf 'pgrep\n' >> "$CALLS"
 exit 1
 EOF
-chmod +x "$FIREWALL_SYNC" "$SERVICE_SCRIPT" "$PGREP"
+chmod +x "$FIREWALL_SYNC" "$VPN_REPAIR" "$SERVICE_SCRIPT" "$PGREP"
 
 # rc.common normally sources this file; sourcing lets the harness call its
 # lifecycle functions with harmless injected commands.
