@@ -77,6 +77,64 @@ func TestBlindResetsHold(t *testing.T) {
 	}
 }
 
+func TestPowerLossShutdownPresetSemantics(t *testing.T) {
+	rule := config.Rule{
+		Name: "no_input_shutdown", Enabled: true, Condition: "input_power",
+		State: "absent", Hold: 10 * time.Minute, HysteresisMargin: 5,
+		Actions: []string{"shutdown"}, ConfirmShutdown: true,
+	}
+	e, err := NewEngine([]config.Rule{rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	absent := snap(true, 0, 50, false)
+	present := snap(true, 1, 50, false)
+	if f := e.Tick(absent, t0); len(f) != 0 {
+		t.Fatalf("power loss fired at the start of the hold: %+v", f)
+	}
+	if f := e.Tick(absent, t0.Add(9*time.Minute+59*time.Second)); len(f) != 0 {
+		t.Fatalf("power loss fired before ten continuous minutes: %+v", f)
+	}
+	if f := e.Tick(absent, t0.Add(10*time.Minute)); len(f) != 1 {
+		t.Fatalf("expected one firing after ten continuous minutes, got %+v", f)
+	} else if len(f[0].Rule.Actions) != 1 || f[0].Rule.Actions[0] != "shutdown" {
+		t.Fatalf("preset fired unexpected actions: %+v", f[0].Rule.Actions)
+	}
+	if f := e.Tick(absent, t0.Add(10*time.Minute+time.Second)); len(f) != 0 {
+		t.Fatalf("preset fired more than once without re-arm: %+v", f)
+	}
+	if f := e.Tick(present, t0.Add(11*time.Minute)); len(f) != 0 {
+		t.Fatalf("restored input fired instead of re-arming the rule: %+v", f)
+	}
+	if f := e.Tick(absent, t0.Add(12*time.Minute)); len(f) != 0 {
+		t.Fatalf("re-armed power loss fired without a fresh hold: %+v", f)
+	}
+	if f := e.Tick(absent, t0.Add(21*time.Minute+59*time.Second)); len(f) != 0 {
+		t.Fatalf("re-armed power loss fired before the full hold: %+v", f)
+	}
+	if f := e.Tick(present, t0.Add(22*time.Minute)); len(f) != 0 {
+		t.Fatalf("restored input fired instead of cancelling the hold: %+v", f)
+	}
+	if f := e.Tick(absent, t0.Add(23*time.Minute)); len(f) != 0 {
+		t.Fatalf("cancelled hold was not restarted: %+v", f)
+	}
+	if f := e.Tick(state.Snapshot{Connected: false}, t0.Add(28*time.Minute)); len(f) != 0 {
+		t.Fatalf("disconnected tick fired while telemetry was blind: %+v", f)
+	}
+	if f := e.Tick(absent, t0.Add(35*time.Minute)); len(f) != 0 {
+		t.Fatalf("reconnect counted disconnected time toward the hold: %+v", f)
+	}
+	if f := e.Tick(absent, t0.Add(45*time.Minute)); len(f) != 1 {
+		t.Fatalf("expected one shutdown firing after ten fresh minutes, got %+v", f)
+	} else if len(f[0].Rule.Actions) != 1 || f[0].Rule.Actions[0] != "shutdown" {
+		t.Fatalf("preset fired unexpected actions: %+v", f[0].Rule.Actions)
+	}
+	if f := e.Tick(absent, t0.Add(46*time.Minute)); len(f) != 0 {
+		t.Fatalf("preset fired more than once without re-arm: %+v", f)
+	}
+}
+
 func TestBatteryHysteresis(t *testing.T) {
 	r := config.Rule{Name: "low", Enabled: true, Condition: "battery_level",
 		Op: "below", Percent: 15, HysteresisMargin: 5, Actions: []string{"dc_off"}}

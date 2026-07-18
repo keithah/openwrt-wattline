@@ -1,0 +1,13 @@
+{
+  "name": "no_input_shutdown",
+  "canonical": {
+    "name": "no_input_shutdown",
+    "enabled": true,
+    "condition": "input_power",
+    "state": "absent",
+    "hold": 600000000000,
+    "hysteresis_margin": 5,
+    "actions": ["shutdown"],
+    "confirm_shutdown": true
+  }
+}
