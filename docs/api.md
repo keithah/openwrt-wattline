@@ -194,10 +194,12 @@ Endpoint-specific errors: if streaming is unsupported before response status
 `200` and SSE headers are sent, return HTTP `500` with exact body
 `E(internal_error)`. Once the `200` stream has begun, a transport failure or
 client disconnect ends the stream and cannot carry a JSON error body. Revoking
-the managed token that authenticated a live stream also ends that stream
-promptly; streams authenticated by other managed tokens or the bootstrap token
-remain open. Authentication errors occur before streaming begins. BLE I/O: none;
-BLE notifications update the store independently.
+the managed token that authenticated a live stream ends that stream promptly.
+A successful token-store cutover similarly ends streams authenticated by
+managed tokens from the old store. Streams authenticated by other current-store
+managed tokens or the bootstrap token remain open. Authentication errors occur
+before streaming begins. BLE I/O: none; BLE notifications update the store
+independently.
 
 ## Granular controls
 
@@ -593,6 +595,14 @@ field changed, otherwise `false`. Errors: `400 invalid_request` for malformed
 JSON, an unknown/read-only field, invalid value, or invalid resulting listener
 configuration, plus auth/role errors. BLE I/O: none.
 
+For a `token_store` change, a successful durable `SaveMain` activates the target
+store. At that commit boundary, all old-store managed SSE streams close and old
+managed tokens fail future requests because authentication now uses the target
+store; the bootstrap SSE remains open. The old store file and its managed tokens
+are not revoked or deleted, and switching back to that path can reactivate them.
+A persistence failure preserves the old authenticator and its streams: the
+runtime store swap is rolled back and no cutover termination is published.
+
 ### `POST /api/v1/tls/rotate`
 
 Role: admin. Request `{"confirm":true}`. Success `200 OK`:
@@ -714,7 +724,7 @@ for a valid client token. “No body” means an exactly zero-byte request body.
 | `GET /api/v1/status` | client | no body | `200 {"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"V2","firmware":"1.4.9","bootloader_firmware":"1.0.3","mac":"DC:04:5A:EB:72:2B","cid":773,"features":4095,"mode":"app"},"rules":[]}` | none | none |
 | `GET /api/v1/telemetry` | client | no body | `200` with exactly the one complete cached Snapshot JSON defined under the primary `GET /api/v1/telemetry` section, including its top-level `identity` and `commands`; this compatibility contract is not a reduced subset | none | none |
 | `GET /api/v1/history` | client | no body | `200 [{"at":"2026-07-17T19:59:00Z","level":77,"status":1,"dc_w":12.0,"typec_w":20.0}]` (empty is exactly `[]`) | none | none |
-| `GET /api/v1/events` | client | no body | `200`, `Content-Type: text/event-stream`, then the exact complete-snapshot framing specified above | before streaming begins, `500 E(internal_error)` if response streaming is unavailable; after `200` begins, transport failure/disconnect only terminates the stream and has no JSON error body | none |
+| `GET /api/v1/events` | client | no body | `200`, `Content-Type: text/event-stream`, then the exact complete-snapshot framing specified above | before streaming begins, `500 E(internal_error)` if response streaming is unavailable; managed-token revocation or a successful token-store cutover terminates the affected managed stream; after `200` begins, termination has no JSON error body | none |
 
 ### Rule and action compatibility routes
 

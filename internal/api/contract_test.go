@@ -65,6 +65,13 @@ func TestContractDocumentation(t *testing.T) {
 		phrases []string
 	}{
 		{"## Settings and TLS", "## mDNS", []string{
+			"successful durable `SaveMain` activates the target store",
+			"all old-store managed SSE streams close",
+			"old managed tokens fail future requests",
+			"bootstrap SSE remains open",
+			"not revoked or deleted",
+			"switching back to that path can reactivate them",
+			"persistence failure preserves the old authenticator and its streams",
 			"Clients MUST verify the certificate before sending any bearer token",
 			"replaces both public-CA chain validation and hostname/SAN validation",
 			"startup hostname plus `localhost`, `127.0.0.1`, and `::1`",
@@ -72,6 +79,9 @@ func TestContractDocumentation(t *testing.T) {
 			"normal chain and hostname/SAN validation",
 			"MUST NOT silently downgrade to HTTP",
 			"old pin MUST be rejected",
+		}},
+		{"### Cached state compatibility routes", "### Rule and action compatibility routes", []string{
+			"managed-token revocation or a successful token-store cutover terminates the affected managed stream",
 		}},
 		{"### BLE-device pairing compatibility routes", "### Deprecated device-control aliases", []string{
 			"409 E(operation_in_progress)",
