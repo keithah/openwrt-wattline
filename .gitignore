@@ -5,6 +5,7 @@ Packages
 Packages.gz
 /wattlined
 *.bin
+!package/wattline-rtl8761b/lib/firmware/rtl_bt/*.bin
 
 # go
 /bin/
