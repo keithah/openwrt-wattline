@@ -50,7 +50,8 @@ fi
 # Polling is stable and administration mutations are not replayed over HTTP.
 need "$VIEW" 'setInterval' 'telemetry polling timer'
 need "$VIEW" '2000' 'two-second telemetry polling'
-need "$VIEW" 'safe \? endpoints\.slice\(\) : \[endpoints\[0\]\]' 'mutations exactly once on preferred listener'
+need "$VIEW" 'var preferred = null' 'proven-listener transport state'
+need "$VIEW" 'preferred \? \[preferred\]' 'mutations exactly once on proven listener'
 need "$VIEW" 'document\.activeElement' 'focused input preservation'
 need "$VIEW" 'window\.confirm' 'destructive confirmations'
 need "$VIEW" 'advancedCapabilities' 'advanced support and policy gate'
@@ -95,13 +96,43 @@ function transportFactory(fetchImpl) {
 
 async function transportTests() {
 	const calls = [];
-	const replies = [Promise.reject(new Error('TLS unavailable')), Promise.resolve({ ok: true, json: async () => ({ ok: true }) })];
+	const replies = [
+		Promise.reject(new Error('TLS unavailable')),
+		Promise.resolve({ ok: true, json: async () => ({ ok: true }) }),
+		Promise.resolve({ ok: true, json: async () => ({ status: 'scanning' }) })
+	];
 	const factory = transportFactory((url, options) => { calls.push([url, options]); return replies.shift(); });
 	const client = factory({ https_enabled: true, https_port: 8378, http_enabled: true, port: 8377 }, 'admin-secret');
 	await client.json('GET', '/device');
 	assert.deepStrictEqual(calls.map((item) => item[0]), [
 		'https://router.lan:8378/api/v1/device', 'http://router.lan:8377/api/v1/device'
 	], 'safe GET prefers HTTPS then falls back to HTTP');
+	await client.json('POST', '/pairing/scan');
+	assert.deepStrictEqual(calls.map((item) => item[0]), [
+		'https://router.lan:8378/api/v1/device',
+		'http://router.lan:8377/api/v1/device',
+		'http://router.lan:8377/api/v1/pairing/scan'
+	], 'mutation uses the listener proven by the safe GET exactly once');
+
+	const applicationCalls = [];
+	const applicationReplies = [
+		Promise.reject(new Error('TLS unavailable')),
+		Promise.resolve({ ok: false, status: 403, json: async () => ({
+			error: { code: 'advanced_disabled', message: 'Advanced operations are disabled', details: {} }
+		}) }),
+		Promise.resolve({ ok: true, json: async () => ({ status: 'scanning' }) })
+	];
+	const reached = transportFactory((url) => {
+		applicationCalls.push(url); return applicationReplies.shift();
+	})({ https_enabled: true, https_port: 8378, http_enabled: true, port: 8377 }, 'admin-secret');
+	await assert.rejects(reached.json('GET', '/device/ota'), (error) =>
+		error.code === 'advanced_disabled' && error.status === 403);
+	await reached.json('POST', '/pairing/scan');
+	assert.deepStrictEqual(applicationCalls, [
+		'https://router.lan:8378/api/v1/device/ota',
+		'http://router.lan:8377/api/v1/device/ota',
+		'http://router.lan:8377/api/v1/pairing/scan'
+	], 'an HTTP application error still proves the listener is reachable');
 
 	let mutations = 0;
 	const failing = transportFactory(async (url) => { mutations++; assert.match(url, /^https:/); throw new Error('ambiguous reset'); })(

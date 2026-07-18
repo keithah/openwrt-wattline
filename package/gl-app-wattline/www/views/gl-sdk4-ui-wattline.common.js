@@ -34,22 +34,35 @@
   function apiClient(config, token) {
     var host = window.location.hostname;
     var endpoints = [];
+    var preferred = null;
     if (config.https_enabled) endpoints.push('https://' + host + ':' + config.https_port + '/api/v1');
     if (config.http_enabled) endpoints.push('http://' + host + ':' + config.port + '/api/v1');
     function response(method, path, body, extra) {
       method = method.toUpperCase();
       var safe = method === 'GET';
       // A failed GET is safe to probe over HTTP. A mutation may already have
-      // committed before a connection error, so it is sent exactly once.
-      var candidates = safe ? endpoints.slice() : [endpoints[0]];
+      // committed before a connection error, so it is sent exactly once over
+      // the listener already proven by a completed HTTP response.
+      var candidates;
+      if (safe) {
+        candidates = preferred ? [preferred].concat(endpoints.filter(function (endpoint) {
+          return endpoint !== preferred;
+        })) : endpoints.slice();
+      } else {
+        candidates = preferred ? [preferred] : (endpoints.length ? [endpoints[0]] : []);
+      }
       var index = 0;
       function attempt(lastError) {
         if (index >= candidates.length) return Promise.reject(lastError || new Error('No API listener is enabled'));
+        var endpoint = candidates[index++];
         var headers = { Authorization: 'Bearer ' + token };
         if (body != null) headers['Content-Type'] = 'application/json';
         var options = { method: method, headers: headers, cache: 'no-store', body: body == null ? null : JSON.stringify(body) };
         if (extra && extra.signal) options.signal = extra.signal;
-        return fetch(candidates[index++] + path, options).catch(function (error) {
+        return fetch(endpoint + path, options).then(function (result) {
+          preferred = endpoint;
+          return result;
+        }).catch(function (error) {
           var aborted = error && error.name === 'AbortError';
           if (safe && !aborted && index < candidates.length) return attempt(error);
           throw error;
