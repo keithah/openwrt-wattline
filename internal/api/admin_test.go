@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -453,6 +454,123 @@ func TestAdminSettingsRefusesLiveChangeWithoutApplicationMechanism(t *testing.T)
 	rr := do(t, h, http.MethodPut, "/api/v1/settings", "tok", `{"advanced":true}`)
 	if rr.Code != http.StatusInternalServerError || f.saves != 0 || f.config.Advanced {
 		t.Fatalf("status=%d saves=%d config=%+v", rr.Code, f.saves, f.config)
+	}
+}
+
+func TestSettingsTransactionSerializesFailedAndSuccessfulUpdates(t *testing.T) {
+	f := newAdminFixture(t)
+	deps := f.deps
+	var diskMu sync.Mutex
+	disk := *f.config
+	runtime := liveSettingsFixture{disk.PairingTTL, disk.PairingAlwaysOn, disk.Advanced, disk.BLEPIN, disk.TokenStore}
+	aSaving := make(chan struct{})
+	releaseA := make(chan struct{})
+	bApplied := make(chan struct{}, 1)
+	deps.Settings = func() *config.Config {
+		diskMu.Lock()
+		defer diskMu.Unlock()
+		copy := disk
+		copy.MDNSInterfaces = append([]string(nil), disk.MDNSInterfaces...)
+		return &copy
+	}
+	deps.ApplySettings = func(before, after *config.Config) (func(), error) {
+		previous := runtime
+		runtime = liveSettingsFixture{after.PairingTTL, after.PairingAlwaysOn, after.Advanced, after.BLEPIN, after.TokenStore}
+		if after.PairingAlwaysOn {
+			bApplied <- struct{}{}
+		}
+		return func() { runtime = previous }, nil
+	}
+	deps.SaveMain = func(next *config.Config) error {
+		if next.Advanced {
+			close(aSaving)
+			<-releaseA
+			return errors.New("first save failed")
+		}
+		diskMu.Lock()
+		disk = *next
+		disk.MDNSInterfaces = append([]string(nil), next.MDNSInterfaces...)
+		diskMu.Unlock()
+		return nil
+	}
+	h := NewServer(deps)
+	type result struct{ code int }
+	aDone := make(chan result, 1)
+	bDone := make(chan result, 1)
+	go func() { aDone <- result{do(t, h, http.MethodPut, "/api/v1/settings", "tok", `{"advanced":true}`).Code} }()
+	<-aSaving
+	go func() {
+		bDone <- result{do(t, h, http.MethodPut, "/api/v1/settings", "tok", `{"pairing_always_on":true}`).Code}
+	}()
+	select {
+	case <-bApplied:
+		close(releaseA)
+		t.Fatal("second settings update applied before first transaction completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseA)
+	if got := (<-aDone).code; got != http.StatusInternalServerError {
+		t.Fatalf("failed update status %d", got)
+	}
+	if got := (<-bDone).code; got != http.StatusOK {
+		t.Fatalf("successful update status %d", got)
+	}
+	diskMu.Lock()
+	finalDisk := disk
+	diskMu.Unlock()
+	if finalDisk.Advanced || !finalDisk.PairingAlwaysOn || runtime.Advanced || !runtime.PairingAlwaysOn {
+		t.Fatalf("disk/runtime diverged: disk=%+v runtime=%+v", finalDisk, runtime)
+	}
+}
+
+func TestClientPairWaitsForTokenStoreCutover(t *testing.T) {
+	f := newAdminFixture(t)
+	status := f.pairing.Open()
+	deps := f.deps
+	originalApply := deps.ApplySettings
+	cutoverStarted := make(chan struct{})
+	releaseCutover := make(chan struct{})
+	deps.ApplySettings = func(before, after *config.Config) (func(), error) {
+		rollback, err := originalApply(before, after)
+		if err != nil {
+			return nil, err
+		}
+		close(cutoverStarted)
+		<-releaseCutover
+		return rollback, nil
+	}
+	h := NewServer(deps)
+	putDone := make(chan int, 1)
+	go func() {
+		putDone <- do(t, h, http.MethodPut, "/api/v1/settings", "tok", `{"token_store":"/etc/wattline/new-tokens.json"}`).Code
+	}()
+	<-cutoverStarted
+	pairDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		pairDone <- do(t, h, http.MethodPost, "/api/v1/pair", "", `{"pin":"`+status.PIN+`","label":"during cutover"}`)
+	}()
+	select {
+	case response := <-pairDone:
+		close(releaseCutover)
+		t.Fatalf("pair completed during token-store cutover: %d %s", response.Code, response.Body.String())
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseCutover)
+	if got := <-putDone; got != http.StatusOK {
+		t.Fatalf("settings status %d", got)
+	}
+	response := <-pairDone
+	if response.Code != http.StatusCreated {
+		t.Fatalf("pair status %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.activeStore.Authenticate(body.Token); !ok || f.activeStore != f.alternateStore {
+		t.Fatal("issued token does not authenticate in the active post-cutover store")
 	}
 }
 

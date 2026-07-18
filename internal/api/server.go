@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/keithah/openwrt-wattline/internal/actions"
@@ -49,7 +50,10 @@ type Deps struct {
 	PreferredHost  func() string
 }
 
-type server struct{ d Deps }
+type server struct {
+	d          Deps
+	settingsMu sync.RWMutex
+}
 
 func (s *server) now() time.Time {
 	if s.d.Now != nil {
@@ -72,8 +76,8 @@ func NewServer(d Deps) http.Handler {
 	mux.HandleFunc("PUT /api/v1/device/usbc/limit/{type}", s.auth(s.putLimit))
 	mux.HandleFunc("DELETE /api/v1/device/usbc/limit/{type}", s.auth(s.deleteLimit))
 	mux.HandleFunc("POST /api/v1/device/dc/bypass", s.auth(s.setBypass))
-	mux.HandleFunc("GET /api/v1/device/dc/bypass/threshold", s.admin(s.getThreshold))
-	mux.HandleFunc("PUT /api/v1/device/dc/bypass/threshold", s.admin(s.putThreshold))
+	mux.HandleFunc("GET /api/v1/device/dc/bypass/threshold", s.admin(s.settingsRead(s.getThreshold)))
+	mux.HandleFunc("PUT /api/v1/device/dc/bypass/threshold", s.admin(s.settingsRead(s.putThreshold)))
 	mux.HandleFunc("GET /api/v1/device/timers", s.auth(s.listTimers))
 	mux.HandleFunc("POST /api/v1/device/timers", s.auth(s.addTimer))
 	mux.HandleFunc("GET /api/v1/device/timers/{id}", s.auth(s.getTimer))
@@ -86,24 +90,24 @@ func NewServer(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/v1/device/ota", s.admin(s.otaInfo))
 	mux.HandleFunc("POST /api/v1/device/ota/enter", s.admin(s.enterOTA))
 	mux.HandleFunc("POST /api/v1/device/ota/exit", s.admin(s.exitOTA))
-	mux.HandleFunc("PUT /api/v1/device/advanced/running-mode", s.admin(s.putRunningMode))
-	mux.HandleFunc("GET /api/v1/device/advanced/barrier-free", s.admin(s.getBarrierFree))
-	mux.HandleFunc("PUT /api/v1/device/advanced/barrier-free", s.admin(s.putBarrierFree))
-	mux.HandleFunc("GET /api/v1/device/advanced/usb-fw-version", s.admin(s.getUSBFirmware))
-	mux.HandleFunc("PUT /api/v1/device/advanced/ble-pin", s.admin(s.putBLEPIN))
+	mux.HandleFunc("PUT /api/v1/device/advanced/running-mode", s.admin(s.settingsRead(s.putRunningMode)))
+	mux.HandleFunc("GET /api/v1/device/advanced/barrier-free", s.admin(s.settingsRead(s.getBarrierFree)))
+	mux.HandleFunc("PUT /api/v1/device/advanced/barrier-free", s.admin(s.settingsRead(s.putBarrierFree)))
+	mux.HandleFunc("GET /api/v1/device/advanced/usb-fw-version", s.admin(s.settingsRead(s.getUSBFirmware)))
+	mux.HandleFunc("PUT /api/v1/device/advanced/ble-pin", s.admin(s.settingsRead(s.putBLEPIN)))
 	mux.HandleFunc("GET /api/v1/rules", s.auth(s.getRules))
 	mux.HandleFunc("POST /api/v1/rules", s.auth(s.postRule))
 	mux.HandleFunc("PUT /api/v1/rules/{name}", s.auth(s.putRule))
 	mux.HandleFunc("DELETE /api/v1/rules/{name}", s.auth(s.deleteRule))
 	mux.HandleFunc("POST /api/v1/device/action", s.auth(s.deviceAction))
-	mux.HandleFunc("GET /api/v1/pairing/status", s.auth(s.pairing(s.pairingStatus)))
-	mux.HandleFunc("POST /api/v1/pairing/scan", s.auth(s.pairing(s.pairingScan)))
-	mux.HandleFunc("POST /api/v1/pairing/pair", s.auth(s.pairing(s.pairingPair)))
-	mux.HandleFunc("DELETE /api/v1/pairing/device/{mac}", s.auth(s.pairing(s.pairingUnpair)))
+	mux.HandleFunc("GET /api/v1/pairing/status", s.auth(s.settingsRead(s.pairing(s.pairingStatus))))
+	mux.HandleFunc("POST /api/v1/pairing/scan", s.auth(s.settingsRead(s.pairing(s.pairingScan))))
+	mux.HandleFunc("POST /api/v1/pairing/pair", s.auth(s.settingsRead(s.pairing(s.pairingPair))))
+	mux.HandleFunc("DELETE /api/v1/pairing/device/{mac}", s.auth(s.settingsRead(s.pairing(s.pairingUnpair))))
 	mux.HandleFunc("GET /api/v1/device/usbc-limit", s.auth(s.getUSBCLimit))
 	mux.HandleFunc("POST /api/v1/device/usbc-limit", s.auth(s.setUSBCLimit))
-	mux.HandleFunc("GET /api/v1/device/bypass-threshold", s.admin(s.getBypassThreshold))
-	mux.HandleFunc("POST /api/v1/device/bypass-threshold", s.admin(s.setBypassThreshold))
+	mux.HandleFunc("GET /api/v1/device/bypass-threshold", s.admin(s.settingsRead(s.getBypassThreshold)))
+	mux.HandleFunc("POST /api/v1/device/bypass-threshold", s.admin(s.settingsRead(s.setBypassThreshold)))
 	mux.HandleFunc("GET /api/v1/device/schedules", s.auth(s.getSchedules))
 	mux.HandleFunc("POST /api/v1/device/schedules", s.auth(s.postSchedule))
 	mux.HandleFunc("DELETE /api/v1/device/schedules/{id}", s.auth(s.deleteSchedule))
@@ -168,6 +172,8 @@ func (s *server) authenticate(r *http.Request) (auth.Principal, bool) {
 	if secret == "" || strings.ContainsAny(secret, " \t\r\n") {
 		return auth.Principal{}, false
 	}
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
 	if store := s.authStore(); store != nil {
 		return store.Authenticate(secret)
 	}
@@ -193,6 +199,14 @@ func (s *server) admin(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	})
+}
+
+func (s *server) settingsRead(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.settingsMu.RLock()
+		defer s.settingsMu.RUnlock()
+		next(w, r)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

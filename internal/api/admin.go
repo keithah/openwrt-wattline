@@ -36,6 +36,8 @@ func (s *server) clientPair(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
 	if s.d.ClientPairing == nil {
 		writeAPIError(w, "internal_error")
 		return
@@ -71,6 +73,8 @@ func (s *server) pairingModeStatus(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
 	if s.d.ClientPairing == nil {
 		writeAPIError(w, "internal_error")
 		return
@@ -83,6 +87,8 @@ func (s *server) openPairingMode(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
 	if s.d.ClientPairing == nil {
 		writeAPIError(w, "internal_error")
 		return
@@ -95,6 +101,8 @@ func (s *server) closePairingMode(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
 	if s.d.ClientPairing == nil {
 		writeAPIError(w, "internal_error")
 		return
@@ -110,6 +118,8 @@ func (s *server) pairingQRCode(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
 	if s.d.ClientPairing == nil {
 		writeAPIError(w, "internal_error")
 		return
@@ -140,6 +150,8 @@ func (s *server) listTokens(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
 	store := s.authStore()
 	if store == nil {
 		writeJSON(w, http.StatusOK, []auth.TokenMeta{})
@@ -153,6 +165,8 @@ func (s *server) revokeToken(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
 	store := s.authStore()
 	if store == nil {
 		writeAPIError(w, "not_found")
@@ -226,6 +240,8 @@ func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, "invalid_request")
 		return
 	}
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
 	cfg, ok := s.currentConfig()
 	if !ok {
 		writeAPIError(w, "internal_error")
@@ -394,6 +410,8 @@ func liveFieldsChanged(before, after *config.Config) bool {
 }
 
 func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
 	before, ok := s.currentConfig()
 	if !ok || s.d.SaveMain == nil {
 		writeAPIError(w, "internal_error")
@@ -544,6 +562,8 @@ func escapeRFC3986(value string) string {
 }
 
 func (s *server) pairingURI(pin string) string {
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
 	metadata, err := s.connectionMetadata()
 	if err != nil {
 		return ""
