@@ -81,11 +81,12 @@ return view.extend({
 		// connect and after a control action — NOT on every 2s telemetry poll —
 		// so its text inputs keep focus while the user types.
 		var extra = E('div', {});
+		var adminError = E('div', {});
 		var admin = E('div', {}, E('div', { 'class': 'wl-card' }, E('div', { 'class': 'wl-msg' }, _('Loading device administration…'))));
 		var wrap = E('div', { 'class': 'wl-wrap' }, [
 			E('style', {}, css()),
 			E('div', { 'class': 'wl-head' }, [E('div', {}, [E('div', { 'class': 'wl-title' }, 'Wattline'), dev]), conn]),
-			body, extra, admin
+			body, extra, adminError, admin
 		]);
 
 		function act(action) { api(token, port, 'POST', '/device/action', { action: action }).catch(function () {}); }
@@ -300,13 +301,29 @@ return view.extend({
 		var adminRefresh;
 		var powerLossModel = { kind: 'missing', rule: null };
 		var powerLossStatus = null, latestTelemetry = null, powerLossCard = null, powerLossLive = null, powerLossDelayInput = null;
+		var powerLossEnabledInput = null, powerLossSaveButton = null, powerLossResetButton = null;
+		var powerLossActions = null, powerLossConflict = null, powerLossErrorNode = null;
 		var powerLossEnabled = true, powerLossDelayDraft = '10';
-		var powerLossEditing = false, powerLossSaving = false, powerLossError = '';
+		var powerLossSaving = false, powerLossRetryDraft = false, powerLossError = '';
+		function powerLossRuntime() {
+			var list = Array.isArray(powerLossStatus) ? powerLossStatus : powerLossStatus && powerLossStatus.rules;
+			if (!Array.isArray(list)) return null;
+			for (var i = 0; i < list.length; i++) {
+				if (list[i] && list[i].name === 'no_input_shutdown') return list[i];
+			}
+			return null;
+		}
 		function powerLossStatusText() {
+			if (powerLossModel.kind === 'missing') return _('Preset not configured · no countdown');
+			if (powerLossModel.kind === 'conflict') return _('Customized rule conflict · no countdown');
+			if (powerLossModel.rule.enabled === false) return _('Rule disabled · no countdown');
 			var state = wattlinePowerLoss.display(powerLossModel.rule, powerLossStatus, latestTelemetry);
 			if (state.kind === 'disconnected') return _('Disconnected · countdown reset');
 			if (state.kind === 'present') return _('Input power present · countdown reset');
 			if (state.kind === 'fired') return _('Rule last fired') + ' ' + formatDate(state.lastFired) + ' · ' + _('delivery not confirmed');
+			var runtime = powerLossRuntime();
+			if (!runtime || runtime.armed !== true || !runtime.holding_for)
+				return _('Input power absent · countdown not active');
 			return _('Input power absent · ') + Math.ceil(state.remainingSeconds / 60) + _(' min remaining');
 		}
 		function updatePowerLossLive() {
@@ -317,26 +334,55 @@ return view.extend({
 			powerLossCard = buildPowerLossCard();
 			if (previous && previous.parentNode) previous.parentNode.replaceChild(powerLossCard, previous);
 		}
+		function syncPowerLossCard(preserveDelay) {
+			if (!powerLossCard) return;
+			powerLossEnabledInput.checked = powerLossEnabled;
+			if (!preserveDelay) powerLossDelayInput.value = powerLossDelayDraft;
+			powerLossSaveButton.removeAttribute('disabled');
+			if (powerLossModel.kind === 'conflict' || powerLossSaving) powerLossSaveButton.setAttribute('disabled', '');
+			powerLossActions.innerHTML = '';
+			powerLossActions.appendChild(powerLossSaveButton);
+			powerLossResetButton = null;
+			if (powerLossModel.kind === 'conflict') {
+				powerLossResetButton = E('button', { 'class': 'wl-btn danger' }, _('Reset preset'));
+				if (powerLossSaving) powerLossResetButton.setAttribute('disabled', '');
+				powerLossResetButton.addEventListener('click', function () {
+					savePowerLoss(true, powerLossSaveButton, powerLossResetButton);
+				});
+				powerLossActions.appendChild(powerLossResetButton);
+			}
+			powerLossConflict.textContent = powerLossModel.kind === 'conflict' ?
+				_('Customized rule conflict. Save is disabled until you reset this preset.') : '';
+			powerLossErrorNode.textContent = powerLossError;
+			updatePowerLossLive();
+		}
 		function savePowerLoss(reset, saveButton, resetButton) {
 			if (powerLossSaving) return Promise.resolve();
 			if (reset && !window.confirm(_('Reset the customized rule to the Power-loss shutdown preset?'))) return Promise.resolve();
 			powerLossSaving = true;
+			powerLossRetryDraft = false;
 			powerLossError = '';
-			powerLossEditing = false;
 			powerLossDelayInput = null;
 			saveButton.setAttribute('disabled', '');
 			if (resetButton) resetButton.setAttribute('disabled', '');
+			var submittedEnabled = powerLossEnabled;
+			var submittedDelay = powerLossDelayDraft;
+			var submittedRule = powerLossModel.rule;
 			var method = powerLossModel.kind === 'missing' ? 'POST' : 'PUT';
 			var path = powerLossModel.kind === 'missing' ? '/rules' : '/rules/no_input_shutdown';
 			return adminRefresh.mutation(function () {
 				return api(token, port, method, path,
-					wattlinePowerLoss.payload(powerLossModel.rule, powerLossEnabled, powerLossDelayDraft, reset));
+					wattlinePowerLoss.payload(submittedRule, submittedEnabled, submittedDelay, reset));
 			}).then(function () {
 				powerLossSaving = false;
+				powerLossRetryDraft = false;
 				powerLossError = '';
 				replacePowerLossCard();
 			}, function (error) {
 				powerLossSaving = false;
+				powerLossRetryDraft = true;
+				powerLossEnabled = submittedEnabled;
+				powerLossDelayDraft = submittedDelay;
 				powerLossError = error.message;
 				replacePowerLossCard();
 			});
@@ -352,27 +398,17 @@ return view.extend({
 				value: powerLossDelayDraft
 			});
 			powerLossDelayInput = delayInput;
-			delayInput.addEventListener('focus', function () { powerLossEditing = true; });
 			delayInput.addEventListener('input', function () {
-				powerLossEditing = true;
 				powerLossDelayDraft = delayInput.value;
 			});
-			delayInput.addEventListener('blur', function () { powerLossEditing = false; });
 			var saveButton = E('button', { 'class': 'wl-btn primary' }, _('Save'));
-			var resetButton = null;
-			if (powerLossModel.kind === 'conflict') {
-				saveButton.setAttribute('disabled', '');
-				resetButton = E('button', { 'class': 'wl-btn danger' }, _('Reset preset'));
-			}
-			if (powerLossSaving) {
-				saveButton.setAttribute('disabled', '');
-				if (resetButton) resetButton.setAttribute('disabled', '');
-			}
-			saveButton.addEventListener('click', function () { savePowerLoss(false, saveButton, resetButton); });
-			if (resetButton) resetButton.addEventListener('click', function () { savePowerLoss(true, saveButton, resetButton); });
+			saveButton.addEventListener('click', function () {
+				savePowerLoss(false, powerLossSaveButton, powerLossResetButton);
+			});
 			powerLossLive = E('div', { 'class': 'wl-note', 'aria-live': 'polite' }, powerLossStatusText());
-			var actions = [saveButton];
-			if (resetButton) actions.push(resetButton);
+			powerLossConflict = E('div', { 'class': 'wl-note', style: 'color:' + RED });
+			powerLossErrorNode = E('div', { 'class': 'wl-note', style: 'color:' + RED });
+			powerLossActions = E('div', { 'class': 'wl-actions' });
 			var children = [
 				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Power-loss shutdown'))),
 				E('div', { 'class': 'wl-note', style: 'color:' + RED },
@@ -381,13 +417,16 @@ return view.extend({
 					E('label', { 'for': enabledID, style: 'display:flex;align-items:center;gap:7px' }, [enabledInput, _('Enable')]),
 					E('label', { 'for': delayID }, [E('div', { 'class': 'wl-sub' }, _('Delay (minutes)')), delayInput])
 				]),
-				powerLossLive
+				powerLossLive,
+				powerLossConflict,
+				powerLossErrorNode,
+				powerLossActions
 			];
-			if (powerLossModel.kind === 'conflict') children.push(E('div', { 'class': 'wl-note', style: 'color:' + RED },
-				_('Customized rule conflict. Save is disabled until you reset this preset.')));
-			if (powerLossError) children.push(E('div', { 'class': 'wl-note', style: 'color:' + RED }, powerLossError));
-			children.push(E('div', { 'class': 'wl-actions' }, actions));
-			return E('div', { 'class': 'wl-card' }, children);
+			powerLossEnabledInput = enabledInput;
+			powerLossSaveButton = saveButton;
+			powerLossCard = E('div', { 'class': 'wl-card' }, children);
+			syncPowerLossCard(false);
+			return powerLossCard;
 		}
 		function adminAction(method, path, payload, confirmText) {
 			if (confirmText && !window.confirm(confirmText)) return Promise.resolve();
@@ -407,12 +446,15 @@ return view.extend({
 			countdown.className = seconds > 0 ? 'wl-pill on' : 'wl-pill';
 		}
 		function renderAdmin(deviceInfo, settingsInfo, tokenInfo, pairInfo, rulesInfo, statusInfo) {
-			admin.innerHTML = '';
+			adminError.innerHTML = '';
+			var preservePowerLoss = !!(powerLossDelayInput && document.activeElement === powerLossDelayInput &&
+				powerLossCard && powerLossCard.parentNode === admin);
+			var nextAdmin = [];
 			powerLossModel = wattlinePowerLoss.classify(rulesInfo);
 			powerLossStatus = statusInfo;
-			if (!powerLossEditing) {
+			if (!powerLossRetryDraft) {
 				powerLossEnabled = powerLossModel.rule ? powerLossModel.rule.enabled !== false : true;
-				powerLossDelayDraft = String(wattlinePowerLoss.minutes(powerLossModel.rule));
+				if (!preservePowerLoss) powerLossDelayDraft = String(wattlinePowerLoss.minutes(powerLossModel.rule));
 			}
 			var features = deviceInfo.features || {};
 			var capabilityNames = Object.keys(features).filter(function (key) { return features[key]; })
@@ -429,9 +471,10 @@ return view.extend({
 					[_('MagicDNS'), deviceInfo.magic_dns_name], [_('TLS certificate SHA-256'), settingsInfo.tls && settingsInfo.tls.sha256]
 				])
 			]);
-			admin.appendChild(identity);
-			powerLossCard = buildPowerLossCard();
-			admin.appendChild(powerLossCard);
+			nextAdmin.push(identity);
+			if (preservePowerLoss) syncPowerLossCard(true);
+			else powerLossCard = buildPowerLossCard();
+			nextAdmin.push(powerLossCard);
 
 			var pairKids = [
 				E('div', { 'class': 'wl-cardhead' }, [E('div', { 'class': 't' }, _('Pair an API client')), countdown]),
@@ -460,7 +503,7 @@ return view.extend({
 				open.addEventListener('click', function () { adminAction('POST', '/pairing-mode', null); });
 				pairKids.push(E('div', { 'class': 'wl-actions' }, open));
 			}
-			admin.appendChild(E('div', { 'class': 'wl-card' }, pairKids));
+			nextAdmin.push(E('div', { 'class': 'wl-card' }, pairKids));
 			updateCountdown();
 
 			var tokenKids = [E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('API clients'))),
@@ -480,7 +523,7 @@ return view.extend({
 						_('Created') + ' ' + formatDate(entry.created_at) + ' · ' + _('Last seen') + ' ' + formatDate(entry.last_seen_at))]), actions
 				]));
 			});
-			admin.appendChild(E('div', { 'class': 'wl-card' }, tokenKids));
+			nextAdmin.push(E('div', { 'class': 'wl-card' }, tokenKids));
 
 			var securityKids = [
 				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Security and advanced actions'))),
@@ -506,7 +549,17 @@ return view.extend({
 				});
 				securityKids.push(E('div', { 'class': 'wl-actions' }, [ota, running, blePIN]));
 			}
-			admin.appendChild(E('div', { 'class': 'wl-card' }, securityKids));
+			nextAdmin.push(E('div', { 'class': 'wl-card' }, securityKids));
+			if (preservePowerLoss) {
+				var previousAdmin = Array.prototype.slice.call(admin.children);
+				admin.replaceChild(nextAdmin[0], previousAdmin[0]);
+				admin.replaceChild(nextAdmin[2], previousAdmin[2]);
+				admin.replaceChild(nextAdmin[3], previousAdmin[3]);
+				admin.replaceChild(nextAdmin[4], previousAdmin[4]);
+			} else {
+				admin.innerHTML = '';
+				nextAdmin.forEach(function (card) { admin.appendChild(card); });
+			}
 		}
 		adminRefresh = wattlineRefresh.create({
 			load: function () {
@@ -517,16 +570,12 @@ return view.extend({
 				]);
 			},
 			render: function (values) {
-				if (powerLossDelayInput && document.activeElement === powerLossDelayInput) {
-					powerLossStatus = values[5];
-					updatePowerLossLive();
-					return;
-				}
 				renderAdmin(values[0], values[1], values[2], values[3], values[4], values[5]);
 			},
 			error: function (error) {
-					admin.innerHTML = '';
-					admin.appendChild(E('div', { 'class': 'wl-card' }, E('div', { 'class': 'wl-msg' }, error.message)));
+					adminError.innerHTML = '';
+					adminError.appendChild(E('div', { 'class': 'wl-card' },
+						E('div', { 'class': 'wl-note', style: 'color:' + RED, role: 'alert' }, error.message)));
 				}
 		});
 		function refreshAdmin() { return adminRefresh.refresh(); }

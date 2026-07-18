@@ -26,7 +26,10 @@ class FakeElement {
 	appendChild(child) {
 		if (Array.isArray(child)) { child.forEach((item) => this.appendChild(item)); return child; }
 		if (child == null || child === '') return child;
-		if (child instanceof FakeElement) child.parentNode = this;
+		if (child instanceof FakeElement) {
+			if (child.parentNode) child.parentNode.children = child.parentNode.children.filter((item) => item !== child);
+			child.parentNode = this;
+		}
 		this.children.push(child);
 		return child;
 	}
@@ -40,6 +43,8 @@ class FakeElement {
 		this.attributes[name] = value === '' ? '' : String(value);
 		if (name === 'class') this.className = String(value);
 		if (name === 'value') this.value = String(value);
+		if (name === 'id') this.id = String(value);
+		if (name === 'checked') this.checked = true;
 		if (name === 'disabled') this.disabled = true;
 		if (name === 'src') this.src = String(value);
 	}
@@ -54,9 +59,19 @@ class FakeElement {
 		if (name === 'blur' && this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = null;
 		for (const listener of this.listeners[name] || []) listener({ target: this, currentTarget: this });
 	}
-	click() { if (!this.disabled) this.dispatch('click'); }
+	click() {
+		if (this.disabled) return;
+		var focused = this.ownerDocument.activeElement;
+		if (focused && focused !== this) focused.dispatch('blur');
+		this.ownerDocument.activeElement = this;
+		this.dispatch('click');
+	}
 	get innerHTML() { return this.children.map(textOf).join(''); }
-	set innerHTML(value) { this.children = []; this._text = String(value || ''); }
+	set innerHTML(value) {
+		this.children.forEach((child) => { if (child instanceof FakeElement) child.parentNode = null; });
+		this.children = [];
+		this._text = String(value || '');
+	}
 	get textContent() { return this._text + this.children.map(textOf).join(''); }
 	set textContent(value) { this.children = []; this._text = String(value == null ? '' : value); }
 }
@@ -78,6 +93,11 @@ function findElement(rootNode, tag, text) {
 		(text == null || textOf(node).trim() === text));
 }
 
+function liveText(rootNode) {
+	const live = descendants(rootNode).find((node) => node.attributes['aria-live'] === 'polite');
+	return live ? textOf(live) : '';
+}
+
 async function settle() {
 	for (let i = 0; i < 12; i++) await Promise.resolve();
 }
@@ -88,37 +108,56 @@ async function renderStatus(options = {}) {
 	const pollEntries = [];
 	const requests = [];
 	let getRequests = 0;
-	let rules = (options.rules || [fixture.canonical]).map((rule) => Object.assign({}, rule));
 	let resolveMutation = null;
 	let confirmCalls = 0;
-	const runtime = options.runtime || [{ name: fixture.name, armed: true, holding_for: '5m0s' }];
-	const telemetry = options.telemetry || {
+	let mutationFailure = options.mutationFailure || null;
+	const failures = {};
+	const server = {
+		rules: (options.rules || [fixture.canonical]).map((rule) => Object.assign({}, rule)),
+		runtime: options.runtime || [{ name: fixture.name, armed: true, holding_for: '5m0s' }],
+		telemetry: options.telemetry || {
 		connected: true,
 		battery: { status: 0, level: 50, wh: 10, max_wh: 20, remain_min: 100, volts: 12 },
 		dc: { enabled: true, status: 0, watts: 0, volts: 12, amps: 0 },
 		typec: { mode: 0, status: 0, watts: 0, volts: 0, amps: 0, temp_c: 25, dc_input: false }
+		},
+		device: options.device || { features: {}, commands: { active: [] }, connection: {} },
+		settings: options.settings || { tls: {}, pairing_always_on: false, wan_access: false, advanced: false },
+		tokens: options.tokens || [],
+		pairing: options.pairing || { open: false }
 	};
+	let qrLoads = 0, qrCloses = 0;
 	const clone = (value) => value == null ? value : JSON.parse(JSON.stringify(value));
 	const client = {
 		json(method, route, body) {
 			if (method !== 'GET') requests.push([method, route, clone(body)]);
 			if (method === 'GET') {
 				getRequests++;
+				if (failures[route]) {
+					const error = failures[route];
+					delete failures[route];
+					return Promise.reject(error);
+				}
 				const values = {
-					'/telemetry': telemetry,
-					'/status': { device: {}, rules: runtime },
-					'/device': { features: {}, commands: { active: [] }, connection: {} },
-					'/settings': { tls: {}, pairing_always_on: false, wan_access: false, advanced: false },
-					'/tokens': [], '/pairing-mode': { open: false }, '/rules': rules,
+					'/telemetry': server.telemetry,
+					'/status': { device: {}, rules: server.runtime },
+					'/device': server.device,
+					'/settings': server.settings,
+					'/tokens': server.tokens, '/pairing-mode': server.pairing, '/rules': server.rules,
 					'/device/usbc-limit': { output: { watts: 30 } },
 					'/device/bypass-threshold': { volts: 12 }, '/device/schedules': [],
 					'/pairing/status': { stage: 'idle', devices: [] }
 				};
 				return Promise.resolve(clone(values[route]));
 			}
+			if (mutationFailure) {
+				const error = mutationFailure;
+				mutationFailure = null;
+				return Promise.reject(error);
+			}
 			const save = () => {
-				if (route === '/rules') rules.push(clone(body));
-				else if (route === '/rules/no_input_shutdown') rules = rules.map((rule) =>
+				if (route === '/rules') server.rules.push(clone(body));
+				else if (route === '/rules/no_input_shutdown') server.rules = server.rules.map((rule) =>
 					rule.name === fixture.name ? clone(body) : rule);
 				return {};
 			};
@@ -133,7 +172,10 @@ async function renderStatus(options = {}) {
 		uci: { load: () => Promise.resolve(), get: (_pkg, _section, key) => key === 'token' ? 'secret' : undefined },
 		poll: { add: (callback, seconds) => pollEntries.push({ callback, seconds }) },
 		wattlineTransport: { create: () => client },
-		wattlineQR: { create: () => ({ load: () => Promise.resolve(), close: () => {} }) },
+		wattlineQR: { create: () => ({
+			load: (image) => { qrLoads++; image.src = 'blob:qr-' + qrLoads; return Promise.resolve(); },
+			close: (image) => { qrCloses++; if (image) image.src = ''; }
+		}) },
 		wattlineRefresh: loadModule('refresh.js'),
 		wattlinePowerLoss: loadModule('power_loss.js'),
 		E, _: (value) => value, document,
@@ -153,6 +195,9 @@ async function renderStatus(options = {}) {
 		dom, requests, pollEntries,
 		getCount: () => getRequests,
 		confirmCalls: () => confirmCalls,
+		qrCounts: () => [qrLoads, qrCloses],
+		setServer: (patch) => Object.assign(server, patch),
+		failNext: (route, error) => { failures[route] = error; },
 		resolveMutation: () => { assert.ok(resolveMutation, 'a mutation is pending'); resolveMutation(); },
 		refreshAdmin: async () => { await pollEntries.find((entry) => entry.seconds === 10).callback(); await settle(); }
 	};
@@ -372,6 +417,126 @@ async function powerLossCardTests() {
 	assert.strictEqual(compatible.confirmCalls(), 0, 'compatible update does not ask for reset confirmation');
 	compatible.resolveMutation();
 	await settle();
+
+	const reconcile = await renderStatus({ rules: [customized] });
+	let reconciledDelay = descendants(reconcile.dom).find((node) =>
+		node.tagName === 'input' && node.attributes.type === 'number');
+	reconciledDelay.dispatch('focus');
+	reconciledDelay.value = '17';
+	reconciledDelay.dispatch('input');
+	const incompatible = {
+		name: fixture.name, enabled: false, condition: 'schedule', actions: ['shutdown'], cron: '0 1 * * *'
+	};
+	reconcile.setServer({
+		rules: [customized],
+		runtime: [{ name: fixture.name, armed: false, last_fired: '2026-07-18T12:00:00Z' }],
+		device: { model: 'Fresh model', features: {}, commands: { active: [] }, connection: {} },
+		settings: { tls: {}, pairing_always_on: true, wan_access: true, advanced: false },
+		tokens: [{ id: 'fresh', label: 'Fresh API client', bootstrap: false }],
+		pairing: { open: true, pin: '654321', expires_at: '2099-07-18T12:00:00Z' }
+	});
+	await reconcile.refreshAdmin();
+	const delayAfterReconcile = descendants(reconcile.dom).find((node) =>
+		node.tagName === 'input' && node.attributes.type === 'number');
+	assert.ok(delayAfterReconcile === reconciledDelay,
+		'fresh admin state preserves only the focused delay DOM node');
+	assert.strictEqual(delayAfterReconcile.value, '17');
+	assert.ok(textOf(reconcile.dom).includes('Fresh model'), 'fresh device state renders while delay is focused');
+	assert.ok(textOf(reconcile.dom).includes('Fresh API client'), 'fresh token state renders while delay is focused');
+	assert.ok(textOf(reconcile.dom).includes('654321'), 'fresh pairing state renders while delay is focused');
+	assert.ok(textOf(reconcile.dom).includes('Pairing is always available'),
+		'fresh settings state renders while delay is focused');
+	assert.match(liveText(reconcile.dom), /Rule last fired/, 'fresh runtime status renders while delay is focused');
+	reconcile.setServer({ rules: [incompatible] });
+	await reconcile.refreshAdmin();
+	assert.ok(descendants(reconcile.dom).includes(reconciledDelay));
+	assert.strictEqual(reconciledDelay.value, '17');
+	assert.ok(textOf(reconcile.dom).includes('Customized rule conflict'),
+		'fresh rules are classified while delay is focused');
+	const reconciledEnabled = descendants(reconcile.dom).find((node) =>
+		node.tagName === 'input' && node.attributes.type === 'checkbox');
+	assert.strictEqual(reconciledEnabled.checked, false,
+		'only the focused delay value is preserved; enabled state reconciles from the server');
+	const staleSave = findElement(reconcile.dom, 'button', 'Save');
+	assert.strictEqual(staleSave.disabled, true, 'fresh conflict disables ordinary Save');
+	staleSave.click();
+	assert.strictEqual(reconcile.requests.length, 0, 'disabled Save cannot overwrite a newly conflicting rule');
+	findElement(reconcile.dom, 'button', 'Reset preset').click();
+	await settle();
+	assert.strictEqual(reconcile.confirmCalls(), 1);
+	assert.deepStrictEqual(reconcile.requests[0], [
+		'PUT', '/rules/no_input_shutdown', powerLoss.payload(incompatible, false, 17, true)
+	]);
+
+	const rejected = await renderStatus({
+		rules: [fixture.canonical], mutationFailure: new Error('preset write rejected')
+	});
+	const rejectedEnabled = descendants(rejected.dom).find((node) =>
+		node.tagName === 'input' && node.attributes.type === 'checkbox');
+	rejectedEnabled.checked = false;
+	rejectedEnabled.dispatch('change');
+	let rejectedDelay = descendants(rejected.dom).find((node) =>
+		node.tagName === 'input' && node.attributes.type === 'number');
+	rejectedDelay.dispatch('focus');
+	rejectedDelay.value = '17';
+	rejectedDelay.dispatch('input');
+	const readsBeforeRejectedSave = rejected.getCount();
+	findElement(rejected.dom, 'button', 'Save').click();
+	await settle();
+	rejectedDelay = descendants(rejected.dom).find((node) =>
+		node.tagName === 'input' && node.attributes.type === 'number');
+	const enabledAfterRejection = descendants(rejected.dom).find((node) =>
+		node.tagName === 'input' && node.attributes.type === 'checkbox');
+	assert.ok(rejected.getCount() > readsBeforeRejectedSave,
+		'rejected mutation still performs the coordinator authoritative refresh');
+	assert.strictEqual(rejectedDelay.value, '17', 'rejected mutation restores submitted delay draft');
+	assert.strictEqual(enabledAfterRejection.checked, false, 'rejected mutation restores submitted enabled draft');
+	assert.ok(textOf(rejected.dom).includes('preset write rejected'), 'rejection is visible beside restored draft');
+
+	const missingState = await renderStatus({ rules: [] });
+	assert.match(liveText(missingState.dom), /Preset not configured/i);
+	assert.doesNotMatch(liveText(missingState.dom), /min remaining/i,
+		'missing preset never announces a countdown');
+	const disabledRule = Object.assign({}, fixture.canonical, { enabled: false });
+	const disabledState = await renderStatus({ rules: [disabledRule] });
+	assert.match(liveText(disabledState.dom), /Rule disabled/i);
+	assert.doesNotMatch(liveText(disabledState.dom), /min remaining/i,
+		'disabled preset never announces a countdown');
+	const conflictState = await renderStatus({ rules: [incompatible] });
+	assert.match(liveText(conflictState.dom), /Customized rule conflict/i);
+	assert.doesNotMatch(liveText(conflictState.dom), /min remaining/i,
+		'conflicting preset never announces a countdown');
+	const incoherentState = await renderStatus({ rules: [fixture.canonical], runtime: [] });
+	assert.match(liveText(incoherentState.dom), /countdown not active/i);
+	assert.doesNotMatch(liveText(incoherentState.dom), /min remaining/i,
+		'countdown requires coherent runtime status');
+
+	const transient = await renderStatus({
+		rules: [fixture.canonical],
+		pairing: { open: true, pin: '123456', expires_at: '2099-07-18T12:00:00Z' }
+	});
+	const transientDelay = descendants(transient.dom).find((node) =>
+		node.tagName === 'input' && node.attributes.type === 'number');
+	transientDelay.dispatch('focus');
+	transientDelay.value = '17';
+	transientDelay.dispatch('input');
+	const qrImage = descendants(transient.dom).find((node) => node.tagName === 'img');
+	const qrSource = qrImage.src;
+	const qrCounts = transient.qrCounts();
+	for (const route of ['/rules', '/status']) {
+		transient.failNext(route, new Error(route + ' temporarily unavailable'));
+		await transient.refreshAdmin();
+		assert.ok(descendants(transient.dom).includes(transientDelay),
+			route + ' failure keeps the focused draft DOM mounted');
+		assert.strictEqual(transientDelay.value, '17');
+		assert.ok(descendants(transient.dom).includes(qrImage),
+			route + ' failure keeps the existing enrollment image mounted');
+		assert.strictEqual(qrImage.src, qrSource, route + ' failure keeps the current QR object URL coherent');
+		assert.deepStrictEqual(transient.qrCounts(), qrCounts,
+			route + ' failure neither reloads nor closes the existing QR generation');
+		assert.ok(textOf(transient.dom).includes(route + ' temporarily unavailable'),
+			route + ' failure surfaces a non-destructive admin error');
+	}
 
 	const missing = await renderStatus({ rules: [] });
 	findElement(missing.dom, 'button', 'Save').click();
