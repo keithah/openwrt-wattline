@@ -24,7 +24,6 @@ function responseError(response) {
 
 function create(options) {
 	var endpoints = bases(options.config, options.host);
-	var selected = null;
 	var fetchImpl = options.fetch;
 
 	function response(method, path, body, extra) {
@@ -32,11 +31,14 @@ function create(options) {
 		var safe = method === 'GET';
 		var candidates;
 		if (safe) {
-			candidates = selected ? [selected].concat(endpoints.filter(function (base) { return base !== selected; })) : endpoints.slice();
+			// HTTP is a per-read availability fallback only. Always retry the
+			// configured HTTPS endpoint first on the next safe request.
+			candidates = endpoints.slice();
 		} else {
 			// A connection failure after a write is ambiguous: the daemon may have
-			// applied it. Pin mutations to one endpoint and require explicit retry.
-			candidates = [selected || endpoints[0]].filter(Boolean);
+			// applied it. HTTPS remains mandatory for mutations whenever enabled;
+			// plain HTTP is eligible only when HTTPS is explicitly disabled.
+			candidates = [endpoints[0]].filter(Boolean);
 		}
 		var index = 0;
 		function attempt(lastError) {
@@ -49,7 +51,6 @@ function create(options) {
 			};
 			if (extra && extra.signal) request.signal = extra.signal;
 			return fetchImpl(base + path, request).then(function (result) {
-				selected = base;
 				return result;
 			}, function (error) {
 				var aborted = (extra && extra.signal && extra.signal.aborted) || (error && error.name === 'AbortError');

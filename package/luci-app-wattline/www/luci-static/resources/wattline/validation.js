@@ -7,24 +7,41 @@ function ipv4(value) {
 	});
 }
 
-function ipv6(value) {
+function ipv6Groups(value) {
 	if (!value || value.indexOf('%') !== -1 || (value.match(/::/g) || []).length > 1) return false;
 	if (value.indexOf('.') !== -1 && value.lastIndexOf('.') < value.lastIndexOf('::')) return false;
 	var compressed = value.indexOf('::') !== -1;
 	var halves = value.split('::');
-	var fields = [];
-	halves.forEach(function (half) { if (half) fields = fields.concat(half.split(':')); });
-	var count = 0;
+	var left = halves[0] ? halves[0].split(':') : [];
+	var right = halves.length > 1 && halves[1] ? halves[1].split(':') : [];
+	var fields = left.concat(right), groups = [];
 	for (var i = 0; i < fields.length; i++) {
-		if (fields[i].indexOf('.') !== -1) {
-			if (i !== fields.length - 1 || !ipv4(fields[i])) return false;
-			count += 2;
+		var field = fields[i];
+		if (field.indexOf('.') !== -1) {
+			if (i !== fields.length - 1 || !ipv4(field)) return false;
+			var octets = field.split('.').map(Number);
+			groups.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]);
 		} else {
-			if (!/^[0-9A-Fa-f]{1,4}$/.test(fields[i])) return false;
-			count++;
+			if (!/^[0-9A-Fa-f]{1,4}$/.test(field)) return false;
+			groups.push(parseInt(field, 16));
 		}
 	}
-	return compressed ? count < 8 : count === 8;
+	if (!compressed) return groups.length === 8 ? groups : false;
+	var missing = 8 - groups.length;
+	if (missing < 1) return false;
+	var leftGroups = left.length;
+	groups.splice.apply(groups, [leftGroups, 0].concat(new Array(missing).fill(0)));
+	return groups;
+}
+
+function ipv6(value) {
+	return !!ipv6Groups(value);
+}
+
+function listenerIPv6(value) {
+	var groups = ipv6Groups(value);
+	if (!groups) return false;
+	return !(groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0xffff);
 }
 
 function port(value) {
@@ -34,15 +51,24 @@ function port(value) {
 function positiveDuration(value) {
 	var input = String(value || '');
 	if (input.charAt(0) === '+') input = input.slice(1);
-	var token = /([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h)/g;
-	var factors = { ns: 1, us: 1e3, 'µs': 1e3, 'μs': 1e3, ms: 1e6, s: 1e9, m: 60e9, h: 3600e9 };
-	var offset = 0, nanoseconds = 0, match;
-	while ((match = token.exec(input)) !== null) {
-		if (match.index !== offset) return false;
-		offset = token.lastIndex;
-		nanoseconds += Number(match[1]) * factors[match[2]];
+	var token = /(?:([0-9]+)(?:\.([0-9]*))?|\.([0-9]+))(ns|us|µs|μs|ms|s|m|h)/g;
+	var factors = { ns: '1', us: '1000', 'µs': '1000', 'μs': '1000', ms: '1000000', s: '1000000000', m: '60000000000', h: '3600000000000' };
+	var offset = 0, nanoseconds = BigInt(0), maximum = BigInt('9223372036854775807'), match;
+	try {
+		while ((match = token.exec(input)) !== null) {
+			if (match.index !== offset) return false;
+			offset = token.lastIndex;
+			var factor = BigInt(factors[match[4]]);
+			var whole = BigInt(match[1] || '0');
+			var fraction = match[1] != null ? (match[2] || '') : match[3];
+			nanoseconds += whole * factor;
+			if (fraction) nanoseconds += BigInt(fraction) * factor / (BigInt(10) ** BigInt(fraction.length));
+			if (nanoseconds > maximum) return false;
+		}
+	} catch (error) {
+		return false;
 	}
-	return offset === input.length && offset > 0 && nanoseconds > 0 && isFinite(nanoseconds) && nanoseconds <= 9223372036854775807;
+	return offset === input.length && offset > 0 && nanoseconds > BigInt(0);
 }
 
 function cleanAbsolutePath(value) {
@@ -80,10 +106,10 @@ function overlap(config) {
 function validate(config) {
 	if (!port(config.httpPort)) return 'HTTP port must be from 1 to 65535';
 	if (!port(config.httpsPort)) return 'HTTPS port must be from 1 to 65535';
-	for (var i = 0; i < [['HTTP IPv4', config.httpAddr4, ipv4], ['HTTP IPv6', config.httpAddr6, ipv6],
-		['HTTPS IPv4', config.httpsAddr4, ipv4], ['HTTPS IPv6', config.httpsAddr6, ipv6]].length; i++) {
-		var address = [['HTTP IPv4', config.httpAddr4, ipv4], ['HTTP IPv6', config.httpAddr6, ipv6],
-			['HTTPS IPv4', config.httpsAddr4, ipv4], ['HTTPS IPv6', config.httpsAddr6, ipv6]][i];
+	for (var i = 0; i < [['HTTP IPv4', config.httpAddr4, ipv4], ['HTTP IPv6', config.httpAddr6, listenerIPv6],
+		['HTTPS IPv4', config.httpsAddr4, ipv4], ['HTTPS IPv6', config.httpsAddr6, listenerIPv6]].length; i++) {
+		var address = [['HTTP IPv4', config.httpAddr4, ipv4], ['HTTP IPv6', config.httpAddr6, listenerIPv6],
+			['HTTPS IPv4', config.httpsAddr4, ipv4], ['HTTPS IPv6', config.httpsAddr6, listenerIPv6]][i];
 		if (address[1] && !address[2](address[1])) return address[0] + ' address is invalid';
 	}
 	if (!config.httpEnabled && !config.httpsEnabled) return 'At least one HTTP or HTTPS listener must be enabled';

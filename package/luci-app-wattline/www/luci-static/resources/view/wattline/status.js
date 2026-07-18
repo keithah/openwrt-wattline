@@ -4,6 +4,7 @@
 'require poll';
 'require wattline.transport as wattlineTransport';
 'require wattline.qr as wattlineQR';
+'require wattline.refresh as wattlineRefresh';
 
 /* Wattline status view — styled after the PeakDo Link-Power web app, with
    user-facing copy from the LinkPower-2 manual (runtime, Bypass, USB-C
@@ -295,9 +296,10 @@ return view.extend({
 			});
 			return E('div', { 'class': 'wl-grid' }, children);
 		}
+		var adminRefresh;
 		function adminAction(method, path, payload, confirmText) {
 			if (confirmText && !window.confirm(confirmText)) return Promise.resolve();
-			return api(token, port, method, path, payload).then(function () { refreshAdmin(); })
+			return adminRefresh.mutation(function () { return api(token, port, method, path, payload); })
 				.catch(function (error) { window.alert(error.message); });
 		}
 		function loadQR(image, expiresAt) {
@@ -346,7 +348,10 @@ return view.extend({
 				var image = E('img', { 'class': 'wl-qr', alt: _('API-client enrollment QR code') });
 				pairKids.push(image);
 				var close = E('button', { 'class': 'wl-btn danger' }, _('Close pairing window'));
-				close.addEventListener('click', function () { clearQR(); adminAction('DELETE', '/pairing-mode', null); });
+				close.addEventListener('click', function () {
+					clearQR(); pairingExpiresAt = null; updateCountdown();
+					adminAction('DELETE', '/pairing-mode', null);
+				});
 				pairKids.push(E('div', { 'class': 'wl-actions' }, close));
 				loadQR(image, pairInfo.expires_at);
 			} else {
@@ -403,16 +408,20 @@ return view.extend({
 			}
 			admin.appendChild(E('div', { 'class': 'wl-card' }, securityKids));
 		}
-		function refreshAdmin() {
-			Promise.all([
-				api(token, port, 'GET', '/device'), api(token, port, 'GET', '/settings'),
-				api(token, port, 'GET', '/tokens'), api(token, port, 'GET', '/pairing-mode')
-			]).then(function (values) { renderAdmin(values[0], values[1], values[2], values[3]); })
-				.catch(function (error) {
+		adminRefresh = wattlineRefresh.create({
+			load: function () {
+				return Promise.all([
+					api(token, port, 'GET', '/device'), api(token, port, 'GET', '/settings'),
+					api(token, port, 'GET', '/tokens'), api(token, port, 'GET', '/pairing-mode')
+				]);
+			},
+			render: function (values) { renderAdmin(values[0], values[1], values[2], values[3]); },
+			error: function (error) {
 					admin.innerHTML = '';
 					admin.appendChild(E('div', { 'class': 'wl-card' }, E('div', { 'class': 'wl-msg' }, error.message)));
-				});
-		}
+				}
+		});
+		function refreshAdmin() { return adminRefresh.refresh(); }
 
 		function refresh() {
 			var myGen = ++gen;

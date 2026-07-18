@@ -13,7 +13,8 @@ function loadModule(name, globals) {
 
 async function transportTests() {
 	const calls = [];
-	const responses = [Promise.reject(new Error('TLS not trusted')), Promise.resolve({ ok: true, json: async () => ({ connected: true }) })];
+	const ok = () => Promise.resolve({ ok: true, json: async () => ({ connected: true }) });
+	const responses = [Promise.reject(new Error('transient TLS failure')), ok(), ok(), ok()];
 	const transport = loadModule('transport.js').create({
 		token: 'admin-secret',
 		config: { httpsEnabled: true, httpsPort: 8378, httpEnabled: true, httpPort: 8377 },
@@ -24,6 +25,12 @@ async function transportTests() {
 	assert.deepStrictEqual(calls.map((call) => call[0]), [
 		'https://router.lan:8378/api/v1/device', 'http://router.lan:8377/api/v1/device'
 	], 'safe GET probes HTTPS then HTTP');
+	await transport.json('POST', '/pairing-mode');
+	await transport.json('GET', '/tokens');
+	assert.deepStrictEqual(calls.slice(2).map((call) => call[0]), [
+		'https://router.lan:8378/api/v1/pairing-mode',
+		'https://router.lan:8378/api/v1/tokens'
+	], 'HTTP read fallback never downgrades a mutation or later HTTPS recovery');
 
 	for (const method of ['POST', 'PUT', 'DELETE']) {
 		let mutationCalls = 0;
@@ -48,6 +55,39 @@ async function transportTests() {
 	controller.abort();
 	await assert.rejects(aborted.blob('GET', '/pairing-mode/qr.png', null, { signal: controller.signal }), /aborted/);
 	assert.strictEqual(abortCalls, 1, 'an aborted safe request does not probe another listener');
+
+	const httpOnlyCalls = [];
+	const httpOnly = loadModule('transport.js').create({
+		token: 'admin-secret',
+		config: { httpsEnabled: false, httpsPort: 8378, httpEnabled: true, httpPort: 8377 },
+		host: 'router.lan', fetch: (url) => { httpOnlyCalls.push(url); return ok(); }
+	});
+	await httpOnly.json('DELETE', '/pairing-mode');
+	assert.deepStrictEqual(httpOnlyCalls, ['http://router.lan:8377/api/v1/pairing-mode'], 'HTTP mutation requires HTTPS to be disabled');
+}
+
+async function refreshTests() {
+	const rendered = [], loads = [];
+	const refresh = loadModule('refresh.js').create({
+		load: () => new Promise((resolve) => loads.push(resolve)),
+		render: (value) => rendered.push(value)
+	});
+	const stale = refresh.refresh();
+	let finishMutation;
+	const mutation = refresh.mutation(() => new Promise((resolve) => { finishMutation = resolve; }));
+	await Promise.resolve();
+	await refresh.refresh();
+	assert.strictEqual(loads.length, 1, 'poll refresh is suppressed while an admin mutation is pending');
+	loads[0]('stale pairing/token state');
+	await stale;
+	assert.deepStrictEqual(rendered, [], 'pre-mutation response cannot overwrite close/revoke state');
+	finishMutation('closed');
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.strictEqual(loads.length, 2, 'mutation completion triggers one authoritative refresh');
+	loads[1]('authoritative state');
+	await mutation;
+	assert.deepStrictEqual(rendered, ['authoritative state']);
 }
 
 async function qrTests() {
@@ -114,9 +154,12 @@ function validationTests() {
 		['at least one listener', { httpEnabled: false, httpsEnabled: false }, /at least one/i],
 		['IPv4 family', { httpAddr4: '::1' }, /IPv4/],
 		['IPv6 family', { httpAddr6: '127.0.0.1' }, /IPv6/],
+		['IPv4-mapped IPv6', { httpAddr6: '::ffff:192.0.2.1' }, /IPv6/],
 		['addressless listener', { httpAddr4: '', httpAddr6: '' }, /needs an IPv4 or IPv6/],
 		['listener overlap', { httpsPort: '8377' }, /overlap/],
 		['positive Go duration', { pairingTTL: '0s' }, /positive/],
+		['sub-nanosecond rounds to zero', { pairingTTL: '0.1ns' }, /positive/],
+		['signed duration overflow', { pairingTTL: '9223372036.854776s' }, /positive/],
 		['bounded Go duration', { pairingTTL: '999999999999999999999h' }, /positive/],
 		['clean path', { tlsKey: '../server.key' }, /clean absolute path/],
 		['normalized path', { tlsKey: '/etc/wattline/../server.key' }, /clean absolute path/],
@@ -133,12 +176,14 @@ function validationTests() {
 	assert.strictEqual(validation.validate(Object.assign({}, valid, { pairingTTL: '1h30m' })), null);
 	assert.strictEqual(validation.validate(Object.assign({}, valid, { pairingTTL: '.5s' })), null);
 	assert.strictEqual(validation.validate(Object.assign({}, valid, { pairingTTL: '+1s' })), null);
+	assert.strictEqual(validation.validate(Object.assign({}, valid, { pairingTTL: '9223372036.854775807s' })), null);
 	assert.strictEqual(validation.validate(Object.assign({}, valid, { mdnsInterfaces: ['fe80::1%br-lan'] })), null);
 }
 
 (async () => {
 	await transportTests();
 	await qrTests();
+	await refreshTests();
 	validationTests();
 	console.log('LuCI behavior tests passed');
 })().catch((error) => { console.error(error); process.exit(1); });
