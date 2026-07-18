@@ -47,7 +47,11 @@ type Deps struct {
 	// On error it must leave runtime state unchanged.
 	ApplySettings  func(before, after *config.Config) (rollback func(), err error)
 	TLSFingerprint func() string
-	PreferredHost  func() string
+	// RotateTLS replaces the on-disk certificate and returns its DER SHA-256
+	// fingerprint. Active listeners continue using their loaded certificate
+	// until the daemon restarts.
+	RotateTLS     func() (string, error)
+	PreferredHost func() string
 }
 
 type server struct {
@@ -120,6 +124,7 @@ func NewServer(d Deps) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.admin(s.revokeToken))
 	mux.HandleFunc("GET /api/v1/settings", s.admin(s.getSettings))
 	mux.HandleFunc("PUT /api/v1/settings", s.admin(s.putSettings))
+	mux.HandleFunc("POST /api/v1/tls/rotate", s.admin(s.rotateTLS))
 	return cors(mux)
 }
 

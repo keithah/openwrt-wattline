@@ -453,6 +453,31 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.settingsResponse(&after, &restart))
 }
 
+func (s *server) rotateTLS(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Confirm *bool `json:"confirm"`
+	}
+	if err := decodeJSON(r, &request); err != nil || request.Confirm == nil || !*request.Confirm {
+		writeAPIError(w, "invalid_request")
+		return
+	}
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	if s.d.RotateTLS == nil {
+		writeAPIError(w, "internal_error")
+		return
+	}
+	fingerprint, err := s.d.RotateTLS()
+	if err != nil || !validFingerprint(fingerprint) {
+		writeAPIError(w, "internal_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		SHA256          string `json:"sha256"`
+		RestartRequired bool   `json:"restart_required"`
+	}{fingerprint, true})
+}
+
 func (s *server) deviceID() string {
 	if s.d.Store != nil {
 		if device := s.d.Store.Snapshot().Device; device != nil && device.MAC != "" {

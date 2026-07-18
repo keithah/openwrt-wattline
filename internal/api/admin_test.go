@@ -169,6 +169,7 @@ func TestAuthRolesAndPrincipalContext(t *testing.T) {
 		{http.MethodGet, "/api/v1/pairing-mode"}, {http.MethodPost, "/api/v1/pairing-mode"}, {http.MethodDelete, "/api/v1/pairing-mode"},
 		{http.MethodGet, "/api/v1/pairing-mode/qr.png"}, {http.MethodGet, "/api/v1/tokens"}, {http.MethodDelete, "/api/v1/tokens/client"},
 		{http.MethodGet, "/api/v1/settings"}, {http.MethodPut, "/api/v1/settings"},
+		{http.MethodPost, "/api/v1/tls/rotate"},
 	}
 	for _, route := range adminRoutes {
 		rr := do(t, f.h, route.method, route.path, f.clientSecret, "")
@@ -184,6 +185,60 @@ func TestAuthRolesAndPrincipalContext(t *testing.T) {
 		if rr.Code != 401 {
 			t.Fatalf("header %q got %d", header, rr.Code)
 		}
+	}
+}
+
+func TestTLSRotateRequiresAdminConfirmationAndReturnsNewPin(t *testing.T) {
+	f := newAdminFixture(t)
+	old := f.fingerprint
+	rotations := 0
+	f.deps.RotateTLS = func() (string, error) {
+		rotations++
+		f.fingerprint = strings.Repeat("b", 64)
+		return f.fingerprint, nil
+	}
+	h := NewServer(f.deps)
+	for _, tc := range []struct {
+		name, token, body string
+		want              int
+	}{
+		{"client forbidden", f.clientSecret, `{"confirm":true}`, http.StatusForbidden},
+		{"confirmation absent", "tok", `{}`, http.StatusBadRequest},
+		{"confirmation false", "tok", `{"confirm":false}`, http.StatusBadRequest},
+		{"unknown field", "tok", `{"confirm":true,"extra":1}`, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := do(t, h, http.MethodPost, "/api/v1/tls/rotate", tc.token, tc.body)
+			if rr.Code != tc.want {
+				t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+	if rotations != 0 || f.fingerprint != old {
+		t.Fatalf("rotation ran before confirmed admin request")
+	}
+	rr := do(t, h, http.MethodPost, "/api/v1/tls/rotate", "tok", `{"confirm":true}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != `{"sha256":"`+strings.Repeat("b", 64)+`","restart_required":true}`+"\n" {
+		t.Fatalf("body %q", rr.Body.String())
+	}
+	if rotations != 1 {
+		t.Fatalf("rotations = %d", rotations)
+	}
+	settings := do(t, h, http.MethodGet, "/api/v1/settings", "tok", "")
+	if !strings.Contains(settings.Body.String(), strings.Repeat("b", 64)) {
+		t.Fatalf("settings has stale fingerprint: %s", settings.Body.String())
+	}
+}
+
+func TestTLSRotateFailureIsCanonicalInternalError(t *testing.T) {
+	f := newAdminFixture(t)
+	f.deps.RotateTLS = func() (string, error) { return "", errors.New("disk full") }
+	rr := do(t, NewServer(f.deps), http.MethodPost, "/api/v1/tls/rotate", "tok", `{"confirm":true}`)
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != "{\"error\":{\"code\":\"internal_error\",\"message\":\"Internal server error\",\"details\":{}}}\n" {
+		t.Fatalf("status %d body %q", rr.Code, rr.Body.String())
 	}
 }
 

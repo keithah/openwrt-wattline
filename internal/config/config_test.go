@@ -456,6 +456,35 @@ func TestSecurityConfigSaveMainPreservesFreshOnDiskToken(t *testing.T) {
 	}
 }
 
+func TestEnsureBootstrapTokenCreatesOnceAndPreservesUCI(t *testing.T) {
+	path := writeTemp(t, `config wattline 'main'
+	option vendor_extension 'keep'
+config vendor 'opaque'
+	option payload 'keep-too'
+`)
+	got, err := EnsureBootstrapToken(path, "generated-secret")
+	if err != nil || got != "generated-secret" {
+		t.Fatalf("first = %q, %v", got, err)
+	}
+	got, err = EnsureBootstrapToken(path, "must-not-replace")
+	if err != nil || got != "generated-secret" {
+		t.Fatalf("second = %q, %v", got, err)
+	}
+	raw, _ := os.ReadFile(path)
+	for _, want := range []string{"option token 'generated-secret'", "option vendor_extension 'keep'", "config vendor 'opaque'", "option payload 'keep-too'"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("missing %q in:\n%s", want, raw)
+		}
+	}
+}
+
+func TestEnsureBootstrapTokenRejectsEmptyCandidate(t *testing.T) {
+	path := writeTemp(t, "config wattline 'main'\n")
+	if _, err := EnsureBootstrapToken(path, ""); err == nil {
+		t.Fatal("empty bootstrap accepted")
+	}
+}
+
 func TestSecurityConfigSaveMainPreservesFileMode(t *testing.T) {
 	path := writeTemp(t, "config wattline 'main'\n")
 	if err := os.Chmod(path, 0o600); err != nil {

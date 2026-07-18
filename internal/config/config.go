@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -480,6 +481,38 @@ func Load(path string) (*Config, error) {
 // goroutine) and SaveRules (HTTP handlers) so concurrent saves can't clobber
 // each other's changes through a stale read.
 var saveMu sync.Mutex
+
+// EnsureBootstrapToken installs candidate only when the main section has no
+// bootstrap token. The locked read-modify-write preserves rules, extension
+// fields, and a token provisioned concurrently by another caller.
+func EnsureBootstrapToken(path, candidate string) (string, error) {
+	if candidate == "" || strings.ContainsAny(candidate, " \t\r\n") {
+		return "", errors.New("bootstrap token candidate is invalid")
+	}
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	doc, err := ParseUCI(string(raw))
+	if err != nil {
+		return "", err
+	}
+	main := doc.Find("wattline", "main")
+	if main == nil {
+		main = newSection("wattline", "main")
+		doc.Sections = append(doc.Sections, main)
+	}
+	if existing := main.Options["token"]; existing != "" {
+		return existing, nil
+	}
+	main.Options["token"] = candidate
+	if err := writeConfigAtomic(path, []byte(doc.Serialize())); err != nil {
+		return "", err
+	}
+	return candidate, nil
+}
 
 // writeConfigAtomic writes beside path so the final rename is atomic. Existing
 // permissions are retained; a newly created secret-bearing config is private.
