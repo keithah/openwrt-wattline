@@ -14,6 +14,13 @@ versions built from `package/Makefile`.
   reconnect. “Last fired” means an attempted trigger, not confirmed shutdown.
 - Host-side behavior, contract, and package checks cover the preset. Hardware
   verification remains NOT RUN pending a GL-X3000 and real Link-Power BLE.
+- Hardened the full control API after final audit: OTA reconnect now scans both
+  app and bootloader advertisement names, disconnected controls cannot reuse a
+  stale session, write-only Current Time reads perform no endpoint I/O, OTA
+  keeps the last stable app identity, and truncated command replies are rejected.
+- Exposed all 15 decoded `FEATURES` bits; made rule mutation and router-originated
+  manual webhooks admin-only; serialized rule persistence; capped request bodies
+  and request-read time; and evicted slow SSE subscribers at a bounded queue.
 
 ## 1.2.3
 

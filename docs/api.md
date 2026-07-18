@@ -10,6 +10,13 @@ request body means zero bytes (not `{}`). Boolean control mutations return the
 device-observed value, not an optimistic echo. JSON examples omit the final LF
 that Go's JSON encoder appends to every JSON response body.
 
+Request bodies are limited to 64 KiB. Protected routes authenticate before
+applying that limit, so missing/invalid credentials still return `401` and a
+managed token on an admin route still returns `403`; an oversized authenticated
+or public request returns `400 invalid_request`. Each listener has a 15-second
+request-read deadline. There is no response write deadline because SSE streams
+are intentionally long-lived.
+
 ## Versioning and base URLs
 
 The only API version is `v1`; every route starts with `/api/v1`. Breaking wire
@@ -51,8 +58,9 @@ Roles are:
 - **client**: a managed token. It may read state, telemetry, history, rules and
   events and may use ordinary device controls and BLE-device pairing.
 - **admin**: the UCI bootstrap token. It has client permissions plus advanced
-  controls, pairing-mode, token, settings, and TLS administration. The bootstrap
-  secret is never returned and its token ID is `bootstrap`.
+  controls, rule mutation/manual webhooks, pairing-mode, token, settings, and
+  TLS administration. The bootstrap secret is never returned and its token ID
+  is `bootstrap`.
 
 Absent, malformed, invalid, or revoked bearer credentials return
 `401 unauthorized`. A valid client token on an admin route returns
@@ -120,8 +128,8 @@ Role: client. Request: none. Success: `200 OK`:
   "application_firmware":"1.4.9",
   "ota_firmware":"1.0.3",
   "cid":773,
-  "features_raw":4095,
-  "features":{"shutdown":true,"dc_bypass":true,"dc_bypass_control":true,"running_mode":true,"barrier_free":true,"usb_firmware":true,"ble_pin":true},
+  "features_raw":32767,
+  "features":{"display":true,"factory_mode":true,"sleep":true,"shutdown":true,"battery_capacity":true,"dc_out_port":true,"dc_out_control":true,"dc_out_scheduler":true,"usb_port":true,"usb_power_limit":true,"usb_output_control":true,"dc_bypass":true,"dc_bypass_control":true,"usb_dc_input":true,"usb_dc_input_power":true,"running_mode":true,"barrier_free":true,"usb_firmware":true,"ble_pin":true},
   "available":{"current_time":true,"ota":true,"dc":true,"usbc":true},
   "mode":"app",
   "connection":{"connected":true,"phase":"ready","reconnect":"armed"},
@@ -136,6 +144,14 @@ Role: client. Request: none. Success: `200 OK`:
 `bootloader`. `features_raw` is the numeric BLE mask while `features` and
 `available` are decoded hardware/characteristic facts, independent of the
 administrative `advanced` switch.
+
+The first 15 fields in `features` (`display` through `usb_dc_input_power`) map
+one-for-one, in bit order 0 through 14, to all 15 documented BLE `FEATURES`
+bits. `running_mode`, `barrier_free`, `usb_firmware`, and `ble_pin` are additive
+operation-capability conveniences derived from those bits and the discovered
+GATT inventory. `available.current_time` means the characteristic exists for
+clock sync; clock-read availability is reported authoritatively by
+`GET /api/v1/device/clock` because the characteristic may be write-only.
 
 Each command object is exactly:
 
@@ -198,8 +214,11 @@ the managed token that authenticated a live stream ends that stream promptly.
 A successful token-store cutover similarly ends streams authenticated by
 managed tokens from the old store. Streams authenticated by other current-store
 managed tokens or the bootstrap token remain open. Authentication errors occur
-before streaming begins. BLE I/O: none; BLE notifications update the store
-independently.
+before streaming begins. To bound router memory, slow subscribers are disconnected
+after 128 queued complete snapshots; accepted snapshots are delivered in order and
+are never silently coalesced. The stream then ends without an SSE error frame, and
+the client reconnects to receive a fresh initial snapshot. BLE I/O: none; BLE
+notifications update the store independently.
 
 ## Granular controls
 
@@ -457,13 +476,16 @@ nanoseconds. `repeat_every` is optional and omitted when zero. Actions are
 | Endpoint | Role | Request | Success | Endpoint-specific errors | BLE I/O |
 |---|---|---|---|---|---|
 | `GET /api/v1/rules` | client | none | `200` array, empty `[]` | auth only | none |
-| `POST /api/v1/rules` | client | complete rule object | `200` stored rule; zero hysteresis defaults to `5` | `400 invalid_request`, `500 internal_error` | none |
-| `PUT /api/v1/rules/{name}` | client | complete rule object; URL name wins | `200` stored rule | `400 invalid_request`, `500 internal_error` | none |
-| `DELETE /api/v1/rules/{name}` | client | none | `200 {"deleted":"low_battery"}` | `404 not_found`, `500 internal_error` | none |
-| `POST /api/v1/device/action` | client | `{"action":"dc_off"}` | `200 {"ok":"dc_off"}` | `400 invalid_request`, `502 ble_operation_failed` | according to action; webhook may perform HTTP |
+| `POST /api/v1/rules` | admin | complete rule object | `200` stored rule; zero hysteresis defaults to `5` | `400 invalid_request`, `500 internal_error` | none |
+| `PUT /api/v1/rules/{name}` | admin | complete rule object; URL name wins | `200` stored rule | `400 invalid_request`, `500 internal_error` | none |
+| `DELETE /api/v1/rules/{name}` | admin | none | `200 {"deleted":"low_battery"}` | `404 not_found`, `500 internal_error` | none |
+| `POST /api/v1/device/action` | client; admin for `webhook:URL` | `{"action":"dc_off"}` | `200 {"ok":"dc_off"}` | `400 invalid_request`, `403 admin_required` for a managed-client webhook, `502 ble_operation_failed` | according to action; webhook may perform HTTP |
 
 The action endpoint is deprecated in favor of granular routes. Its successful
-body remains legacy-compatible; its errors use the canonical envelope.
+body remains legacy-compatible; its errors use the canonical envelope. Rule
+mutation and any manual `webhook:URL` action requires admin because those
+operations persist automation or originate an HTTP request from the router.
+Managed clients may still read rules and use every ordinary Link-Power action.
 
 ### Power-loss shutdown preset
 
@@ -755,7 +777,7 @@ for a valid client token. “No body” means an exactly zero-byte request body.
 | `GET /api/v1/status` | client | no body | `200 {"connected":true,"device":{"model":"BP4SL3V2","hw_rev":"V2","firmware":"1.4.9","bootloader_firmware":"1.0.3","mac":"DC:04:5A:EB:72:2B","cid":773,"features":4095,"mode":"app"},"rules":[]}` | none | none |
 | `GET /api/v1/telemetry` | client | no body | `200` with exactly the one complete cached Snapshot JSON defined under the primary `GET /api/v1/telemetry` section, including its top-level `identity` and `commands`; this compatibility contract is not a reduced subset | none | none |
 | `GET /api/v1/history` | client | no body | `200 [{"at":"2026-07-17T19:59:00Z","level":77,"status":1,"dc_w":12.0,"typec_w":20.0}]` (empty is exactly `[]`) | none | none |
-| `GET /api/v1/events` | client | no body | `200`, `Content-Type: text/event-stream`, then the exact complete-snapshot framing specified above | before streaming begins, `500 E(internal_error)` if response streaming is unavailable; managed-token revocation or a successful token-store cutover terminates the affected managed stream; after `200` begins, termination has no JSON error body | none |
+| `GET /api/v1/events` | client | no body | `200`, `Content-Type: text/event-stream`, then the exact complete-snapshot framing specified above | before streaming begins, `500 E(internal_error)` if response streaming is unavailable; managed-token revocation, a successful token-store cutover, or slow-subscriber overflow terminates the stream; after `200` begins, termination has no JSON error body | none |
 
 ### Rule and action compatibility routes
 
@@ -765,10 +787,10 @@ The exact rule used in the rows below is
 | Endpoint | Role | Exact request | Exact success | Additional errors (status, body, condition) | BLE I/O |
 |---|---|---|---|---|---|
 | `GET /api/v1/rules` | client | no body | `200 [{"name":"low_battery","enabled":true,"condition":"battery_level","op":"below","percent":15,"hold":600000000000,"hysteresis_margin":5,"actions":["dc_off"],"confirm_shutdown":false}]` | none | none |
-| `POST /api/v1/rules` | client | exact rule above | `200` and the exact same rule JSON | `400 E(invalid_request)` for malformed JSON, invalid condition/action, or shutdown without confirmation; `500 E(internal_error)` when persistence fails | none |
-| `PUT /api/v1/rules/{name}` | client | exact rule above; for path `/api/v1/rules/low_battery` | `200` and the exact same rule JSON (URL name replaces a different body name) | `400 E(invalid_request)` for malformed JSON or invalid rule/action; `500 E(internal_error)` when persistence fails | none |
-| `DELETE /api/v1/rules/{name}` | client | no body; for path `/api/v1/rules/low_battery` | `200 {"deleted":"low_battery"}` | `404 E(not_found)` when no rule has that name; `500 E(internal_error)` when persistence fails | none |
-| `POST /api/v1/device/action` | client | `{"action":"dc_off"}` | `200 {"ok":"dc_off"}` | `400 E(invalid_request)` for malformed JSON or an unknown/empty action; `502 E(ble_operation_failed)` when any device action or webhook fails | one device operation for device actions; outbound HTTP only for `webhook:URL` |
+| `POST /api/v1/rules` | admin | exact rule above | `200` and the exact same rule JSON | `400 E(invalid_request)` for malformed JSON, invalid condition/action, or shutdown without confirmation; `500 E(internal_error)` when persistence fails | none |
+| `PUT /api/v1/rules/{name}` | admin | exact rule above; for path `/api/v1/rules/low_battery` | `200` and the exact same rule JSON (URL name replaces a different body name) | `400 E(invalid_request)` for malformed JSON or invalid rule/action; `500 E(internal_error)` when persistence fails | none |
+| `DELETE /api/v1/rules/{name}` | admin | no body; for path `/api/v1/rules/low_battery` | `200 {"deleted":"low_battery"}` | `404 E(not_found)` when no rule has that name; `500 E(internal_error)` when persistence fails | none |
+| `POST /api/v1/device/action` | client; manual `webhook:URL` requires admin | `{"action":"dc_off"}` | `200 {"ok":"dc_off"}` | `400 E(invalid_request)` for malformed JSON or an unknown/empty action; `403 E(admin_required)` when a managed client submits a webhook; `502 E(ble_operation_failed)` when any device action or webhook fails | one device operation for device actions; outbound HTTP only for an admin `webhook:URL` |
 
 ### BLE-device pairing compatibility routes
 

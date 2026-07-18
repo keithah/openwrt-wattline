@@ -37,14 +37,20 @@ func TestContractDocumentation(t *testing.T) {
 	required := []string{
 		"## Authentication roles",
 		"## Error envelope",
+		"64 KiB",
+		"15-second request-read deadline",
 		"data: {complete snapshot JSON}\\n",
+		"slow subscribers are disconnected",
+		"all 15 documented BLE `FEATURES` bits",
+		"manual `webhook:URL` action requires admin",
 		"ver`, `api`, `id`, `model`, `cid`, `features`, `tls`, and `auth",
 		"wattline://pair?v=1&id=DEVICE_ID&host=PREFERRED_HOST&http=8377&https=8378&pin=123456&tls=CERT_SHA256",
 		"SHA-256 of DER certificate bytes",
 		"## Compatibility routes",
 	}
+	normalizedDoc := strings.Join(strings.Fields(doc), " ")
 	for _, phrase := range required {
-		if !strings.Contains(doc, phrase) {
+		if !strings.Contains(normalizedDoc, strings.Join(strings.Fields(phrase), " ")) {
 			t.Errorf("docs/api.md does not contain required contract phrase %q", phrase)
 		}
 	}
@@ -83,7 +89,15 @@ func TestContractDocumentation(t *testing.T) {
 			"old pin MUST be rejected",
 		}},
 		{"### Cached state compatibility routes", "### Rule and action compatibility routes", []string{
-			"managed-token revocation or a successful token-store cutover terminates the affected managed stream",
+			"managed-token revocation",
+			"successful token-store cutover",
+			"slow-subscriber overflow terminates the stream",
+		}},
+		{"### Rule and action compatibility routes", "### BLE-device pairing compatibility routes", []string{
+			"`POST /api/v1/rules` | admin",
+			"`PUT /api/v1/rules/{name}` | admin",
+			"`DELETE /api/v1/rules/{name}` | admin",
+			"manual `webhook:URL` requires admin",
 		}},
 		{"### BLE-device pairing compatibility routes", "### Deprecated device-control aliases", []string{
 			"409 E(operation_in_progress)",

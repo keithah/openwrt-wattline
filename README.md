@@ -305,7 +305,10 @@ curl -H 'Content-Type: application/json' \
 
 The pair response returns a new `wlt_...` client token only once, the HTTP/HTTPS
 base URLs, MagicDNS name when available, and the DER-certificate SHA-256 for
-pinning. List metadata or revoke a managed token with admin authentication:
+pinning. Managed tokens may read rules and use ordinary device controls; the
+bootstrap administrator is required to create/update/delete rules or execute a
+manual webhook from the router. List metadata or revoke a managed token with
+admin authentication:
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" http://192.168.8.1:8377/api/v1/tokens

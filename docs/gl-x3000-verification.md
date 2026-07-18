@@ -111,7 +111,8 @@ to PASS or FAIL.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — GET OTA INFO, enter OTA with
   confirmation, GET INFO in bootloader, then exit. Expected: INFO reports mode,
   CID, and bootloader version; enter writes `PK` (`43 01`); expected disconnects
-  are successes; reconnect targets bootloader then returns to app mode.
+  are successes; reconnect matches the fresh `PeakDo-OTA` advertisement, keeps
+  the stable app-mode device ID, then exits and returns to app mode.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Inspect every UI and route list.
   Expected: there is no firmware download, upload, erase, program, verify, or
   flash operation and no rejected `05`, `12`, or `f0` command route.
@@ -192,8 +193,9 @@ to PASS or FAIL.
   shows label/created/last-seen metadata but never secret/hash/private key.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Use the client token, observe
   coalesced last-seen, revoke it, and retry. Expected: client routes work before
-  revocation, admin routes return 403, revocation is immediate, and the bootstrap
-  token cannot be revoked.
+  revocation; rule mutation and manual webhook actions return 403 without an
+  outbound request; revocation is immediate; and the bootstrap token cannot be
+  revoked.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Enable `pairing_always_on`, wait
   through a TTL, and disable it. Expected: enrollment stays open with rotating
   PINs while enabled and closes under normal explicit-mode policy afterward.
@@ -222,7 +224,9 @@ to PASS or FAIL.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Keep an SSE client open while
   controls, telemetry, rules, reconnect, and token revocation occur. Expected:
   complete snapshots continue until disconnect/revocation and no cloud or
-  off-box telemetry is emitted.
+  off-box telemetry is emitted. Stall a second client beyond 128 queued
+  snapshots; expected: only that slow stream ends and reconnect starts with a
+  fresh complete snapshot without unbounded router memory growth.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Reboot after changing device
   pairing, timers, rules, listeners, TLS paths, token store, pairing policy,
   advanced mode, mDNS interfaces, and WAN policy. Expected: intended settings
