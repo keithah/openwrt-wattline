@@ -193,9 +193,11 @@ data: {complete snapshot JSON}\n
 Endpoint-specific errors: if streaming is unsupported before response status
 `200` and SSE headers are sent, return HTTP `500` with exact body
 `E(internal_error)`. Once the `200` stream has begun, a transport failure or
-client disconnect ends the stream and cannot carry a JSON error body.
-Authentication errors occur before streaming begins. BLE I/O: none; BLE
-notifications update the store independently.
+client disconnect ends the stream and cannot carry a JSON error body. Revoking
+the managed token that authenticated a live stream also ends that stream
+promptly; streams authenticated by other managed tokens or the bootstrap token
+remain open. Authentication errors occur before streaming begins. BLE I/O: none;
+BLE notifications update the store independently.
 
 ## Granular controls
 
@@ -471,7 +473,7 @@ These authenticated routes pair the router to a Link-Power over BlueZ. They use
 | `GET /api/v1/pairing/status` | client | none | `200 {"stage":"idle","devices":[]}`; optional `error`, `target`; device entries are `{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}` | `400 invalid_request` for a nonempty body; `409 capability_unsupported` when BlueZ pairing is unavailable | none |
 | `POST /api/v1/pairing/scan` | client | none | `202 {"status":"scanning"}` | `400 invalid_request` for a nonempty body; `409 operation_in_progress`, `409 capability_unsupported`, `502 ble_operation_failed` | asynchronous BlueZ scan |
 | `POST /api/v1/pairing/pair` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` (`pin` may be empty to retain configured PIN) | `202 {"status":"pairing"}` | `400 invalid_request`, `409 operation_in_progress`, `409 capability_unsupported` | asynchronous BlueZ pair/trust and BLE reconnect proof; asynchronous failure appears in status |
-| `DELETE /api/v1/pairing/device/{mac}` | client | none | `200 {"status":"removed"}` | `400 invalid_request` for an invalid MAC or nonempty body, `409 capability_unsupported`, `502 ble_operation_failed` | BlueZ unpair, not a device command |
+| `DELETE /api/v1/pairing/device/{mac}` | client | none | `200 {"status":"removed"}` | `400 invalid_request` for an invalid MAC or nonempty body, `409 operation_in_progress` while scan/pair is active, `409 capability_unsupported`, `502 ble_operation_failed` | BlueZ unpair, not a device command |
 
 ## API-client pairing
 
@@ -554,6 +556,10 @@ Role: admin. Request: none. Success `200 OK`:
 `404 not_found`; `500 internal_error` on persistence failure; plus auth/role
 errors. BLE I/O: none.
 
+Immediate revocation rejects subsequent requests and closes every open SSE
+stream authenticated by that managed token. It does not close streams belonging
+to other managed tokens or the bootstrap administrator.
+
 Managed secrets are random 256-bit values. The mode-`0600` token store defaults
 to `/etc/wattline/tokens.json` and contains IDs, labels, timestamps, and lowercase
 SHA-256 secret hashes only. Authentication updates last-seen in memory;
@@ -599,6 +605,39 @@ First-boot initialization generates an ECDSA P-256 self-signed certificate at
 `/etc/wattline/tls/server.crt` and a mode-`0600` key at
 `/etc/wattline/tls/server.key` without an OpenSSL runtime dependency. Fingerprints
 are SHA-256 of DER certificate bytes, rendered as 64 lowercase hexadecimal digits.
+
+### Certificate pinning and trust
+
+The certificate is self-signed. Its pin substitutes for public-CA trust only
+when the client performs explicit pin verification; accepting any self-signed
+certificate or disabling platform trust checks is not pinning. The pin is the
+SHA-256 digest of the exact leaf certificate DER bytes, not of PEM text, the
+public key, or a textual fingerprint.
+
+A client obtains the candidate pin from the QR `tls` parameter, mDNS `tls` TXT
+value, or `tls_sha256` in the public pairing response received over LAN HTTP or
+an encrypted VPN path. It MUST establish that value's authenticity through the
+admin-displayed QR, an out-of-band comparison, or an already trusted VPN. mDNS
+and unauthenticated LAN HTTP alone are discovery/TOFU sources, not protection
+against an active LAN attacker. The client MUST correlate the accompanying
+device `id`, then connect to HTTPS, hash the presented leaf DER certificate, and
+compare all 32 bytes in constant time. Clients MUST verify the certificate
+before sending any bearer token. A missing or mismatched pin is a hard connection
+failure: a client MUST NOT silently downgrade to HTTP,
+automatically accept a replacement certificate, or disclose its token. Plain
+HTTP is a separate explicit transport choice for trusted LAN enrollment or an
+already encrypted VPN; its availability is never permission to fall back.
+
+`POST /api/v1/tls/rotate` must be called through the currently authenticated,
+pinned administrator channel. Its `sha256` is the new certificate pin and
+`restart_required:true` means the active HTTPS listener continues serving the
+old certificate until the daemon restarts. An administrator can therefore save
+the returned new pin before restarting. After restart the client must require
+the new pin and the old pin MUST be rejected. A client that did not receive this
+authenticated rotation handoff must re-enroll or confirm the new pin through an
+out-of-band trusted source; it must not infer trust merely because the device ID
+is unchanged. Rotation does not revoke bearer tokens. After restart, QR, pairing
+responses, settings, and mDNS publish the newly served pin.
 
 ## mDNS
 
@@ -686,19 +725,19 @@ The exact rule used in the rows below is
 | `GET /api/v1/pairing/status` | client | no body | `200 {"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}]}` | `400 E(invalid_request)` for a nonempty body; `409 E(capability_unsupported)` when platform/adapter pairing support is unavailable | none |
 | `POST /api/v1/pairing/scan` | client | no body | `202 {"status":"scanning"}` | `400 E(invalid_request)` for a nonempty body; `409 E(operation_in_progress)` while scan/pair is active; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` if the scan cannot be started | asynchronous BlueZ scan, not a device command |
 | `POST /api/v1/pairing/pair` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` | `202 {"status":"pairing"}` | `400 E(invalid_request)` for malformed JSON, invalid MAC, or a PIN string containing non-digits or more than six digits (empty is allowed); `409 E(operation_in_progress)` while scan/pair is active; `409 E(capability_unsupported)` when pairing support is unavailable | asynchronous BlueZ pair/trust and BLE reconnect proof; later failure is reported by status |
-| `DELETE /api/v1/pairing/device/{mac}` | client | no body; for path `/api/v1/pairing/device/DC:04:5A:EB:72:2B` | `200 {"status":"removed"}` | `400 E(invalid_request)` for invalid MAC or a nonempty body; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` when BlueZ unpair fails | BlueZ unpair, not a device command |
+| `DELETE /api/v1/pairing/device/{mac}` | client | no body; for path `/api/v1/pairing/device/DC:04:5A:EB:72:2B` | `200 {"status":"removed"}` | `400 E(invalid_request)` for invalid MAC or a nonempty body; `409 E(operation_in_progress)` when unpair is busy with scan/pair; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` when BlueZ unpair fails | BlueZ unpair, not a device command |
 
 ### Deprecated device-control aliases
 
 | Endpoint | Role | Exact request | Exact success | Additional errors (status, body, condition) | BLE I/O / replacement |
 |---|---|---|---|---|---|
 | `GET /api/v1/device/usbc-limit` | client | no body | `200 {"global":{"level":4,"watts":100},"input":{"level":3,"watts":65},"output":{"level":4,"watts":100},"runtime":{"level":-1,"watts":0}}` | `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` when any GET fails | four GET commands; replace with per-type canonical GET |
-| `POST /api/v1/device/usbc-limit` | client | set: `{"type":"output","watts":100,"clear":false}`; clear: `{"type":"output","watts":0,"clear":true}` | set: `200 {"watts":100,"level":4}`; clear: `200 {"status":"cleared"}` | `400 E(invalid_request)` for malformed JSON, type outside `global|input|output`, or watts outside `30|45|60|65|100|140`; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on SET/DELETE failure | one SET/DELETE; replace with canonical PUT/DELETE |
+| `POST /api/v1/device/usbc-limit` | client | set: `{"type":"output","watts":100}`; clear: `{"type":"output","clear":true}`; `clear:true` ignores `watts` if supplied | set: `200 {"watts":100,"level":4}` from mutation plus authoritative re-GET; clear: `200 {"status":"cleared"}` after mutation plus authoritative re-GET | `400 E(invalid_request)` for malformed JSON, type outside `global|input|output`, or—only when `clear` is false—watts outside `30|45|60|65|100|140`; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on SET/DELETE/re-GET failure | SET then GET, or DELETE then GET; replace with canonical PUT/DELETE |
 | `GET /api/v1/device/bypass-threshold` | admin | no body | `200 {"volts":19.6}` | `403 E(advanced_disabled)` when policy is off; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on GET failure | one GET; replace with canonical threshold GET |
-| `POST /api/v1/device/bypass-threshold` | admin | `{"volts":19.6}` | `200 {"volts":19.6}` | `400 E(invalid_request)` for malformed JSON or volts not in `(0,60]`; `403 E(advanced_disabled)` when policy is off; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on SET failure | one SET; replace with canonical threshold PUT |
-| `GET /api/v1/device/schedules` | client | no body | `200 [{"id":3,"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}]` (empty is exactly `[]`) | `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on list/GET failure | list then timer GETs; replace with canonical timer list |
-| `POST /api/v1/device/schedules` | client | add: `{"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`; edit: `{"id":3,"status":-1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}` | add: `200 {"id":3,"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`; edit: `200 {"id":3,"status":-1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}` | `400 E(invalid_request)` for malformed JSON, ID outside `0..254`, type outside `0..3`, hour outside `0..23`, minute outside `0..59`, action outside `0..1`, or invalid status/repeat structure; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on ADD/EDIT failure | one ADD/EDIT; replace with canonical timer POST/PUT |
-| `DELETE /api/v1/device/schedules/{id}` | client | no body; for path `/api/v1/device/schedules/3` | `200 {"status":"deleted"}` | `400 E(invalid_request)` for nondecimal ID or ID outside `0..254`; `404 E(not_found)` when timer is absent; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on DELETE failure | one DELETE; replace with canonical timer DELETE |
+| `POST /api/v1/device/bypass-threshold` | admin | `{"volts":19.6}` | `200 {"volts":19.6}` from mutation plus authoritative re-GET | `400 E(invalid_request)` for malformed JSON or volts not in `(0,60]`; `403 E(advanced_disabled)` when policy is off; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on SET/re-GET failure | SET then GET; replace with canonical threshold PUT |
+| `GET /api/v1/device/schedules` | client | no body | `200 [{"id":3,"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}]` (empty is exactly `[]`) | `400 E(invalid_request)` for a nonempty body; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on list/GET failure | list then timer GETs; replace with canonical timer list |
+| `POST /api/v1/device/schedules` | client | add: `{"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}`; edit: `{"id":3,"status":-1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}` | add/edit returns the selected timer after mutation plus authoritative re-list, for example `200 {"id":3,"status":1,"type":1,"hour":6,"minute":30,"repeat":0,"action":1}` | `400 E(invalid_request)` for malformed JSON, ID outside `0..254`, type outside `0..3`, hour outside `0..23`, minute outside `0..59`, action outside `0..1`, or invalid status/repeat structure; `404 E(not_found)` when an edit ID is absent; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on ADD/EDIT/re-list failure | ADD/EDIT then re-list; replace with canonical timer POST/PUT |
+| `DELETE /api/v1/device/schedules/{id}` | client | no body; for path `/api/v1/device/schedules/3` | mutation plus authoritative re-list, then `200 {"status":"deleted"}` | `400 E(invalid_request)` for a nonempty body, nondecimal ID, or ID outside `0..254`; `404 E(not_found)` when timer is absent; `409 E(capability_unsupported)` when unsupported; `503 E(device_disconnected)` when disconnected; `502 E(ble_operation_failed)` on DELETE/re-list failure | DELETE then re-list; replace with canonical timer DELETE |
 
 These 20 method/path entries are the complete compatibility inventory. No
 compatibility route permits unauthenticated actual requests; only CORS preflight

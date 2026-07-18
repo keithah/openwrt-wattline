@@ -191,44 +191,50 @@ func cors(next http.Handler) http.Handler {
 
 func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := s.authenticate(r)
+		principal, store, ok := s.authenticate(r)
 		if !ok {
 			writeAPIError(w, "unauthorized")
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal)))
+		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
+		if store != nil {
+			ctx = context.WithValue(ctx, authStoreContextKey{}, store)
+		}
+		next(w, r.WithContext(ctx))
 	}
 }
 
 type principalContextKey struct{}
+type authStoreContextKey struct{}
 
 func principalFromContext(ctx context.Context) (auth.Principal, bool) {
 	principal, ok := ctx.Value(principalContextKey{}).(auth.Principal)
 	return principal, ok
 }
 
-func (s *server) authenticate(r *http.Request) (auth.Principal, bool) {
+func (s *server) authenticate(r *http.Request) (auth.Principal, *auth.Store, bool) {
 	values := r.Header.Values("Authorization")
 	if len(values) != 1 {
-		return auth.Principal{}, false
+		return auth.Principal{}, nil, false
 	}
 	authorization := values[0]
 	if !strings.HasPrefix(authorization, "Bearer ") {
-		return auth.Principal{}, false
+		return auth.Principal{}, nil, false
 	}
 	secret := strings.TrimPrefix(authorization, "Bearer ")
 	if secret == "" || strings.ContainsAny(secret, " \t\r\n") {
-		return auth.Principal{}, false
+		return auth.Principal{}, nil, false
 	}
 	s.settingsMu.RLock()
 	defer s.settingsMu.RUnlock()
 	if store := s.authStore(); store != nil {
-		return store.Authenticate(secret)
+		principal, ok := store.Authenticate(secret)
+		return principal, store, ok
 	}
 	if s.d.Token != "" && subtle.ConstantTimeCompare([]byte(secret), []byte(s.d.Token)) == 1 {
-		return auth.Principal{TokenID: "bootstrap", Role: auth.RoleAdmin}, true
+		return auth.Principal{TokenID: "bootstrap", Role: auth.RoleAdmin}, nil, true
 	}
-	return auth.Principal{}, false
+	return auth.Principal{}, nil, false
 }
 
 func (s *server) authStore() *auth.Store {
@@ -384,6 +390,19 @@ func (s *server) deviceAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) events(w http.ResponseWriter, r *http.Request) {
+	var revoked <-chan struct{}
+	cancelRevocation := func() {}
+	if principal, ok := principalFromContext(r.Context()); ok && principal.Role == auth.RoleClient {
+		if store, ok := r.Context().Value(authStoreContextKey{}).(*auth.Store); ok {
+			revoked, cancelRevocation = store.SubscribeRevocation(principal.TokenID)
+			defer cancelRevocation()
+			select {
+			case <-revoked:
+				return
+			default:
+			}
+		}
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeAPIError(w, "internal_error")
@@ -406,6 +425,8 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
+		case <-revoked:
+			return
 		case <-r.Context().Done():
 			return
 		case snap := <-ch:

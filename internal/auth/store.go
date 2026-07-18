@@ -73,14 +73,15 @@ func withRandom(random io.Reader) Option {
 }
 
 type Store struct {
-	mu                   sync.RWMutex
-	path                 string
-	now                  func() time.Time
-	random               io.Reader
-	fs                   fileSystem
-	records              map[string]*tokenRecord
-	lastSeenPersistedAt  time.Time
-	lastPersistenceError error
+	mu                    sync.RWMutex
+	path                  string
+	now                   func() time.Time
+	random                io.Reader
+	fs                    fileSystem
+	records               map[string]*tokenRecord
+	revocationSubscribers map[string]map[chan struct{}]struct{}
+	lastSeenPersistedAt   time.Time
+	lastPersistenceError  error
 }
 
 type tokenRecord struct {
@@ -144,11 +145,12 @@ func OpenStore(path, bootstrap string, opts ...Option) (*Store, error) {
 		return nil, errors.New("bootstrap token is empty")
 	}
 	store := &Store{
-		path:    path,
-		now:     time.Now,
-		random:  rand.Reader,
-		fs:      osFileSystem{},
-		records: make(map[string]*tokenRecord),
+		path:                  path,
+		now:                   time.Now,
+		random:                rand.Reader,
+		fs:                    osFileSystem{},
+		records:               make(map[string]*tokenRecord),
+		revocationSubscribers: make(map[string]map[chan struct{}]struct{}),
 	}
 	for _, option := range opts {
 		if option != nil {
@@ -345,7 +347,53 @@ func (s *Store) Revoke(id string) error {
 		s.records[id] = record
 		return result.err
 	}
+	s.notifyRevokedLocked(id)
 	return nil
+}
+
+// SubscribeRevocation returns a channel closed after the managed token is
+// durably revoked. The caller must invoke cancel when it no longer needs the
+// notification. Bootstrap principals are not revocable and receive a nil
+// channel. A missing managed token returns an already-closed channel so a
+// caller cannot miss a revoke between authentication and subscription.
+func (s *Store) SubscribeRevocation(id string) (<-chan struct{}, func()) {
+	if id == bootstrapID {
+		return nil, func() {}
+	}
+	ch := make(chan struct{})
+	s.mu.Lock()
+	record, exists := s.records[id]
+	if !exists || record.Bootstrap {
+		close(ch)
+		s.mu.Unlock()
+		return ch, func() {}
+	}
+	if s.revocationSubscribers == nil {
+		s.revocationSubscribers = make(map[string]map[chan struct{}]struct{})
+	}
+	if s.revocationSubscribers[id] == nil {
+		s.revocationSubscribers[id] = make(map[chan struct{}]struct{})
+	}
+	s.revocationSubscribers[id][ch] = struct{}{}
+	s.mu.Unlock()
+
+	return ch, func() {
+		s.mu.Lock()
+		if subscribers := s.revocationSubscribers[id]; subscribers != nil {
+			delete(subscribers, ch)
+			if len(subscribers) == 0 {
+				delete(s.revocationSubscribers, id)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+func (s *Store) notifyRevokedLocked(id string) {
+	for subscriber := range s.revocationSubscribers[id] {
+		close(subscriber)
+	}
+	delete(s.revocationSubscribers, id)
 }
 
 func (s *Store) persistLocked(flushLastSeen bool) persistResult {

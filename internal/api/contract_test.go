@@ -58,4 +58,41 @@ func TestContractDocumentation(t *testing.T) {
 			}
 		}
 	}
+
+	semanticSections := []struct {
+		start   string
+		end     string
+		phrases []string
+	}{
+		{"## Settings and TLS", "## mDNS", []string{
+			"Clients MUST verify the certificate before sending any bearer token",
+			"pin substitutes for public-CA trust only",
+			"MUST NOT silently downgrade to HTTP",
+			"old pin MUST be rejected",
+		}},
+		{"### BLE-device pairing compatibility routes", "### Deprecated device-control aliases", []string{
+			"409 E(operation_in_progress)",
+			"when unpair is busy",
+		}},
+		{"### Deprecated device-control aliases", "## On-target caveats", []string{
+			"`clear:true` ignores `watts`",
+			"mutation plus authoritative re-GET",
+			"mutation plus authoritative re-list",
+			"nonempty body",
+		}},
+	}
+	for _, section := range semanticSections {
+		start := strings.Index(doc, section.start)
+		end := strings.Index(doc, section.end)
+		if start < 0 || end <= start {
+			t.Fatalf("contract section bounds %q..%q not found", section.start, section.end)
+		}
+		body := doc[start:end]
+		normalizedBody := strings.Join(strings.Fields(body), " ")
+		for _, phrase := range section.phrases {
+			if !strings.Contains(normalizedBody, strings.Join(strings.Fields(phrase), " ")) {
+				t.Errorf("contract section %q does not contain semantic phrase %q", section.start, phrase)
+			}
+		}
+	}
 }

@@ -125,12 +125,18 @@ Read the bootstrap token on the router and test both transports:
 
 ```sh
 TOKEN=$(ssh root@192.168.8.1 'uci -q get wattline.main.token')
+HOST=$(ssh root@192.168.8.1 'hostname')
 ssh root@192.168.8.1 'cat /etc/wattline/tls/server.crt' > wattline-server.crt
 curl -H "Authorization: Bearer $TOKEN" \
   http://192.168.8.1:8377/api/v1/device
-curl --cacert wattline-server.crt -H "Authorization: Bearer $TOKEN" \
-  https://192.168.8.1:8378/api/v1/device
+curl --cacert wattline-server.crt --resolve "$HOST:8378:192.168.8.1" \
+  -H "Authorization: Bearer $TOKEN" "https://$HOST:8378/api/v1/device"
 ```
+
+The curl example explicitly trusts the copied certificate and uses its hostname.
+Apps follow the stricter DER SHA-256 pinning flow in the API contract: verify the
+pin before sending a bearer token, hard-fail a mismatch, and never silently
+downgrade to HTTP.
 
 For app enrollment, an administrator opens pairing mode and displays its PIN or
 QR. Each client exchanges the short-lived PIN for its own token:

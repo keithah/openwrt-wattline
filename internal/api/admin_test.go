@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -40,6 +42,7 @@ type adminFixture struct {
 	preferredHost  string
 	magicDNS       string
 	deviceID       string
+	eventStore     *state.Store
 	live           liveSettingsFixture
 	applyCalls     int
 	rollbacks      int
@@ -82,7 +85,7 @@ func newAdminFixture(t *testing.T) *adminFixture {
 	f := &adminFixture{store: store, activeStore: store, alternateStore: alternateStore, pairing: pairing, clientSecret: clientSecret, clientID: clientMeta.ID, config: cfg,
 		fingerprint: strings.Repeat("a", 64), preferredHost: "wattline.lan", magicDNS: "wattline.example.ts.net",
 		deviceID: "DC:04:5A:EB:72:2B", live: liveSettingsFixture{cfg.PairingTTL, cfg.PairingAlwaysOn, cfg.Advanced, cfg.BLEPIN, cfg.TokenStore}}
-	h, _, _ := testServerWith(t, func(d *Deps) {
+	h, eventStore, _ := testServerWith(t, func(d *Deps) {
 		d.Auth = store
 		d.AuthStore = func() *auth.Store { return f.activeStore }
 		d.ClientPairing = pairing
@@ -136,7 +139,89 @@ func newAdminFixture(t *testing.T) *adminFixture {
 		f.deps = *d
 	})
 	f.h = h
+	f.eventStore = eventStore
 	return f
+}
+
+func openSSE(t *testing.T, server *httptest.Server, token string) (*http.Response, *bufio.Reader) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		t.Fatalf("SSE status %d", response.StatusCode)
+	}
+	reader := bufio.NewReader(response.Body)
+	if line, err := reader.ReadString('\n'); err != nil || !strings.HasPrefix(line, "data: ") {
+		response.Body.Close()
+		t.Fatalf("initial SSE frame = %q, %v", line, err)
+	}
+	if line, err := reader.ReadString('\n'); err != nil || line != "\n" {
+		response.Body.Close()
+		t.Fatalf("initial SSE delimiter = %q, %v", line, err)
+	}
+	return response, reader
+}
+
+func TestRevokingManagedTokenClosesOnlyItsOpenSSE(t *testing.T) {
+	f := newAdminFixture(t)
+	otherSecret, _, err := f.store.Issue("other client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(f.h)
+	defer server.Close()
+
+	revokedResponse, revokedReader := openSSE(t, server, f.clientSecret)
+	defer revokedResponse.Body.Close()
+	otherResponse, otherReader := openSSE(t, server, otherSecret)
+	defer otherResponse.Body.Close()
+	bootstrapResponse, bootstrapReader := openSSE(t, server, "tok")
+	defer bootstrapResponse.Body.Close()
+
+	revokedDone := make(chan error, 1)
+	go func() {
+		_, err := revokedReader.ReadString('\n')
+		revokedDone <- err
+	}()
+	if response := do(t, f.h, http.MethodDelete, "/api/v1/tokens/"+f.clientID, "tok", ""); response.Code != http.StatusOK {
+		t.Fatalf("revoke status %d: %s", response.Code, response.Body.String())
+	}
+	select {
+	case err := <-revokedDone:
+		if err == nil {
+			t.Fatal("revoked SSE produced another frame instead of closing")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("revoked SSE did not close promptly")
+	}
+
+	f.eventStore.SetBattery(proto.Battery{Level: 61})
+	for name, reader := range map[string]*bufio.Reader{"other managed": otherReader, "bootstrap": bootstrapReader} {
+		result := make(chan error, 1)
+		go func(reader *bufio.Reader) {
+			line, err := reader.ReadString('\n')
+			if err == nil && !strings.HasPrefix(line, "data: ") {
+				err = fmt.Errorf("unexpected SSE frame %q", line)
+			}
+			result <- err
+		}(reader)
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatalf("%s SSE closed: %v", name, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s SSE did not remain live", name)
+		}
+	}
 }
 
 func TestAuthRolesAndPrincipalContext(t *testing.T) {

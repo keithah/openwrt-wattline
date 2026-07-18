@@ -290,6 +290,8 @@ func TestTokenRevokeSurvivesPostCommitDirectorySyncFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	revoked, cancel := store.SubscribeRevocation(meta.ID)
+	defer cancel()
 	store.fs = &faultFileSystem{fileSystem: osFileSystem{}, directorySyncErr: errors.New("directory sync failed")}
 	if err := store.Revoke(meta.ID); err != nil {
 		t.Fatalf("Revoke after committed rename: %v", err)
@@ -300,12 +302,74 @@ func TestTokenRevokeSurvivesPostCommitDirectorySyncFailure(t *testing.T) {
 	if _, ok := store.Authenticate(secret); ok {
 		t.Fatal("committed revocation was rolled back in memory")
 	}
+	select {
+	case <-revoked:
+	default:
+		t.Fatal("committed revocation did not notify subscriber")
+	}
 	reopened, err := OpenStore(path, "bootstrap")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := reopened.Authenticate(secret); ok {
 		t.Fatal("committed revocation was absent after reopen")
+	}
+}
+
+func TestTokenRevocationSubscriptionWaitsForCommitAndCanCancel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	random := append(bytes.Repeat([]byte{0x67}, 32), bytes.Repeat([]byte{0x68}, 32)...)
+	store, err := OpenStore(path, "bootstrap", withRandom(bytes.NewReader(random)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, firstMeta, err := store.Issue("first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secondMeta, err := store.Issue("second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstRevoked, cancelFirst := store.SubscribeRevocation(firstMeta.ID)
+	defer cancelFirst()
+	store.fs = &faultFileSystem{fileSystem: osFileSystem{}, renameErr: errors.New("rename failed")}
+	if err := store.Revoke(firstMeta.ID); err == nil {
+		t.Fatal("Revoke succeeded before atomic commit")
+	}
+	select {
+	case <-firstRevoked:
+		t.Fatal("failed revocation notified subscriber")
+	default:
+	}
+	if _, ok := store.Authenticate(first); !ok {
+		t.Fatal("failed revocation removed token")
+	}
+
+	store.fs = osFileSystem{}
+	secondRevoked, cancelSecond := store.SubscribeRevocation(secondMeta.ID)
+	cancelSecond()
+	if err := store.Revoke(secondMeta.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondRevoked:
+		t.Fatal("canceled revocation subscriber was notified")
+	default:
+	}
+
+	missing, cancelMissing := store.SubscribeRevocation("9999999999999999")
+	defer cancelMissing()
+	select {
+	case <-missing:
+	default:
+		t.Fatal("missing-token subscription was not closed")
+	}
+	bootstrap, cancelBootstrap := store.SubscribeRevocation("bootstrap")
+	defer cancelBootstrap()
+	if bootstrap != nil {
+		t.Fatal("bootstrap received a revocation channel")
 	}
 }
 
