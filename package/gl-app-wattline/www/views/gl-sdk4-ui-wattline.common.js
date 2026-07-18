@@ -311,8 +311,16 @@
         // storage paths returned by GET; submit only fields this panel edits.
         var update = { http: d.http, https: d.https, pairing_ttl: d.pairing_ttl,
           pairing_always_on: d.pairing_always_on, mdns: d.mdns, wan_access: d.wan_access };
+        var operatorDraft = JSON.parse(JSON.stringify(d));
+        var self = this;
         this.settingsDraft = null;
-        return this.adminAction('PUT', '/settings', update);
+        return this.adminAction('PUT', '/settings', update).then(function (result) {
+          // adminAction performs the authoritative refresh before returning.
+          // Preserve its fresh read-only policy state, but reinstate the
+          // operator's editable values when the PUT itself failed.
+          if (result === null && !self.destroyed) self.settingsDraft = operatorDraft;
+          return result;
+        });
       },
       setAdvanced: function (enabled) {
         this.adminAction('PUT', '/settings', { advanced: enabled }, enabled ? 'Enable advanced controls? These operations can change device firmware modes and BLE access.' : null);

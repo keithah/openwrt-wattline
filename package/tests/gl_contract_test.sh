@@ -157,10 +157,12 @@ async function lifecycleTests() {
 		{ http: { enabled: true }, https: { enabled: true }, tls: {}, mdns: { interfaces: [] } }, [], { open: false }
 	];
 	const focused = {
+		adminGeneration: 0, adminMutations: 0, destroyed: false,
 		settingsDraft: { user: 'typing' }, focused: () => true, get: async () => values.shift(),
 		loadQR() {}, clearQR() {}, adminErr: '', dev: null, settings: null, tokens: null, apiPair: null
 	};
 	await methods.fetchAdmin.call(focused);
+	assert.strictEqual(focused.dev.id, 'device', 'initialized generation fixture applies the authoritative refresh');
 	assert.deepStrictEqual(focused.settingsDraft, { user: 'typing' }, 'poll cannot rebuild a focused settings form');
 }
 
@@ -238,6 +240,23 @@ async function adminRaceTests() {
 	assert.strictEqual(context.dev.id, 'fresh', 'destroyed view ignores late refresh completion');
 }
 
+async function failedSettingsDraftTest() {
+	const environment = { fetch: () => {}, window: { location: { hostname: 'router.lan' }, confirm: () => true },
+		document: { activeElement: null }, URL: { createObjectURL() {}, revokeObjectURL() {} } };
+	const methods = componentMethods(environment);
+	const draft = {
+		http: { enabled: true, addr4: '0.0.0.0', addr6: '::', port: 8477 },
+		https: { enabled: true, addr4: '0.0.0.0', addr6: '::', port: 8378 },
+		pairing_ttl: '7m', pairing_always_on: false, mdns: { enabled: true, interfaces: ['br-lan'] }, wan_access: false
+	};
+	const context = {
+		settingsDraft: JSON.parse(JSON.stringify(draft)), settings: { wan_access: false, pairing_always_on: false },
+		adminAction: async () => null
+	};
+	await methods.saveSettings.call(context);
+	assert.deepStrictEqual(context.settingsDraft, draft, 'failed settings PUT restores the operator draft after refresh');
+}
+
 function capabilityTests() {
 	const start = source.indexOf('  function advancedCapabilities');
 	const end = source.indexOf('  function flow', start);
@@ -272,6 +291,7 @@ function timerPresentationTests() {
 	await lifecycleTests();
 	await actionAndTimerTests();
 	await adminRaceTests();
+	await failedSettingsDraftTest();
 	capabilityTests();
 	timerPresentationTests();
 	console.log('GL behavior tests passed');
