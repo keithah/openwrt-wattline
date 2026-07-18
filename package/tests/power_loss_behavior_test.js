@@ -5,7 +5,12 @@ const path = require('path');
 const assert = require('assert');
 
 const root = path.resolve(__dirname, '..');
+const repoRoot = path.resolve(root, '..');
 const fixture = require('./power_loss_preset.json');
+
+function readRepoFile(name) {
+	return fs.readFileSync(path.join(repoRoot, name), 'utf8');
+}
 
 function loadModule(name) {
 	const source = fs.readFileSync(path.join(root,
@@ -113,5 +118,33 @@ const rearmedHolding = powerLoss.display(fixture.canonical, { rules: [{
 assert.strictEqual(rearmedHolding.kind, 'holding',
 	'an armed rule with a historical firing is holding during a new input loss');
 assert.strictEqual(rearmedHolding.remainingSeconds, 600);
+
+const readme = readRepoFile('README.md');
+const apiDocs = readRepoFile('docs/api.md');
+const targetChecklist = readRepoFile('docs/gl-x3000-verification.md');
+const changelog = readRepoFile('CHANGELOG.md');
+
+assert.match(readme, /Power-loss shutdown/);
+assert.match(readme, /continuous(?:ly)?[^.]*10 minutes/i);
+assert.match(readme, /input (?:power )?returns[^.]*cancel[^.]*re-arm/i);
+assert.match(readme, /BLE disconnect[^.]*reset/i);
+assert.match(readme, /Applications → Wattline[^.]*Power-loss shutdown/i);
+assert.match(readme, /Services → Wattline[^.]*Power-loss shutdown/i);
+assert.match(readme, /Link-Power wakes[^.]*GL-X3000 boots[^.]*`wattlined` reconnects/i);
+assert.doesNotMatch(readme, /ntfy\.sh\/CHANGME/);
+
+assert.match(apiDocs, /reserved `no_input_shutdown` preset/);
+assert.match(apiDocs, /owns only `enabled`, `hold`, and `confirm_shutdown`/);
+assert.match(apiDocs, /preserves every other valid field and action/i);
+assert.match(apiDocs, /incompatible[^.]*explicit[^.]*confirmed[^.]*Reset preset/i);
+assert.match(apiDocs, /last fired[^.]*attempted\s+trigger[^.]*not proof[^.]*shutdown succeeded/i);
+assert.match(apiDocs, /software wake/i);
+
+assert.match(targetChecklist,
+	/\*\*NOT RUN — requires GL-X3000\/real BLE\*\*[^\n]*— input present → remove input → countdown reaches 10m → Link-Power shuts down →\n\s*restore input → Link-Power wakes → GL-X3000 boots → wattlined reconnects →\n\s*remove input again → full countdown starts again/);
+
+assert.match(changelog, /^## Unreleased$/m);
+assert.match(changelog, /Power-loss shutdown/);
+assert.match(changelog, /Hardware\s+verification remains NOT RUN/i);
 
 console.log('Power-loss preset behavior tests passed');

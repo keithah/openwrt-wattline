@@ -465,6 +465,34 @@ nanoseconds. `repeat_every` is optional and omitted when zero. Actions are
 The action endpoint is deprecated in favor of granular routes. Its successful
 body remains legacy-compatible; its errors use the canonical envelope.
 
+### Power-loss shutdown preset
+
+The two administration panels expose the reserved `no_input_shutdown` preset
+as a dedicated **Power-loss shutdown** card. It is available under
+**Applications → Wattline** in the native GL panel and **Services → Wattline**
+in LuCI. The canonical rule watches `input_power` with `state:"absent"`, has a
+10-minute default `hold` of `600000000000`, contains the `shutdown` action, and
+requires `confirm_shutdown:true`.
+
+Input must remain absent continuously for the entire hold. Input returning
+cancels the current countdown and re-arms the rule. A BLE disconnect resets the
+hold; time without telemetry is never counted. At expiry the engine attempts
+the shutdown trigger once. A displayed “last fired” records an attempted
+trigger, not proof that shutdown succeeded; action failures remain available in
+daemon logs and events.
+
+For a compatible reserved rule—one that still watches absent input and contains
+a shutdown action—the GUI owns only `enabled`, `hold`, and `confirm_shutdown`.
+It preserves every other valid field and action, including additional webhooks.
+An incompatible reserved rule is not overwritten unless the operator chooses
+an explicit, confirmed **Reset preset**, which replaces it with the canonical
+rule using the current card settings. Other named rules are never changed.
+
+Link-Power supplies this router, so a successful shutdown also removes power
+from the GL-X3000. Recovery is hardware-driven: after input returns, Link-Power
+must wake, the GL-X3000 boots, and `wattlined` reconnects. The daemon does not
+and cannot promise a software wake while its router is off.
+
 ## BLE-device pairing
 
 These authenticated routes pair the router to a Link-Power over BlueZ. They use

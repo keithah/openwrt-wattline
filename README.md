@@ -23,7 +23,8 @@ Both UIs cover the full lifecycle:
 - **Control** — DC / USB-C output and DC bypass toggles; USB-C output power
   limit (30–140 W); DC bypass engage-voltage threshold; on-device on/off
   schedules; and Restart / Power-off.
-- **Automation** — the rules engine and webhooks.
+- **Automation** — the rules engine, webhooks, and a guided Power-loss shutdown
+  preset.
 
 See the [changelog](CHANGELOG.md) for version history.
 
@@ -208,7 +209,6 @@ config rule 'no_input_shutdown'
 	option condition 'input_power'
 	option state 'absent'
 	option hold '10m'
-	list action 'webhook:https://ntfy.sh/CHANGME?msg=input+lost'
 	list action 'shutdown'
 	option confirm_shutdown '1'
 
@@ -232,6 +232,27 @@ the API are persisted back to this UCI file, and the running daemon is
 reloaded with `SIGHUP` (procd's `service_triggers`/`reload_service` wire this
 up automatically on `uci commit wattline` + `ubus call service reload`, or
 manually via `/etc/init.d/wattlined reload`).
+
+### Power-loss shutdown preset
+
+The reserved `no_input_shutdown` preset waits until input power has been
+continuously absent for 10 minutes by default, then attempts one Link-Power
+shutdown. If input power returns before the delay expires, the countdown is
+cancelled and the rule re-arms. A BLE disconnect also resets the hold so time
+without telemetry never counts toward shutdown.
+
+In the native GL panel, open **Applications → Wattline** and use the
+**Power-loss shutdown** card. In LuCI, open **Services → Wattline** and use the
+**Power-loss shutdown** card. A compatible existing rule keeps its additional
+valid fields and actions; the cards change only its enabled state, delay, and
+required shutdown confirmation. A conflicting reserved rule is left untouched
+unless the operator explicitly confirms **Reset preset**.
+
+Shutting down Link-Power also removes power from this router. Recovery is
+hardware-driven: after input returns, Link-Power wakes, the GL-X3000 boots, and
+`wattlined` reconnects. The daemon cannot provide a software wake while the
+router is off. The card's “last fired” state records an attempted trigger, not
+proof that shutdown succeeded; check daemon logs and events for action errors.
 
 HTTP and HTTPS bind IPv4 and IPv6 independently. Both default to all addresses,
 which makes LAN, `tailscale0`, and other WireGuard/VPN interfaces reachable.

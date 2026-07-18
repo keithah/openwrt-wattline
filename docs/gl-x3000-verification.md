@@ -213,6 +213,12 @@ to PASS or FAIL.
   Expected: UCI round-trips hostile string characters safely, hysteresis/hold/
   repeat policy works, webhooks fire only as configured, and legacy action
   aliases remain compatible.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — input present → remove input → countdown reaches 10m → Link-Power shuts down →
+  restore input → Link-Power wakes → GL-X3000 boots → wattlined reconnects →
+  remove input again → full countdown starts again
+  Expected: both dedicated Power-loss shutdown cards show the countdown and
+  reset states; shutdown removes router power, hardware wake starts the router,
+  and the second loss receives a fresh full hold rather than reusing blind time.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Keep an SSE client open while
   controls, telemetry, rules, reconnect, and token revocation occur. Expected:
   complete snapshots continue until disconnect/revocation and no cloud or

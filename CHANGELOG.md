@@ -3,6 +3,18 @@
 All notable changes to openwrt-wattline. Versions are the `.ipk` package
 versions built from `package/Makefile`.
 
+## Unreleased
+
+- Added a dedicated **Power-loss shutdown** card to LuCI and the native GL
+  panel. The reserved preset defaults to ten minutes of continuous input loss,
+  resets when input returns or BLE disconnects, preserves compatible rule
+  customizations, and requires confirmation before replacing a conflict.
+- Documented that Link-Power shutdown also powers off the router and that
+  recovery depends on Link-Power hardware wake, GL-X3000 boot, and daemon
+  reconnect. “Last fired” means an attempted trigger, not confirmed shutdown.
+- Host-side behavior, contract, and package checks cover the preset. Hardware
+  verification remains NOT RUN pending a GL-X3000 and real Link-Power BLE.
+
 ## 1.2.3
 
 - New **temperature** rule condition (USB-C port °C, op below/above) with
