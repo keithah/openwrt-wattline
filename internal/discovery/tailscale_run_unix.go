@@ -12,10 +12,6 @@ import (
 	"time"
 )
 
-const maxCommandOutput = 1 << 20
-
-var ErrCommandOutputTooLarge = errors.New("command output exceeds 1 MiB")
-
 type boundedBuffer struct {
 	buffer   bytes.Buffer
 	overflow bool

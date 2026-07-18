@@ -15,7 +15,7 @@ func multicastTestInterface(t *testing.T) net.Interface {
 		t.Fatal(err)
 	}
 	for _, iface := range interfaces {
-		if !lanEligible(iface) {
+		if !multicastCapable(iface) {
 			continue
 		}
 		addresses, err := iface.Addrs()
@@ -38,5 +38,17 @@ func TestPatchedZeroconfRapidRegisterShutdown(t *testing.T) {
 			t.Fatalf("register %d: %v", iteration, err)
 		}
 		server.Shutdown()
+	}
+}
+
+func TestPatchedZeroconfNormalizesLocalHostnameOnce(t *testing.T) {
+	for _, test := range []struct{ host, domain, want string }{
+		{"router", "local.", "router.local."},
+		{"router.local", "local.", "router.local."},
+		{"router.local.", "local", "router.local."},
+	} {
+		if got := zeroconf.NormalizeHostNameForDomain(test.host, test.domain); got != test.want {
+			t.Fatalf("NormalizeHostNameForDomain(%q, %q) = %q, want %q", test.host, test.domain, got, test.want)
+		}
 	}
 }

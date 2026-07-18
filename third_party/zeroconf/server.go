@@ -51,9 +51,7 @@ func Register(instance, service, domain string, port int, text []string, ifaces 
 		}
 	}
 
-	if !strings.HasSuffix(trimDot(entry.HostName), entry.Domain) {
-		entry.HostName = fmt.Sprintf("%s.%s.", trimDot(entry.HostName), trimDot(entry.Domain))
-	}
+	entry.HostName = NormalizeHostNameForDomain(entry.HostName, entry.Domain)
 
 	if len(ifaces) == 0 {
 		ifaces = listMulticastInterfaces()
@@ -105,9 +103,7 @@ func RegisterProxy(instance, service, domain string, port int, host string, ips 
 		return nil, fmt.Errorf("Missing port")
 	}
 
-	if !strings.HasSuffix(trimDot(entry.HostName), entry.Domain) {
-		entry.HostName = fmt.Sprintf("%s.%s.", trimDot(entry.HostName), trimDot(entry.Domain))
-	}
+	entry.HostName = NormalizeHostNameForDomain(entry.HostName, entry.Domain)
 
 	for _, ip := range ips {
 		ipAddr := net.ParseIP(ip)
@@ -154,6 +150,18 @@ type Server struct {
 	shutdownEnd    sync.WaitGroup
 	isShutdown     bool
 	ttl            uint32
+}
+
+// NormalizeHostNameForDomain returns one absolute DNS name without duplicating
+// the domain when the host already ends in it. It is exported so downstream
+// lifecycle/contract tests can pin the local v1.0.0 patch behavior.
+func NormalizeHostNameForDomain(host, domain string) string {
+	host, domain = trimDot(host), trimDot(domain)
+	lowerHost, lowerDomain := strings.ToLower(host), strings.ToLower(domain)
+	if lowerHost != lowerDomain && !strings.HasSuffix(lowerHost, "."+lowerDomain) {
+		host += "." + domain
+	}
+	return host + "."
 }
 
 // Constructs server structure

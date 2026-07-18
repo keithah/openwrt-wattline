@@ -32,6 +32,17 @@ type fakeAddr string
 func (a fakeAddr) Network() string { return "ip" }
 func (a fakeAddr) String() string  { return string(a) }
 
+type fakeLANMembership struct {
+	names []string
+	err   error
+}
+
+func (membership fakeLANMembership) LANInterfaces() ([]string, error) {
+	return append([]string(nil), membership.names...), membership.err
+}
+
+func lanOnly(names ...string) LANMembershipSource { return fakeLANMembership{names: names} }
+
 func TestResolveInterfacesMatchesOnlyConfiguredNamesOrAddresses(t *testing.T) {
 	source := fakeInterfaces{
 		interfaces: []net.Interface{
@@ -39,16 +50,21 @@ func TestResolveInterfacesMatchesOnlyConfiguredNamesOrAddresses(t *testing.T) {
 			{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast},
 			{Index: 3, Name: "tailscale0", Flags: net.FlagUp | net.FlagMulticast},
 			{Index: 4, Name: "wan", Flags: net.FlagUp | net.FlagMulticast},
+			{Index: 5, Name: "eth0", Flags: net.FlagUp | net.FlagMulticast},
+			{Index: 6, Name: "internet", Flags: net.FlagUp | net.FlagMulticast},
 		},
 		addresses: map[int][]net.Addr{
 			2: {fakeAddr("192.168.8.1/24"), fakeAddr("fd00::1/64")},
 			3: {fakeAddr("100.64.0.1/32")},
 			4: {fakeAddr("fe80::1%wan/64")},
+			5: {fakeAddr("192.168.9.1/24")},
+			6: {fakeAddr("192.168.10.1/24")},
 		},
 	}
 	source.addresses[2] = append(source.addresses[2], fakeAddr("fe80::1%br-lan/64"))
+	membership := lanOnly("br-lan")
 	for _, configured := range [][]string{{"br-lan"}, {"192.168.8.1"}, {"fd00::1"}, {"fe80::1%br-lan"}} {
-		got, err := ResolveInterfaces(configured, source)
+		got, err := ResolveInterfaces(configured, source, membership)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -56,24 +72,35 @@ func TestResolveInterfacesMatchesOnlyConfiguredNamesOrAddresses(t *testing.T) {
 			t.Fatalf("ResolveInterfaces(%v) = %#v", configured, got)
 		}
 	}
-	got, err := ResolveInterfaces([]string{"missing"}, source)
+	got, err := ResolveInterfaces([]string{"missing"}, source, membership)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("missing interface fell back to %#v", got)
 	}
-	if _, err := ResolveInterfaces([]string{"fe80::1"}, source); err == nil {
+	if _, err := ResolveInterfaces([]string{"fe80::1"}, source, membership); err == nil {
 		t.Fatal("accepted ambiguous unscoped link-local selector")
 	}
-	for _, forbidden := range []string{"lo", "wan", "tailscale0", "fe80::1%wan"} {
-		got, err := ResolveInterfaces([]string{forbidden}, source)
+	for _, forbidden := range []string{"lo", "wan", "tailscale0", "fe80::1%wan", "eth0", "internet"} {
+		got, err := ResolveInterfaces([]string{forbidden}, source, membership)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(got) != 0 {
 			t.Fatalf("forbidden interface %q resolved to %#v", forbidden, got)
 		}
+	}
+	got, err = ResolveInterfaces([]string{"192.168.9.1"}, source, membership)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("non-LAN explicit address selector = %#v, %v", got, err)
+	}
+	got, err = ResolveInterfaces([]string{"192.168.9.1"}, source, lanOnly("br-lan", "eth0"))
+	if err != nil || len(got) != 1 || got[0].Name != "eth0" {
+		t.Fatalf("authoritative LAN address selector = %#v, %v", got, err)
+	}
+	if _, err := ResolveInterfaces([]string{"br-lan"}, source, fakeLANMembership{err: errors.New("ubus unavailable")}); err == nil {
+		t.Fatal("LAN membership failure did not fail closed")
 	}
 }
 
@@ -209,6 +236,7 @@ func TestServiceSuppressesUntilMACAndReregistersOnlyOnMeaningfulChange(t *testin
 		TLSFingerprint: func() string { return fingerprint.Load().(string) },
 		Registrar:      registrar,
 		Interfaces:     fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}},
+		LANMembership:  lanOnly("br-lan"),
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -271,7 +299,7 @@ func TestServiceNeverFallsBackWhenConfiguredInterfaceIsAbsent(t *testing.T) {
 	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
 	registrar := &fakeRegistrar{}
 	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
-	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 1, Name: "lo", Flags: net.FlagUp | net.FlagMulticast | net.FlagLoopback}}}})
+	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 1, Name: "lo", Flags: net.FlagUp | net.FlagMulticast | net.FlagLoopback}}}, LANMembership: lanOnly("br-lan")})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- service.Run(ctx) }()
@@ -290,7 +318,7 @@ func TestServiceDoesNotRegisterWhenContextIsAlreadyCanceled(t *testing.T) {
 	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
 	registrar := &fakeRegistrar{}
 	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
-	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}}})
+	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}}, LANMembership: lanOnly("br-lan")})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := service.Run(ctx); err != nil {
@@ -310,6 +338,7 @@ func TestServiceRetriesRegistrationFailuresWithoutHealthyPolling(t *testing.T) {
 	service := NewService(Options{
 		Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar,
 		Interfaces:    fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}},
+		LANMembership: lanOnly("br-lan"),
 		NewRetryTimer: timers.New,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -342,7 +371,7 @@ func TestServiceRetriesMissingInterfaceAndStopsTimerOnCancel(t *testing.T) {
 	store.SetIdentity(state.Identity{MAC: "DC:04:5A:EB:72:2B"})
 	timers := &manualTimerFactory{}
 	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
-	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: &fakeRegistrar{}, Interfaces: fakeInterfaces{}, NewRetryTimer: timers.New})
+	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: &fakeRegistrar{}, Interfaces: fakeInterfaces{}, LANMembership: lanOnly("br-lan"), NewRetryTimer: timers.New})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- service.Run(ctx) }()
@@ -361,7 +390,7 @@ func TestServiceDoesNotRetryWithoutMACOrAfterNilRegistration(t *testing.T) {
 	timers := &manualTimerFactory{}
 	cfg := &config.Config{MDNSEnabled: true, MDNSInterfaces: []string{"br-lan"}, HTTPEnabled: true, HTTPPort: 8377}
 	registrar := &fakeRegistrar{nilRegistration: true}
-	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}}, NewRetryTimer: timers.New})
+	service := NewService(Options{Version: "dev", Store: store, Config: func() *config.Config { return cfg }, Registrar: registrar, Interfaces: fakeInterfaces{interfaces: []net.Interface{{Index: 2, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast}}}, LANMembership: lanOnly("br-lan"), NewRetryTimer: timers.New})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- service.Run(ctx) }()

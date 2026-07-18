@@ -66,25 +66,34 @@ func interfaceAddress(value string) (addressSelector, bool) {
 	return parseAddress(value)
 }
 
-func lanEligible(iface net.Interface) bool {
+func multicastCapable(iface net.Interface) bool {
 	if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagLoopback != 0 {
 		return false
 	}
-	name := strings.ToLower(iface.Name)
-	for _, prefix := range []string{"wan", "wwan", "ppp", "tun", "wg", "tailscale", "rmnet"} {
-		if strings.HasPrefix(name, prefix) {
-			return false
-		}
-	}
 	return true
+}
+
+func localSelector(selector addressSelector) bool {
+	return selector.address.IsPrivate() || selector.address.IsLinkLocalUnicast()
 }
 
 // ResolveInterfaces returns only existing interfaces explicitly named by UCI,
 // or owning an explicitly configured IPv4/IPv6 address. It never substitutes
 // all interfaces when a name is absent.
-func ResolveInterfaces(configured []string, source InterfaceSource) ([]net.Interface, error) {
+func ResolveInterfaces(configured []string, source InterfaceSource, membership LANMembershipSource) ([]net.Interface, error) {
 	if source == nil {
 		source = systemInterfaces{}
+	}
+	if membership == nil {
+		return nil, errors.New("LAN membership source is unavailable")
+	}
+	lanNames, err := membership.LANInterfaces()
+	if err != nil {
+		return nil, err
+	}
+	authorized := make(map[string]struct{}, len(lanNames))
+	for _, name := range lanNames {
+		authorized[name] = struct{}{}
 	}
 	interfaces, err := source.Interfaces()
 	if err != nil {
@@ -94,6 +103,9 @@ func ResolveInterfaces(configured []string, source InterfaceSource) ([]net.Inter
 	wantedIPs := make([]addressSelector, 0, len(configured))
 	for _, value := range configured {
 		if selector, ok := parseAddress(value); ok {
+			if !localSelector(selector) {
+				return nil, fmt.Errorf("mDNS address %q is not LAN-local", value)
+			}
 			if selector.address.Is6() && selector.address.IsLinkLocalUnicast() && selector.zone == "" {
 				return nil, fmt.Errorf("link-local mDNS address %q requires an interface zone", value)
 			}
@@ -105,10 +117,14 @@ func ResolveInterfaces(configured []string, source InterfaceSource) ([]net.Inter
 	selected := make([]net.Interface, 0, len(configured))
 	seen := make(map[int]struct{})
 	for _, iface := range interfaces {
-		if !lanEligible(iface) {
+		if !multicastCapable(iface) {
 			continue
 		}
-		_, match := wantedNames[iface.Name]
+		if _, isLAN := authorized[iface.Name]; !isLAN {
+			continue
+		}
+		_, requestedByName := wantedNames[iface.Name]
+		match := requestedByName
 		if !match && len(wantedIPs) != 0 {
 			addresses, addressErr := source.Addrs(iface)
 			if addressErr != nil {
@@ -156,6 +172,7 @@ type Options struct {
 	TLSFingerprint func() string
 	Registrar      Registrar
 	Interfaces     InterfaceSource
+	LANMembership  LANMembershipSource
 	Logf           func(string, ...any)
 	NewRetryTimer  func(time.Duration) RetryTimer
 	RetryDelay     func(int) time.Duration
@@ -197,6 +214,9 @@ func NewService(options Options) *Service {
 	}
 	if options.Interfaces == nil {
 		options.Interfaces = systemInterfaces{}
+	}
+	if options.LANMembership == nil {
+		options.LANMembership = OpenWrtLANMembership{}
 	}
 	if options.NewRetryTimer == nil {
 		options.NewRetryTimer = func(delay time.Duration) RetryTimer { return systemRetryTimer{time.NewTimer(delay)} }
@@ -263,7 +283,7 @@ func (service *Service) desired() (publication, bool, error) {
 		}
 	}
 	txt := TXT(Metadata{Version: service.options.Version, API: 1, ID: identity.MAC, Model: identity.Model, CID: identity.CID, Features: identity.Features, TLS: tls})
-	interfaces, err := ResolveInterfaces(cfg.MDNSInterfaces, service.options.Interfaces)
+	interfaces, err := ResolveInterfaces(cfg.MDNSInterfaces, service.options.Interfaces, service.options.LANMembership)
 	if err != nil {
 		return publication{}, false, err
 	}

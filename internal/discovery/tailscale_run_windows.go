@@ -4,18 +4,27 @@ package discovery
 
 import (
 	"context"
-	"errors"
 	"os/exec"
 )
 
-const maxCommandOutput = 1 << 20
-
-var ErrCommandOutputTooLarge = errors.New("command output exceeds 1 MiB")
-
 func runBoundedCommand(ctx context.Context, executable string, args ...string) ([]byte, error) {
-	output, err := exec.CommandContext(ctx, executable, args...).Output()
-	if len(output) > maxCommandOutput {
-		return append([]byte(nil), output[:maxCommandOutput]...), ErrCommandOutputTooLarge
+	command := exec.CommandContext(ctx, executable, args...)
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return nil, err
 	}
-	return output, err
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+	output, overflow, readErr := readBoundedOutput(stdout)
+	if overflow {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		return output, ErrCommandOutputTooLarge
+	}
+	waitErr := command.Wait()
+	if readErr != nil {
+		return output, readErr
+	}
+	return output, waitErr
 }

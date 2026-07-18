@@ -48,6 +48,13 @@ func TestBoundedCommandRejectsOversizedOutput(t *testing.T) {
 	}
 }
 
+func TestBoundedReaderCapsStreamWithoutReadingToEOF(t *testing.T) {
+	output, overflow, err := readBoundedOutput(strings.NewReader(strings.Repeat("x", maxCommandOutput+100)))
+	if err != nil || !overflow || len(output) != maxCommandOutput {
+		t.Fatalf("len=%d overflow=%v err=%v", len(output), overflow, err)
+	}
+}
+
 func TestBoundedCommandKillsHangingChildProcessGroup(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
