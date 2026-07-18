@@ -2,55 +2,14 @@
 'require view';
 'require uci';
 'require poll';
+'require wattline.transport as wattlineTransport';
+'require wattline.qr as wattlineQR';
 
 /* Wattline status view — styled after the PeakDo Link-Power web app, with
    user-facing copy from the LinkPower-2 manual (runtime, Bypass, USB-C
    charge-only, Starlink reserve). */
 
 var GREEN = '#25b45f', ORANGE = '#f5a623', GREY = '#9aa0a6', RED = '#e5533c';
-
-function transports(config) {
-	var host = window.location.hostname;
-	var urls = [];
-	if (config.httpsEnabled) urls.push('https://' + host + ':' + config.httpsPort + '/api/v1');
-	if (config.httpEnabled) urls.push('http://' + host + ':' + config.httpPort + '/api/v1');
-	return urls;
-}
-
-function apiFetch(token, config, method, path, body) {
-	var bases = transports(config), index = 0;
-	function attempt(lastError) {
-		if (index >= bases.length) return Promise.reject(lastError || new Error(_('No API listener is enabled')));
-		var base = bases[index++];
-		return fetch(base + path, {
-			method: method,
-			headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-			body: body == null ? null : JSON.stringify(body),
-			cache: 'no-store'
-		}).catch(attempt);
-	}
-	return attempt();
-}
-
-function canonicalError(response) {
-	return response.json().then(function (payload) {
-		var detail = payload && payload.error;
-		var error = new Error(detail && detail.message ? detail.message : ('HTTP ' + response.status));
-		error.code = detail && detail.code;
-		error.status = response.status;
-		throw error;
-	}).catch(function (error) {
-		if (error && error.status) throw error;
-		throw new Error('HTTP ' + response.status);
-	});
-}
-
-function api(token, config, method, path, body) {
-	return apiFetch(token, config, method, path, body).then(function (response) {
-		if (!response.ok) return canonicalError(response);
-		return response.json();
-	});
-}
 
 function css() {
 	return '' +
@@ -110,6 +69,8 @@ return view.extend({
 			httpEnabled: uci.get('wattline', 'main', 'http_enabled') !== '0',
 			httpPort: uci.get('wattline', 'main', 'port') || '8377'
 		};
+		var client = wattlineTransport.create({ token: token, config: port, host: window.location.hostname, fetch: fetch });
+		function api(unusedToken, unusedConfig, method, path, body) { return client.json(method, path, body); }
 
 		var conn = E('span', { 'class': 'wl-pill' }, _('…'));
 		var dev = E('div', { 'class': 'wl-dev' }, 'Link-Power');
@@ -311,12 +272,14 @@ return view.extend({
 		/* Router/API administration is intentionally separate from BLE-device
 		   pairing. The bootstrap token is sent only in the Authorization header;
 		   enrollment images are short-lived object URLs and never data/query URIs. */
-		var qrObjectURL = null, qrExpires = '', pairingExpiresAt = null;
+		var qrImage = null, pairingExpiresAt = null;
 		var countdown = E('span', { 'class': 'wl-pill' }, _('Closed'));
-		function clearQR() {
-			if (qrObjectURL) URL.revokeObjectURL(qrObjectURL);
-			qrObjectURL = null; qrExpires = '';
-		}
+		var qr = wattlineQR.create({
+			fetchBlob: function (signal) { return client.blob('GET', '/pairing-mode/qr.png', null, { signal: signal }); },
+			createObjectURL: function (blob) { return URL.createObjectURL(blob); },
+			revokeObjectURL: function (value) { URL.revokeObjectURL(value); }
+		});
+		function clearQR() { qr.close(qrImage); qrImage = null; }
 		window.addEventListener('pagehide', clearQR, { once: true });
 
 		function formatDate(value) {
@@ -338,19 +301,10 @@ return view.extend({
 				.catch(function (error) { window.alert(error.message); });
 		}
 		function loadQR(image, expiresAt) {
-			if (!expiresAt || (qrObjectURL && qrExpires === expiresAt)) {
-				if (qrObjectURL) image.src = qrObjectURL;
-				return;
-			}
-		apiFetch(token, port, 'GET', '/pairing-mode/qr.png').then(function (response) {
-			if (!response.ok) return canonicalError(response);
-			return response.blob();
-		}).then(function (blob) {
-			clearQR();
-			qrObjectURL = URL.createObjectURL(blob);
-			qrExpires = expiresAt;
-			image.src = qrObjectURL;
-		}).catch(function (error) { image.replaceWith(E('div', { 'class': 'wl-note' }, error.message)); });
+			qrImage = image;
+			qr.load(image, expiresAt).catch(function (error) {
+				if (image.parentNode) image.replaceWith(E('div', { 'class': 'wl-note' }, error.message));
+			});
 		}
 		function updateCountdown() {
 			if (!pairingExpiresAt) { countdown.textContent = _('Closed'); countdown.className = 'wl-pill'; return; }
@@ -392,7 +346,7 @@ return view.extend({
 				var image = E('img', { 'class': 'wl-qr', alt: _('API-client enrollment QR code') });
 				pairKids.push(image);
 				var close = E('button', { 'class': 'wl-btn danger' }, _('Close pairing window'));
-				close.addEventListener('click', function () { adminAction('DELETE', '/pairing-mode', null); });
+				close.addEventListener('click', function () { clearQR(); adminAction('DELETE', '/pairing-mode', null); });
 				pairKids.push(E('div', { 'class': 'wl-actions' }, close));
 				loadQR(image, pairInfo.expires_at);
 			} else {

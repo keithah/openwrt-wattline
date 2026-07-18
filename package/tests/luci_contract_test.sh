@@ -5,6 +5,9 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 STATUS="$ROOT/package/luci-app-wattline/www/luci-static/resources/view/wattline/status.js"
 SETTINGS="$ROOT/package/luci-app-wattline/www/luci-static/resources/view/wattline/settings.js"
 ACL="$ROOT/package/luci-app-wattline/usr/share/rpcd/acl.d/luci-app-wattline.json"
+QR="$ROOT/package/luci-app-wattline/www/luci-static/resources/wattline/qr.js"
+TRANSPORT="$ROOT/package/luci-app-wattline/www/luci-static/resources/wattline/transport.js"
+VALIDATION="$ROOT/package/luci-app-wattline/www/luci-static/resources/wattline/validation.js"
 
 need() {
 	file=$1
@@ -29,8 +32,15 @@ need "$STATUS" 'https_enabled' 'HTTPS enablement lookup'
 need "$STATUS" 'https_port' 'HTTPS port lookup'
 need "$STATUS" 'http_enabled' 'HTTP fallback lookup'
 need "$STATUS" 'error\.message' 'canonical JSON error message'
-need "$STATUS" 'URL\.createObjectURL' 'authenticated QR object URL'
-need "$STATUS" 'URL\.revokeObjectURL' 'QR object URL cleanup'
+need "$QR" 'createObjectURL' 'authenticated QR object URL'
+need "$QR" 'revokeObjectURL' 'QR object URL cleanup'
+need "$STATUS" 'wattline\.transport' 'safe transport module integration'
+need "$STATUS" 'wattline\.qr' 'QR lifecycle module integration'
+need "$SETTINGS" 'wattline\.validation' 'settings validator integration'
+need "$SETTINGS" '\.validate = validateSetting' 'cross-field settings validation'
+need "$SETTINGS" '\.depends\(' 'listener and discovery dependencies'
+need "$TRANSPORT" "method === 'GET'" 'GET-only fallback policy'
+need "$VALIDATION" 'HTTP and HTTPS listeners overlap' 'listener overlap validation'
 if grep -Eq 'qr\.png[^\n]*(token=|pin=)|src[^\n]*token|setAttribute\([^\n]*src[^\n]*token' "$STATUS"; then
 	printf 'forbidden: enrollment secret embedded in QR URI/DOM\n' >&2
 	exit 1
@@ -59,7 +69,19 @@ for warning in 'insecure — use TLS/VPN' 'always available to anyone with the P
 done
 
 # ACL remains narrowly scoped to UCI and service control needed by this app.
-need "$ACL" '"wattline"' 'Wattline UCI ACL'
-need "$ACL" '"service"' 'service status ACL'
+python3 - "$ACL" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    actual = json.load(source)
+expected = {
+    "luci-app-wattline": {
+        "description": "Wattline power-bank automation",
+        "read": {"uci": ["wattline"], "ubus": {"service": ["list"]}},
+        "write": {"uci": ["wattline"]},
+    }
+}
+assert actual == expected, f"unexpected LuCI ACL: {actual!r}"
+PY
 
 printf 'LuCI contract tests passed\n'
