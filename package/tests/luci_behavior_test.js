@@ -11,6 +11,153 @@ function loadModule(name, globals) {
 	return Function.apply(null, names.concat(source)).apply(null, names.map((key) => globals[key]));
 }
 
+class FakeElement {
+	constructor(tag, attrs, children, document) {
+		this.tagName = tag;
+		this.attributes = {};
+		this.children = [];
+		this.listeners = {};
+		this.parentNode = null;
+		this.ownerDocument = document;
+		this._text = '';
+		for (const [name, value] of Object.entries(attrs || {})) this.setAttribute(name, value);
+		this.appendChild(children);
+	}
+	appendChild(child) {
+		if (Array.isArray(child)) { child.forEach((item) => this.appendChild(item)); return child; }
+		if (child == null || child === '') return child;
+		if (child instanceof FakeElement) child.parentNode = this;
+		this.children.push(child);
+		return child;
+	}
+	replaceChild(next, old) {
+		const index = this.children.indexOf(old);
+		if (index !== -1) { this.children[index] = next; next.parentNode = this; old.parentNode = null; }
+		return old;
+	}
+	replaceWith(next) { if (this.parentNode) this.parentNode.replaceChild(next, this); }
+	setAttribute(name, value) {
+		this.attributes[name] = value === '' ? '' : String(value);
+		if (name === 'class') this.className = String(value);
+		if (name === 'value') this.value = String(value);
+		if (name === 'disabled') this.disabled = true;
+		if (name === 'src') this.src = String(value);
+	}
+	removeAttribute(name) {
+		delete this.attributes[name];
+		if (name === 'disabled') this.disabled = false;
+		if (name === 'src') this.src = '';
+	}
+	addEventListener(name, listener) { (this.listeners[name] ||= []).push(listener); }
+	dispatch(name) {
+		if (name === 'focus') this.ownerDocument.activeElement = this;
+		if (name === 'blur' && this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = null;
+		for (const listener of this.listeners[name] || []) listener({ target: this, currentTarget: this });
+	}
+	click() { if (!this.disabled) this.dispatch('click'); }
+	get innerHTML() { return this.children.map(textOf).join(''); }
+	set innerHTML(value) { this.children = []; this._text = String(value || ''); }
+	get textContent() { return this._text + this.children.map(textOf).join(''); }
+	set textContent(value) { this.children = []; this._text = String(value == null ? '' : value); }
+}
+
+function textOf(node) {
+	return node instanceof FakeElement ? node.textContent : String(node == null ? '' : node);
+}
+
+function descendants(node) {
+	const result = [];
+	if (!(node instanceof FakeElement)) return result;
+	result.push(node);
+	for (const child of node.children) result.push(...descendants(child));
+	return result;
+}
+
+function findElement(rootNode, tag, text) {
+	return descendants(rootNode).find((node) => node.tagName === tag &&
+		(text == null || textOf(node).trim() === text));
+}
+
+async function settle() {
+	for (let i = 0; i < 12; i++) await Promise.resolve();
+}
+
+async function renderStatus(options = {}) {
+	const fixture = require('./power_loss_preset.json');
+	const document = { activeElement: null };
+	const pollEntries = [];
+	const requests = [];
+	let getRequests = 0;
+	let rules = (options.rules || [fixture.canonical]).map((rule) => Object.assign({}, rule));
+	let resolveMutation = null;
+	let confirmCalls = 0;
+	const runtime = options.runtime || [{ name: fixture.name, armed: true, holding_for: '5m0s' }];
+	const telemetry = options.telemetry || {
+		connected: true,
+		battery: { status: 0, level: 50, wh: 10, max_wh: 20, remain_min: 100, volts: 12 },
+		dc: { enabled: true, status: 0, watts: 0, volts: 12, amps: 0 },
+		typec: { mode: 0, status: 0, watts: 0, volts: 0, amps: 0, temp_c: 25, dc_input: false }
+	};
+	const clone = (value) => value == null ? value : JSON.parse(JSON.stringify(value));
+	const client = {
+		json(method, route, body) {
+			if (method !== 'GET') requests.push([method, route, clone(body)]);
+			if (method === 'GET') {
+				getRequests++;
+				const values = {
+					'/telemetry': telemetry,
+					'/status': { device: {}, rules: runtime },
+					'/device': { features: {}, commands: { active: [] }, connection: {} },
+					'/settings': { tls: {}, pairing_always_on: false, wan_access: false, advanced: false },
+					'/tokens': [], '/pairing-mode': { open: false }, '/rules': rules,
+					'/device/usbc-limit': { output: { watts: 30 } },
+					'/device/bypass-threshold': { volts: 12 }, '/device/schedules': [],
+					'/pairing/status': { stage: 'idle', devices: [] }
+				};
+				return Promise.resolve(clone(values[route]));
+			}
+			const save = () => {
+				if (route === '/rules') rules.push(clone(body));
+				else if (route === '/rules/no_input_shutdown') rules = rules.map((rule) =>
+					rule.name === fixture.name ? clone(body) : rule);
+				return {};
+			};
+			if (!options.deferMutation) return Promise.resolve(save());
+			return new Promise((resolve) => { resolveMutation = () => resolve(save()); });
+		},
+		blob() { return Promise.resolve({}); }
+	};
+	const E = (tag, attrs, children) => new FakeElement(tag, attrs, children, document);
+	const globals = {
+		view: { extend: (value) => value },
+		uci: { load: () => Promise.resolve(), get: (_pkg, _section, key) => key === 'token' ? 'secret' : undefined },
+		poll: { add: (callback, seconds) => pollEntries.push({ callback, seconds }) },
+		wattlineTransport: { create: () => client },
+		wattlineQR: { create: () => ({ load: () => Promise.resolve(), close: () => {} }) },
+		wattlineRefresh: loadModule('refresh.js'),
+		wattlinePowerLoss: loadModule('power_loss.js'),
+		E, _: (value) => value, document,
+		window: {
+			location: { hostname: 'router.test' }, addEventListener() {}, alert() {}, prompt() { return null; },
+			confirm() { confirmCalls++; return true; }
+		},
+		fetch() {}, URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} }
+	};
+	const source = fs.readFileSync(path.join(root,
+		'luci-app-wattline/www/luci-static/resources/view/wattline/status.js'), 'utf8');
+	const names = Object.keys(globals);
+	const view = Function.apply(null, names.concat(source)).apply(null, names.map((key) => globals[key]));
+	const dom = view.render();
+	await settle();
+	return {
+		dom, requests, pollEntries,
+		getCount: () => getRequests,
+		confirmCalls: () => confirmCalls,
+		resolveMutation: () => { assert.ok(resolveMutation, 'a mutation is pending'); resolveMutation(); },
+		refreshAdmin: async () => { await pollEntries.find((entry) => entry.seconds === 10).callback(); await settle(); }
+	};
+}
+
 async function transportTests() {
 	const calls = [];
 	const ok = () => Promise.resolve({ ok: true, json: async () => ({ connected: true }) });
@@ -180,10 +327,83 @@ function validationTests() {
 	assert.strictEqual(validation.validate(Object.assign({}, valid, { mdnsInterfaces: ['fe80::1%br-lan'] })), null);
 }
 
+async function powerLossCardTests() {
+	const fixture = require('./power_loss_preset.json');
+	const powerLoss = loadModule('power_loss.js');
+	const customized = Object.assign({}, fixture.canonical, {
+		actions: ['webhook:https://example.test/input-lost', 'shutdown'],
+		repeat_every: 1800000000000
+	});
+	const compatible = await renderStatus({ rules: [customized], deferMutation: true });
+	const title = findElement(compatible.dom, 'div', 'Power-loss shutdown');
+	assert.ok(title, 'renders the dedicated power-loss card');
+	assert.ok(descendants(compatible.dom).some((node) => textOf(node).includes(
+		'Shutting down Link-Power also powers off this router. It returns only when Link-Power wakes after input power comes back.')),
+	'hardware wake limitation is visible');
+	const enableLabel = descendants(compatible.dom).find((node) => node.tagName === 'label' && textOf(node).includes('Enable'));
+	assert.ok(enableLabel, 'enable checkbox has a visible label');
+	const delayLabel = descendants(compatible.dom).find((node) => node.tagName === 'label' && textOf(node).includes('Delay'));
+	assert.ok(delayLabel, 'delay input has a visible label');
+	let delayInput = descendants(compatible.dom).find((node) => node.tagName === 'input' && node.attributes.type === 'number');
+	assert.deepStrictEqual([delayInput.attributes.min, delayInput.attributes.max, delayInput.attributes.step], ['1', '1440', '1']);
+	const live = descendants(compatible.dom).find((node) => node.attributes['aria-live'] === 'polite');
+	assert.ok(live && textOf(live).includes('5 min remaining'), 'live status comes from runtime countdown state');
+	assert.ok(!/shutdown succeeded/i.test(textOf(live)), 'runtime copy does not overstate action success');
+
+	delayInput.dispatch('focus');
+	delayInput.value = '17';
+	delayInput.dispatch('input');
+	const focusedDelayInput = delayInput;
+	await compatible.refreshAdmin();
+	delayInput = descendants(compatible.dom).find((node) => node.tagName === 'input' && node.attributes.type === 'number');
+	assert.ok(delayInput === focusedDelayInput, 'poll keeps the focused delay control mounted');
+	assert.strictEqual(delayInput.value, '17', 'poll does not overwrite focused draft');
+	const saveButton = findElement(compatible.dom, 'button', 'Save');
+	saveButton.click();
+	assert.strictEqual(saveButton.disabled, true, 'save is disabled while one mutation is pending');
+	await settle();
+	const readsBeforePendingPoll = compatible.getCount();
+	await compatible.refreshAdmin();
+	assert.strictEqual(compatible.getCount(), readsBeforePendingPoll,
+		'admin poll does not reload settings, tokens, pairing, or rules during a mutation');
+	const preservedPayload = powerLoss.payload(customized, true, 17, false);
+	const lastRequest = compatible.requests[compatible.requests.length - 1];
+	assert.deepStrictEqual(lastRequest, ['PUT', '/rules/no_input_shutdown', preservedPayload]);
+	assert.strictEqual(compatible.confirmCalls(), 0, 'compatible update does not ask for reset confirmation');
+	compatible.resolveMutation();
+	await settle();
+
+	const missing = await renderStatus({ rules: [] });
+	findElement(missing.dom, 'button', 'Save').click();
+	await settle();
+	assert.deepStrictEqual(missing.requests[missing.requests.length - 1], ['POST', '/rules', fixture.canonical]);
+
+	const conflict = await renderStatus({
+		rules: [{ name: fixture.name, condition: 'schedule', actions: ['shutdown'], cron: '0 1 * * *' }],
+		deferMutation: true
+	});
+	const conflictSaveButton = findElement(conflict.dom, 'button', 'Save');
+	assert.strictEqual(conflictSaveButton.disabled, true,
+		'ordinary save is disabled for an incompatible reserved rule');
+	const resetButton = findElement(conflict.dom, 'button', 'Reset preset');
+	assert.ok(resetButton, 'conflict exposes a separate reset action');
+	resetButton.click();
+	await settle();
+	assert.strictEqual(conflictSaveButton.disabled, true, 'save stays disabled during reset');
+	assert.strictEqual(resetButton.disabled, true, 'reset is disabled while its mutation is pending');
+	assert.strictEqual(conflict.confirmCalls(), 1, 'incompatible reset is confirmed exactly once');
+	assert.deepStrictEqual(conflict.requests[conflict.requests.length - 1], [
+		'PUT', '/rules/no_input_shutdown', fixture.canonical
+	]);
+	conflict.resolveMutation();
+	await settle();
+}
+
 (async () => {
 	await transportTests();
 	await qrTests();
 	await refreshTests();
+	await powerLossCardTests();
 	validationTests();
 	console.log('LuCI behavior tests passed');
 })().catch((error) => { console.error(error); process.exit(1); });

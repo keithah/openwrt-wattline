@@ -8,6 +8,7 @@ ACL="$ROOT/package/luci-app-wattline/usr/share/rpcd/acl.d/luci-app-wattline.json
 QR="$ROOT/package/luci-app-wattline/www/luci-static/resources/wattline/qr.js"
 TRANSPORT="$ROOT/package/luci-app-wattline/www/luci-static/resources/wattline/transport.js"
 VALIDATION="$ROOT/package/luci-app-wattline/www/luci-static/resources/wattline/validation.js"
+POWER_LOSS="$ROOT/package/luci-app-wattline/www/luci-static/resources/wattline/power_loss.js"
 
 need() {
 	file=$1
@@ -37,6 +38,13 @@ need "$QR" 'revokeObjectURL' 'QR object URL cleanup'
 need "$STATUS" 'wattline\.transport' 'safe transport module integration'
 need "$STATUS" 'wattline\.qr' 'QR lifecycle module integration'
 need "$STATUS" 'wattline\.refresh' 'generation-guarded admin refresh integration'
+need "$STATUS" 'wattline\.power_loss' 'power-loss preset helper integration'
+need "$STATUS" 'Power-loss shutdown' 'power-loss card title'
+need "$STATUS" 'Shutting down Link-Power also powers off this router\. It returns only when Link-Power wakes after input power comes back\.' 'hardware-wake warning'
+need "$STATUS" "'GET', '/rules'" 'power-loss rules load'
+need "$STATUS" "kind === 'missing'.*'POST'.*'PUT'" 'power-loss create/update method selection'
+need "$STATUS" "kind === 'missing'.*'/rules'.*'/rules/no_input_shutdown'" 'power-loss create/update route selection'
+need "$POWER_LOSS" 'confirm_shutdown' 'power-loss shutdown confirmation semantics'
 need "$SETTINGS" 'wattline\.validation' 'settings validator integration'
 need "$SETTINGS" '\.validate = validateSetting' 'cross-field settings validation'
 need "$SETTINGS" '\.depends\(' 'listener and discovery dependencies'
