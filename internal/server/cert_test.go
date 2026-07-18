@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/tls"
@@ -10,8 +11,10 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -132,6 +135,31 @@ func TestCertificateRejectsSymlinksUnsafeParentsAndAliases(t *testing.T) {
 			t.Fatal("transaction alias accepted")
 		}
 	})
+	t.Run("lock alias", func(t *testing.T) {
+		dir := t.TempDir()
+		cert := filepath.Join(dir, "cert")
+		if _, err := EnsureCertificate(cert, lockPath(cert), nil); err == nil {
+			t.Fatal("lock alias accepted")
+		}
+	})
+	t.Run("symlink lock", func(t *testing.T) {
+		dir := t.TempDir()
+		cert, key := filepath.Join(dir, "cert"), filepath.Join(dir, "key")
+		victim := filepath.Join(dir, "victim")
+		if err := os.WriteFile(victim, []byte("unchanged"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(victim, lockPath(cert)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := EnsureCertificate(cert, key, nil); err == nil {
+			t.Fatal("symlink lock accepted")
+		}
+		raw, _ := os.ReadFile(victim)
+		if string(raw) != "unchanged" {
+			t.Fatalf("lock target modified: %q", raw)
+		}
+	})
 }
 
 func TestCertificateRotationRecoversEveryInterruptedRename(t *testing.T) {
@@ -195,6 +223,147 @@ func TestCertificateFreshCreationRecoversInterruptedInstall(t *testing.T) {
 				t.Fatalf("recovered mismatch: %v", err)
 			}
 		})
+	}
+}
+
+func TestCertificateConcurrentEnsureIsSerialized(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "cert"), filepath.Join(dir, "key")
+	const workers = 12
+	results := make(chan Certificate, workers)
+	errs := make(chan error, workers)
+	var start sync.WaitGroup
+	start.Add(1)
+	var group sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			start.Wait()
+			cert, err := EnsureCertificate(certFile, keyFile, nil)
+			results <- cert
+			errs <- err
+		}()
+	}
+	start.Done()
+	group.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent ensure: %v", err)
+		}
+	}
+	want := ""
+	for cert := range results {
+		if want == "" {
+			want = cert.SHA256
+		}
+		if cert.SHA256 != want {
+			t.Fatalf("concurrent ensure fingerprints differ: %s != %s", cert.SHA256, want)
+		}
+	}
+	if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+		t.Fatalf("final pair: %v", err)
+	}
+	if _, err := os.Lstat(transactionPath(certFile)); !os.IsNotExist(err) {
+		t.Fatalf("journal remains: %v", err)
+	}
+}
+
+func TestCertificateSubprocessEnsureHelper(t *testing.T) {
+	if os.Getenv("WATTLINE_CERT_HELPER") != "1" {
+		return
+	}
+	if _, err := EnsureCertificate(os.Getenv("WATTLINE_CERT_FILE"), os.Getenv("WATTLINE_KEY_FILE"), nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCertificateCrossProcessLocksSerializeEnsure(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "cert"), filepath.Join(dir, "key")
+	commands := make([]*exec.Cmd, 2)
+	outputs := make([]bytes.Buffer, 2)
+	for i := range commands {
+		commands[i] = exec.Command(os.Args[0], "-test.run=^TestCertificateSubprocessEnsureHelper$", "-test.count=1")
+		commands[i].Env = append(os.Environ(), "WATTLINE_CERT_HELPER=1", "WATTLINE_CERT_FILE="+certFile, "WATTLINE_KEY_FILE="+keyFile)
+		commands[i].Stdout = &outputs[i]
+		commands[i].Stderr = &outputs[i]
+		if err := commands[i].Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, command := range commands {
+		if err := command.Wait(); err != nil {
+			t.Fatalf("helper: %v\n%s", err, outputs[i].String())
+		}
+	}
+	if _, err := EnsureCertificate(certFile, keyFile, nil); err != nil {
+		t.Fatalf("post-process ensure: %v", err)
+	}
+}
+
+func TestCertificateRejectsUnsafeGrandparent(t *testing.T) {
+	base := t.TempDir()
+	unsafe := filepath.Join(base, "unsafe")
+	parent := filepath.Join(unsafe, "secure-child")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafe, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureCertificate(filepath.Join(parent, "cert"), filepath.Join(parent, "key"), nil); err == nil {
+		t.Fatal("writable non-sticky grandparent accepted")
+	}
+}
+
+func TestCertificateRevalidatesAncestryBeforeLocking(t *testing.T) {
+	base := t.TempDir()
+	parent := filepath.Join(base, "tls")
+	attacker := filepath.Join(base, "attacker")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(attacker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile := filepath.Join(parent, "cert"), filepath.Join(parent, "key")
+	hooks := certificateOperationHooks{afterInitialValidation: func() error {
+		if err := os.Rename(parent, parent+"-old"); err != nil {
+			return err
+		}
+		return os.Symlink(attacker, parent)
+	}}
+	if _, err := ensureCertificateWithHooks(certFile, keyFile, nil, hooks); err == nil {
+		t.Fatal("symlink substitution accepted")
+	}
+	if _, err := os.Lstat(filepath.Join(attacker, "cert")); !os.IsNotExist(err) {
+		t.Fatalf("target operation reached substituted parent: %v", err)
+	}
+}
+
+func TestCertificatePostJournalSyncFailureLeavesRecoverableFreshTransaction(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "cert"), filepath.Join(dir, "key")
+	injected := errors.New("journal directory sync failed")
+	hooks := certificateOperationHooks{journalSync: func(string) error { return injected }}
+	if _, err := ensureCertificateWithHooks(certFile, keyFile, nil, hooks); !errors.Is(err, injected) {
+		t.Fatalf("error=%v", err)
+	}
+	if _, err := os.Lstat(transactionPath(certFile)); err != nil {
+		t.Fatalf("installed journal removed after commit-boundary failure: %v", err)
+	}
+	recovered, err := EnsureCertificate(certFile, keyFile, nil)
+	if err != nil {
+		t.Fatalf("fresh Ensure recovery: %v", err)
+	}
+	if recovered.SHA256 == "" {
+		t.Fatal("recovered fingerprint empty")
+	}
+	if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+		t.Fatalf("recovered pair: %v", err)
 	}
 }
 
