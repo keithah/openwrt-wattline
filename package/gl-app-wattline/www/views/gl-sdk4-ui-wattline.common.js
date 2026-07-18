@@ -65,6 +65,25 @@
       blob: function (method, path, body, extra) { return checked(method, path, body, extra).then(function (r) { return r.blob(); }); }
     };
   }
+  function advancedCapabilities(settings, device) {
+    var enabled = !!(settings && settings.advanced), available = device && device.available || {};
+    var features = device && device.features || {};
+    return {
+      ota: enabled && available.ota === true,
+      clock: enabled && available.current_time === true,
+      runningMode: enabled && features.running_mode === true,
+      barrierFree: enabled && features.barrier_free === true,
+      usbFirmware: enabled && features.usb_firmware === true,
+      blePIN: enabled && features.ble_pin === true
+    };
+  }
+  function timerInputKind(type) {
+    return Number(type) === 0 ? 'date' : Number(type) === 2 ? 'weekly_mask' : Number(type) === 3 ? 'monthly_mask' : 'none';
+  }
+  function timerStatusLabel(status) {
+    return status === 1 ? 'enabled' : status === -1 ? 'disabled' : status === -2 ? 'validation-disabled' : status === -3 ? 'expired' : 'unknown';
+  }
+  function timerActionLabel(action) { return Number(action) === 1 ? 'On' : 'Off'; }
   function flow(s) { return s === -1 ? ORANGE : GREEN; }
   function statusWord(s) { return s === 1 ? 'Charging' : s === -1 ? 'Discharging' : 'Idle'; }
   function hm(min) {
@@ -79,9 +98,10 @@
       return { token: '', config: null, client: null, tel: null, dev: null, err: '', loaded: false,
         pairing: null, pin: '020555', selMac: '', ptick: 0, uiErr: '',
         usbcLimit: null, threshold: null, thrInput: '', schedules: null,
-        etick: 0, ctlErr: '', newSch: { type: 1, hour: 8, minute: 0, action: 1 },
+        etick: 0, ctlErr: '', newSch: { status: 1, type: 1, hour: 8, minute: 0, action: 1, date: '', repeatInput: '' },
         adminTick: 0, settings: null, tokens: [], apiPair: null, adminErr: '', qrURL: '', qrCtl: null,
-        settingsDraft: null };
+        settingsDraft: null, adminGeneration: 0, adminMutations: 0, destroyed: false,
+        usbFirmware: '', barrierFree: null, commandBusy: {} };
     },
     created: function () {
       var self = this;
@@ -94,6 +114,7 @@
       }).catch(function (e) { self.err = 'Panel RPC failed: ' + e.message; self.loaded = true; });
     },
     beforeDestroy: function () {
+      this.destroyed = true; this.adminGeneration++;
       if (this._iv) clearInterval(this._iv);
       this.clearQR();
     },
@@ -139,15 +160,30 @@
           .catch(function (e) { self.uiErr = e.message; });
       },
       act: function (a) { var self = this, operation;
+        if (this.isPending(a)) return;
+        this.commandBusy[a] = true; if (this.$forceUpdate) this.$forceUpdate();
         if (a === 'dc_on' || a === 'dc_off') operation = this.post('/device/dc', { on: a === 'dc_on' });
         else if (a === 'usbc_on' || a === 'usbc_off') operation = this.post('/device/usbc/output', { on: a === 'usbc_on' });
         else if (a === 'bypass_on' || a === 'bypass_off') operation = this.post('/device/dc/bypass', { on: a === 'bypass_on' });
-        else if (a === 'restart') operation = this.post('/device/restart', {});
+        else if (a === 'restart') operation = this.post('/device/restart');
         else if (a === 'shutdown') operation = this.post('/device/shutdown', { confirm: true });
         else operation = this.post('/device/action', { action: a });
-        operation
-          .then(function () { self.ctlErr = ''; setTimeout(function () { self.tick(); }, 800); })
-          .catch(function (error) { self.ctlErr = error.message; });
+        return operation.then(function () {
+          delete self.commandBusy[a]; if (self.$forceUpdate) self.$forceUpdate();
+          self.ctlErr = ''; setTimeout(function () { self.tick(); }, 800);
+        }).catch(function (error) {
+          delete self.commandBusy[a]; if (self.$forceUpdate) self.$forceUpdate();
+          self.ctlErr = error.message;
+        });
+      },
+      isPending: function (action) {
+        var operations = { dc_on: 'dc_output', dc_off: 'dc_output', usbc_on: 'usbc_output', usbc_off: 'usbc_output',
+          bypass_on: 'dc_bypass', bypass_off: 'dc_bypass', restart: 'restart', shutdown: 'shutdown' };
+        var operation = operations[action];
+        if (this.commandBusy && this.commandBusy[action]) return true;
+        return !!operation && !!(this.dev && this.dev.commands && this.dev.commands.active || []).some(function (command) {
+          return command.operation === operation && command.phase === 'pending';
+        });
       },
       fetchExtras: function () { var self = this;
         this.get('/device/usbc/limit/output').then(function (l) { self.usbcLimit = { output: l }; }).catch(function () {});
@@ -173,12 +209,37 @@
       },
       addSched: function () { var self = this;
         this.ctlErr = '';
-        var n = this.newSch;
-        this.post('/device/timers', { type: Number(n.type), hour: Number(n.hour), minute: Number(n.minute), action: Number(n.action), status: 1, repeat: 0 })
+        var payload;
+        try { payload = this.timerPayload(this.newSch); } catch (error) { this.ctlErr = error.message; return; }
+        this.post('/device/timers', payload)
           .then(function () { self.fetchExtras(); }).catch(function (e) { self.ctlErr = e.message; });
+      },
+      timerPayload: function (input) {
+        var status = Number(input.status), type = Number(input.type), hour = Number(input.hour);
+        var minute = Number(input.minute), action = Number(input.action), repeat = 0;
+        if (status !== 1 && status !== -1) throw new Error('Timer status must be enabled or disabled');
+        if (!Number.isInteger(type) || type < 0 || type > 3 || !Number.isInteger(hour) || hour < 0 || hour > 23 ||
+          !Number.isInteger(minute) || minute < 0 || minute > 59 || (action !== 0 && action !== 1)) throw new Error('Invalid timer fields');
+        if (type === 0) {
+          var match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input.date || '');
+          if (!match) throw new Error('One-shot timer needs a valid date');
+          var year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+          var date = new Date(0); date.setUTCHours(0, 0, 0, 0); date.setUTCFullYear(year, month - 1, day);
+          if (year < 1 || year > 65535 || date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day)
+            throw new Error('One-shot timer needs a valid date');
+          repeat = ((day << 24) | (month << 16) | year) >>> 0;
+        } else if (type > 1) {
+          if (!/^\d+$/.test(String(input.repeatInput || ''))) throw new Error('Timer repeat mask must be decimal');
+          repeat = Number(input.repeatInput);
+          var maximum = type === 2 ? 254 : 4294967294;
+          if (!Number.isSafeInteger(repeat) || repeat < 2 || repeat > maximum || repeat % 2 !== 0)
+            throw new Error('Timer repeat mask uses bits 1 and above');
+        }
+        return { status: status, type: type, hour: hour, minute: minute, repeat: repeat, action: action };
       },
       delSched: function (id) { var self = this;
         this.ctlErr = '';
+        if (!window.confirm('Delete this on-device timer?')) return;
         this.mutate('DELETE', '/device/timers/' + id)
           .then(function () { self.fetchExtras(); })
           .catch(function (e) { self.ctlErr = e.message; });
@@ -191,20 +252,38 @@
         return active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName);
       },
       fetchAdmin: function () { var self = this;
+        if (this.destroyed || this.adminMutations) return Promise.resolve(null);
+        var generation = ++this.adminGeneration;
         return Promise.all([this.get('/device'), this.get('/settings'), this.get('/tokens'), this.get('/pairing-mode')])
           .then(function (values) {
+            if (self.destroyed || self.adminMutations || generation !== self.adminGeneration) return null;
             self.dev = values[0]; self.settings = values[1]; self.tokens = values[2] || []; self.apiPair = values[3];
             // Polls update read-only state but never replace a user's focused
             // reachability form. The draft is refreshed after explicit saves.
             if (!self.settingsDraft && !self.focused()) self.settingsDraft = JSON.parse(JSON.stringify(values[1]));
             self.adminErr = '';
             if (values[3] && values[3].open) self.loadQR(values[3].expires_at); else self.clearQR();
-          }).catch(function (error) { self.adminErr = error.message; });
+          }).catch(function (error) {
+            if (!self.destroyed && !self.adminMutations && generation === self.adminGeneration) self.adminErr = error.message;
+            return null;
+          });
       },
       adminAction: function (method, path, body, prompt) { var self = this;
         if (prompt && !window.confirm(prompt)) return;
-        return this.mutate(method, path, body).then(function () { return self.fetchAdmin(); })
-          .catch(function (error) { self.adminErr = error.message; });
+        if (this.destroyed || this.adminMutations) return Promise.resolve(null);
+        this.adminMutations++; this.adminGeneration++; if (this.$forceUpdate) this.$forceUpdate();
+        if (method === 'DELETE' && path === '/pairing-mode') this.clearQR();
+        function finish(value, failed) {
+          self.adminMutations--; if (self.$forceUpdate) self.$forceUpdate();
+          if (self.destroyed) return failed ? Promise.reject(value) : value;
+          return self.fetchAdmin().then(function () {
+            if (failed) throw value;
+            return value;
+          });
+        }
+        return Promise.resolve().then(function () { return self.mutate(method, path, body); })
+          .then(function (value) { return finish(value, false); }, function (error) { return finish(error, true); })
+          .catch(function (error) { if (!self.destroyed) self.adminErr = error.message; return null; });
       },
       clearQR: function () {
         if (this.qrCtl) this.qrCtl.abort(); this.qrCtl = null;
@@ -215,24 +294,25 @@
         this.clearQR(); this._qrExpiry = expiry;
         var controller = new AbortController(); this.qrCtl = controller;
         this.client.blob('GET', '/pairing-mode/qr.png', null, { signal: controller.signal }).then(function (blob) {
-          if (controller.signal.aborted || self.qrCtl !== controller) return;
+          if (self.destroyed || controller.signal.aborted || self.qrCtl !== controller) return;
           self.qrURL = URL.createObjectURL(blob); self.qrCtl = null;
-        }).catch(function (error) { if (error.name !== 'AbortError') self.adminErr = error.message; });
+        }).catch(function (error) { if (!self.destroyed && error.name !== 'AbortError') self.adminErr = error.message; });
       },
-      saveSettings: function () { var self = this;
+      saveSettings: function () {
         if (!this.settingsDraft) return;
         var d = this.settingsDraft;
         if (!d.http.enabled && !d.https.enabled) { this.adminErr = 'At least one HTTP or HTTPS listener must be enabled'; return; }
-        if (d.wan_access && !window.confirm('Enable WAN access? This is insecure — use TLS/VPN and strong client tokens.')) return;
+        if (d.wan_access && !(this.settings && this.settings.wan_access) &&
+          !window.confirm('Enable WAN access? This is insecure — use TLS/VPN and strong client tokens.')) return;
         if (d.pairing_always_on && !(this.settings && this.settings.pairing_always_on) &&
           !window.confirm('Make API-client pairing always available to anyone with the PIN?')) return;
+        if (!window.confirm('Save reachability settings? Listener, TLS, mDNS, and WAN changes require restarting wattlined.')) return;
         // PUT has merge semantics. Never echo the read-only TLS fingerprint or
         // storage paths returned by GET; submit only fields this panel edits.
         var update = { http: d.http, https: d.https, pairing_ttl: d.pairing_ttl,
           pairing_always_on: d.pairing_always_on, mdns: d.mdns, wan_access: d.wan_access };
-        this.mutate('PUT', '/settings', update).then(function (saved) {
-          self.settings = saved; self.settingsDraft = JSON.parse(JSON.stringify(saved)); self.adminErr = '';
-        }).catch(function (error) { self.adminErr = error.message; });
+        this.settingsDraft = null;
+        return this.adminAction('PUT', '/settings', update);
       },
       setAdvanced: function (enabled) {
         this.adminAction('PUT', '/settings', { advanced: enabled }, enabled ? 'Enable advanced controls? These operations can change device firmware modes and BLE access.' : null);
@@ -250,11 +330,18 @@
         [h('b', { style: { fontSize: '18px' } }, v), el('div', { color: GREY, fontSize: '12px' }, l)]); };
       var pill = function (txt, c, bg) { return h('span', { style: { fontSize: '11px', padding: '2px 9px',
         borderRadius: '10px', background: bg, color: c, marginLeft: '8px', verticalAlign: 'middle' } }, txt); };
-      var sw = function (on, action) { return h('div', {
-        style: { width: '46px', height: '26px', borderRadius: '13px', cursor: 'pointer', flex: 'none',
-          background: on ? GREEN : '#d0d4d9', position: 'relative' }, on: { click: function () { self.act(action); } } },
+      var sw = function (on, action) {
+        var pending = self.isPending(action);
+        var label = (action.indexOf('usbc') === 0 ? 'USB-C output' : action.indexOf('bypass') === 0 ? 'DC bypass' : 'DC output') +
+          (pending ? ' command pending' : (on ? ' on' : ' off'));
+        return h('button', {
+        attrs: { type: 'button', 'aria-pressed': on ? 'true' : 'false', 'aria-label': label, disabled: pending },
+        style: { width: '46px', height: '26px', borderRadius: '13px', cursor: pending ? 'wait' : 'pointer', flex: 'none',
+          border: 'none', padding: '0', opacity: pending ? '.55' : '1',
+          background: on ? GREEN : '#d0d4d9', position: 'relative' }, on: { click: function () { if (!pending) self.act(action); } } },
         [el('div', { position: 'absolute', top: '3px', left: on ? '23px' : '3px', width: '20px', height: '20px',
-          borderRadius: '50%', background: '#fff', transition: 'left .15s', boxShadow: '0 1px 2px rgba(0,0,0,.3)' })]); };
+          borderRadius: '50%', background: '#fff', transition: 'left .15s', boxShadow: '0 1px 2px rgba(0,0,0,.3)' })]);
+      };
       var cardhead = function (title, right) { return el('div', { display: 'flex', justifyContent: 'space-between',
         alignItems: 'center', marginBottom: '2px' }, [el('div', { fontSize: '15px', fontWeight: '600', color: '#3c4043' }, title), right || '']); };
 
@@ -394,7 +481,9 @@
         var bg = kind === 'danger' ? RED : kind === 'primary' ? GREEN : '#fff';
         var col = kind ? '#fff' : '#3c4043';
         return h('button', { style: { padding: '7px 14px', borderRadius: '8px', fontSize: '13px',
-          cursor: 'pointer', border: kind ? 'none' : '1px solid #d0d4d9', background: bg, color: col, marginRight: '8px' },
+          cursor: self.adminMutations ? 'wait' : 'pointer', opacity: self.adminMutations ? '.55' : '1',
+          border: kind ? 'none' : '1px solid #d0d4d9', background: bg, color: col, marginRight: '8px' },
+          attrs: { type: 'button', disabled: !!self.adminMutations },
           on: { click: onclick } }, label);
       };
       var wattChoices = [30, 45, 60, 65, 100, 140];
@@ -429,8 +518,8 @@
       var schRows = (self.schedules || []).map(function (t) {
         return el('div', { display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           padding: '8px 0', borderTop: '1px solid #eef1f4' }, [
-          el('div', {}, [ h('b', { style: { fontSize: '14px' } }, hhmm(t) + ' · ' + (t.action ? 'On' : 'Off')),
-            el('div', { color: GREY, fontSize: '12px' }, dayType(t.type) + (t.status === 1 ? '' : ' · disabled')) ]),
+          el('div', {}, [ h('b', { style: { fontSize: '14px' } }, hhmm(t) + ' · ' + timerActionLabel(t.action)),
+            el('div', { color: GREY, fontSize: '12px' }, dayType(t.type) + ' · ' + timerStatusLabel(t.status)) ]),
           btn('Delete', function () { self.delSched(t.id); }, 'danger')
         ]);
       });
@@ -438,7 +527,7 @@
       var numInput = function (key, w) { return h('input', { style: { width: w, padding: '6px 8px', fontSize: '14px',
         border: '1px solid #d0d4d9', borderRadius: '8px', marginRight: '6px' }, attrs: { inputmode: 'numeric' },
         domProps: { value: ns[key] }, on: { input: function (e) { ns[key] = e.target.value; } } }); };
-      var addRow = el('div', { display: 'flex', flexWrap: 'wrap', alignItems: 'center', marginTop: '10px' }, [
+      var timerInputs = [
         h('select', { style: { padding: '6px 8px', borderRadius: '8px', marginRight: '6px', border: '1px solid #d0d4d9' },
           on: { change: function (e) { ns.type = e.target.value; } } },
           [[1, 'Daily'], [0, 'Once'], [2, 'Weekly'], [3, 'Monthly']].map(function (o) {
@@ -448,13 +537,32 @@
           on: { change: function (e) { ns.action = e.target.value; } } },
           [[1, 'Turn on'], [0, 'Turn off']].map(function (o) {
             return h('option', { attrs: { value: o[0], selected: String(ns.action) === String(o[0]) } }, o[1]); })),
+        h('select', { style: { padding: '6px 8px', borderRadius: '8px', marginRight: '6px', border: '1px solid #d0d4d9' },
+          on: { change: function (e) { ns.status = e.target.value; } } },
+          [[1, 'Enabled'], [-1, 'Disabled']].map(function (o) {
+            return h('option', { attrs: { value: o[0], selected: String(ns.status) === String(o[0]) } }, o[1]); })),
         btn('Add', function () { self.addSched(); }, 'primary')
-      ]);
+      ];
+      var typeValue = Number(ns.type), timerKind = timerInputKind(typeValue);
+      if (timerKind === 'date') timerInputs.splice(timerInputs.length - 1, 0,
+        h('input', { attrs: { type: 'date', 'aria-label': 'One-shot date' }, domProps: { value: ns.date },
+          style: { padding: '6px 8px', border: '1px solid #d0d4d9', borderRadius: '8px', marginRight: '6px' },
+          on: { input: function (e) { ns.date = e.target.value; } } }));
+      if (timerKind === 'weekly_mask' || timerKind === 'monthly_mask') timerInputs.splice(timerInputs.length - 1, 0,
+        h('input', { attrs: { inputmode: 'numeric', 'aria-label': timerKind === 'weekly_mask' ? 'Weekly repeat mask' : 'Monthly repeat mask',
+          placeholder: timerKind === 'weekly_mask' ? 'mask 2–254' : 'mask bits 1–31' }, domProps: { value: ns.repeatInput },
+          style: { width: '108px', padding: '6px 8px', border: '1px solid #d0d4d9', borderRadius: '8px', marginRight: '6px' },
+          on: { input: function (e) { ns.repeatInput = e.target.value.replace(/[^0-9]/g, ''); } } }));
+      var addRow = el('div', { display: 'flex', flexWrap: 'wrap', alignItems: 'center', marginTop: '10px', gap: '4px' }, timerInputs);
+      var repeatHelp = timerKind === 'weekly_mask' ? 'Weekly mask uses bit 1 Monday through bit 7 Sunday (for example 62 = weekdays).'
+        : timerKind === 'monthly_mask' ? 'Monthly mask uses bit 1 for day 1 through bit 31 for day 31.'
+          : timerKind === 'date' ? 'One-shot timers require a real calendar date.' : '';
       var schedCard = card([
         cardhead('Schedules'),
         sub('On/off timers stored on the device — they run even if the router is offline.'),
         schRows.length ? el('div', { marginTop: '4px' }, schRows) : el('div', { color: GREY, fontSize: '13px', marginTop: '8px' }, 'No schedules yet.'),
-        addRow
+        addRow,
+        repeatHelp ? sub(repeatHelp) : ''
       ]);
 
       // --- Power card ---
@@ -562,30 +670,45 @@
       }
       var reachCard = card(reachKids);
 
-      // Both the UCI policy and a decoded device capability must allow factory
-      // controls. `settingsInfo.advanced && features` is intentionally explicit.
-      var advancedSupported = settingsInfo.advanced && features && Object.keys(features).some(function (key) {
-        return features[key] === true && /running|barrier|usb_fw|ble_pin|ota/.test(key);
-      });
+      // Both UCI policy and the endpoint's canonical decoded capability must
+      // permit each advanced action; one capability never unlocks its siblings.
+      var caps = advancedCapabilities(settingsInfo, self.dev);
+      var advancedSupported = Object.keys(caps).some(function (key) { return caps[key]; });
       var advancedKids = [cardhead('Advanced controls'),
         check('Enable advanced controls', !!settingsInfo.advanced, function (v) { self.setAdvanced(v); }),
         sub(advancedSupported ? 'Hardware-supported factory operations are unlocked.' :
           (settingsInfo.advanced ? 'No supported advanced operations were reported by this device.' : 'Advanced operations are locked by policy.'))];
       if (advancedSupported) {
         var advancedButtons = [];
-        if (self.dev.available && self.dev.available.ota) advancedButtons.push(btn('Enter OTA mode', function () {
-          self.adminAction('POST', '/device/ota/enter', { confirm: true },
+        if (caps.ota) advancedButtons.push(btn(self.dev.mode === 'ota' ? 'Exit OTA mode' : 'Enter OTA mode', function () {
+          if (self.dev.mode === 'ota') self.adminAction('POST', '/device/ota/exit');
+          else self.adminAction('POST', '/device/ota/enter', { confirm: true },
             'Enter OTA mode? Wattline does not flash firmware; use this only for diagnostics.');
-        }, 'danger'));
-        if (features.running_mode) advancedButtons.push(btn('Factory running mode', function () {
+        }, self.dev.mode === 'ota' ? null : 'danger'));
+        if (caps.clock) advancedButtons.push(btn('Sync device clock', function () {
+          self.adminAction('POST', '/device/clock/sync');
+        }));
+        if (caps.runningMode) advancedButtons.push(btn('Factory running mode', function () {
           var mode = window.prompt('Factory running mode value (device enum):', '1');
           if (mode != null) self.adminAction('PUT', '/device/advanced/running-mode', { mode: Number(mode) }, 'Set Factory running mode to ' + mode + '?');
         }, 'danger'));
-        if (features.ble_pin) advancedButtons.push(btn('Set BLE PIN', function () {
+        if (caps.barrierFree) advancedButtons.push(btn('Barrier-free mode', function () {
+          self.adminAction('GET', '/device/advanced/barrier-free').then(function (state) {
+            if (state) self.adminAction('PUT', '/device/advanced/barrier-free', { enabled: !state.enabled },
+              (state.enabled ? 'Disable' : 'Enable') + ' barrier-free mode?');
+          });
+        }));
+        if (caps.usbFirmware) advancedButtons.push(btn('Read USB firmware', function () {
+          self.adminAction('GET', '/device/advanced/usb-fw-version').then(function (version) {
+            if (version) self.usbFirmware = version.major + '.' + version.minor + '.' + version.patch + ' (' + version.raw + ')';
+          });
+        }));
+        if (caps.blePIN) advancedButtons.push(btn('Set BLE PIN', function () {
           var next = window.prompt('New six-digit BLE PIN:');
           if (next != null) self.adminAction('PUT', '/device/advanced/ble-pin', { pin: next }, 'Set BLE PIN? Existing BLE clients may need to pair again.');
         }, 'danger'));
         if (advancedButtons.length) advancedKids.push(el('div', { display: 'flex', flexWrap: 'wrap', gap: '7px', marginTop: '10px' }, advancedButtons));
+        if (self.usbFirmware) advancedKids.push(sub('USB firmware ' + self.usbFirmware));
       }
       var advancedCard = card(advancedKids);
 
