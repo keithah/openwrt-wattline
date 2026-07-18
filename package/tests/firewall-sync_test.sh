@@ -37,14 +37,23 @@ case "$command" in
 		tmp="${STATE}.tmp"
 		{ sed "\|^${key}=|d" "$STATE" 2>/dev/null || true; printf '%s=%s\n' "$key" "$value"; } > "$tmp"
 		mv "$tmp" "$STATE"
+		if [ -e "${INTERRUPT_AFTER_MUTATION:-}" ]; then
+			rm -f "$INTERRUPT_AFTER_MUTATION"
+			exit 99
+		fi
 		;;
 	delete)
 		key="$1"
 		tmp="${STATE}.tmp"
 		awk -v key="$key" 'index($0, key "=") != 1 && index($0, key ".") != 1' "$STATE" > "$tmp"
 		mv "$tmp" "$STATE"
+		if [ -e "${INTERRUPT_AFTER_MUTATION:-}" ]; then
+			rm -f "$INTERRUPT_AFTER_MUTATION"
+			exit 99
+		fi
 		;;
 	commit)
+		[ ! -e "${FAIL_COMMIT:-}" ] || exit 1
 		printf 'commit %s\n' "$1" >> "$STATE.commands"
 		;;
 	*) exit 2 ;;
@@ -156,12 +165,71 @@ if "$HELPER"; then
 	fail "firewall reload failure was ignored"
 fi
 [ -e "$APPLY_MARKER" ] || fail "failed reload did not leave apply marker"
+grep -Fqx reload "$APPLY_MARKER" || fail "failed reload did not preserve reload phase"
 assert_absent firewall.wattline_http
 before_commits="$(wc -l < "$STATE.commands")"
 rm -f "$FAIL_RELOAD"
 "$HELPER"
 [ ! -e "$APPLY_MARKER" ] || fail "successful retry did not clear apply marker"
-[ "$(wc -l < "$STATE.commands")" -eq "$before_commits" ] || fail "apply retry committed unchanged UCI"
+[ "$(wc -l < "$STATE.commands")" -eq "$((before_commits + 1))" ] || fail "apply retry did not recommit pending UCI"
+
+# The durable marker precedes the first mutation. Simulate interruption after
+# deleting only the first owned rule; the next run completes the disable,
+# commits the staged delta, reloads, and only then clears the marker.
+printf '%s\n' 'wattline.main.wan_access=1' 'wattline.main.port=8480' 'wattline.main.https_enabled=1' >> "$STATE"
+"$HELPER"
+printf '%s\n' 'wattline.main.wan_access=0' >> "$STATE"
+INTERRUPT_AFTER_MUTATION="$TMP/interrupt-after-mutation"
+export INTERRUPT_AFTER_MUTATION
+: > "$INTERRUPT_AFTER_MUTATION"
+if "$HELPER"; then
+	fail "interrupted firewall mutation unexpectedly succeeded"
+fi
+[ -e "$APPLY_MARKER" ] || fail "mutation began before durable apply marker"
+grep -Fqx commit "$APPLY_MARKER" || fail "interruption did not preserve commit phase"
+if ! grep -Eq '^firewall\.wattline_(http|https)=' "$STATE"; then
+	fail "interruption hook did not stop after the first deletion"
+fi
+before_commits="$(wc -l < "$STATE.commands")"
+"$HELPER"
+assert_absent firewall.wattline_http
+assert_absent firewall.wattline_https
+[ "$(wc -l < "$STATE.commands")" -eq "$((before_commits + 1))" ] || fail "interrupted retry did not commit"
+[ ! -e "$APPLY_MARKER" ] || fail "interrupted retry cleared marker before successful reload"
+
+# Commit failure also preserves the marker and staged disable. A retry must
+# commit again before reload rather than treating canonical staged UCI as done.
+printf '%s\n' 'wattline.main.wan_access=1' >> "$STATE"
+"$HELPER"
+printf '%s\n' 'wattline.main.wan_access=0' >> "$STATE"
+FAIL_COMMIT="$TMP/fail-commit"
+export FAIL_COMMIT
+: > "$FAIL_COMMIT"
+before_reloads="$(wc -l < "$RELOADS")"
+if "$HELPER"; then
+	fail "firewall commit failure was ignored"
+fi
+[ -e "$APPLY_MARKER" ] || fail "commit failure cleared apply marker"
+grep -Fqx commit "$APPLY_MARKER" || fail "commit failure lost commit phase"
+[ "$(wc -l < "$RELOADS")" -eq "$before_reloads" ] || fail "reload ran after failed commit"
+rm -f "$FAIL_COMMIT"
+before_commits="$(wc -l < "$STATE.commands")"
+"$HELPER"
+[ "$(wc -l < "$STATE.commands")" -eq "$((before_commits + 1))" ] || fail "commit-failure retry did not commit"
+[ ! -e "$APPLY_MARKER" ] || fail "commit-failure retry did not clear marker"
+
+# If the marker itself cannot be created, UCI must remain untouched.
+printf '%s\n' 'wattline.main.wan_access=1' >> "$STATE"
+mkdir "$TMP/not-a-marker"
+APPLY_MARKER="$TMP/not-a-marker"
+export APPLY_MARKER
+cp "$STATE" "$TMP/marker-failure.before"
+if "$HELPER"; then
+	fail "unwritable apply marker was accepted"
+fi
+cmp -s "$STATE" "$TMP/marker-failure.before" || fail "UCI mutated before apply marker creation"
+APPLY_MARKER="$TMP/firewall.pending"
+export APPLY_MARKER
 
 # Invalid manual UCI edits fail before changing any firewall section.
 printf '%s\n' 'wattline.main.wan_access=1' >> "$STATE"

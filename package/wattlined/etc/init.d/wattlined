@@ -13,15 +13,26 @@ daemon_state() {
 	# wattlined only reloads rule sections on SIGHUP. Any main-section change
 	# therefore needs a process restart, including auth, discovery, and WAN
 	# policy in addition to listener/TLS settings.
-	uci -q show wattline.main 2>/dev/null || true
+	uci -q show wattline.main 2>/dev/null
 }
 
 save_daemon_state() {
-	mkdir -p "$RUNTIME_DIR"
-	chmod 0700 "$RUNTIME_DIR"
-	daemon_state > "$DAEMON_STATE.new"
-	chmod 0600 "$DAEMON_STATE.new"
-	mv "$DAEMON_STATE.new" "$DAEMON_STATE"
+	local temporary
+	temporary="$DAEMON_STATE.new.$$"
+	mkdir -p "$RUNTIME_DIR" || return 1
+	chmod 0700 "$RUNTIME_DIR" || return 1
+	if ! daemon_state > "$temporary"; then
+		rm -f "$temporary"
+		return 1
+	fi
+	if ! chmod 0600 "$temporary"; then
+		rm -f "$temporary"
+		return 1
+	fi
+	if ! mv "$temporary" "$DAEMON_STATE"; then
+		rm -f "$temporary"
+		return 1
+	fi
 }
 
 start_service() {
@@ -37,8 +48,8 @@ start_service() {
 
 reload_service() {
 	"$FIREWALL_SYNC" || return 1
-	current="$(daemon_state)"
-	previous="$(cat "$DAEMON_STATE" 2>/dev/null || true)"
+	current="$(daemon_state)" || return 1
+	previous="$(cat "$DAEMON_STATE" 2>/dev/null)" || return 1
 	if [ "$current" != "$previous" ]; then
 		"$SERVICE_SCRIPT" restart
 		return

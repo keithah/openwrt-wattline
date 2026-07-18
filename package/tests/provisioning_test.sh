@@ -30,6 +30,7 @@ case "$command" in
 		;;
 	show)
 		key="$1"
+		[ ! -e "${FAIL_UCI_SHOW:-}" ] || exit 1
 		awk -v key="$key" 'index($0, key "=") == 1 || index($0, key ".") == 1 { print; found = 1 } END { exit !found }' "$STATE"
 		;;
 	set|add_list)
@@ -93,6 +94,7 @@ printf '%s\n' "$*" >> "$CALLS"
 EOF
 cat > "$PGREP" <<'EOF'
 #!/bin/sh
+printf 'pgrep\n' >> "$CALLS"
 exit 1
 EOF
 chmod +x "$FIREWALL_SYNC" "$SERVICE_SCRIPT" "$PGREP"
@@ -100,6 +102,9 @@ chmod +x "$FIREWALL_SYNC" "$SERVICE_SCRIPT" "$PGREP"
 # rc.common normally sources this file; sourcing lets the harness call its
 # lifecycle functions with harmless injected commands.
 . "$INIT"
+procd_open_instance() { printf 'procd-open\n' >> "$CALLS"; }
+procd_set_param() { :; }
+procd_close_instance() { :; }
 save_daemon_state
 [ "$(ls -ld "$RUNTIME_DIR" | awk '{print $1}')" = drwx------ ]
 [ "$(ls -l "$DAEMON_STATE" | awk '{print $1}')" = -rw------- ]
@@ -124,5 +129,35 @@ restart_count="$(grep -Fc 'restart' "$CALLS")"
 printf '%s\n' 'wattline.rule.enabled=1' >> "$STATE"
 reload_service
 [ "$(grep -Fc 'restart' "$CALLS")" -eq "$restart_count" ]
+
+# UCI read failures cannot produce an empty-but-valid daemon fingerprint.
+# Preserve the last good state and do not proceed to procd, restart, pgrep, or
+# HUP when startup/reload cannot read wattline.main.
+cp "$DAEMON_STATE" "$TMP/daemon-state.good"
+FAIL_UCI_SHOW="$TMP/fail-uci-show"
+export FAIL_UCI_SHOW
+: > "$FAIL_UCI_SHOW"
+before_procd="$(grep -Fc 'procd-open' "$CALLS" || true)"
+if start_service; then
+	echo "provisioning_test: startup accepted unreadable UCI" >&2
+	exit 1
+fi
+[ "$(grep -Fc 'procd-open' "$CALLS" || true)" -eq "$before_procd" ]
+cmp -s "$DAEMON_STATE" "$TMP/daemon-state.good"
+if find "$RUNTIME_DIR" -name 'daemon-state.new.*' | grep -q .; then
+	echo "provisioning_test: failed snapshot left temporary state" >&2
+	exit 1
+fi
+
+before_restart="$(grep -Fc 'restart' "$CALLS" || true)"
+before_pgrep="$(grep -Fc 'pgrep' "$CALLS" || true)"
+if reload_service; then
+	echo "provisioning_test: reload accepted unreadable UCI" >&2
+	exit 1
+fi
+[ "$(grep -Fc 'restart' "$CALLS" || true)" -eq "$before_restart" ]
+[ "$(grep -Fc 'pgrep' "$CALLS" || true)" -eq "$before_pgrep" ]
+cmp -s "$DAEMON_STATE" "$TMP/daemon-state.good"
+rm -f "$FAIL_UCI_SHOW"
 
 echo "provisioning tests passed"

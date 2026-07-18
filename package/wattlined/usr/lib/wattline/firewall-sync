@@ -4,6 +4,8 @@ set -eu
 FIREWALL_INIT="${FIREWALL_INIT:-/etc/init.d/firewall}"
 APPLY_MARKER="${APPLY_MARKER:-/var/run/wattline-firewall.pending}"
 changed=0
+pending=0
+marker_phase=commit
 
 # Serialize procd reloads and hotplug events when OpenWrt's lock helper is
 # available. Reconciliation remains idempotent on minimal images without it.
@@ -13,8 +15,23 @@ if command -v lock >/dev/null 2>&1; then
 	trap 'lock -u "$LOCK_FILE"' EXIT HUP INT TERM
 fi
 
+if [ -e "$APPLY_MARKER" ]; then
+	[ -f "$APPLY_MARKER" ] || exit 1
+	pending=1
+	marker_phase="$(sed -n '1p' "$APPLY_MARKER" 2>/dev/null || true)"
+	[ "$marker_phase" = reload ] || marker_phase=commit
+fi
+
 get() {
 	uci -q get "$1" 2>/dev/null
+}
+
+mark_pending() {
+	[ "$pending" -eq 0 ] || return 0
+	mkdir -p "$(dirname "$APPLY_MARKER")" || return 1
+	printf 'commit\n' > "$APPLY_MARKER" || return 1
+	pending=1
+	marker_phase=commit
 }
 
 value_or() {
@@ -27,6 +44,7 @@ set_if_changed() {
 	value="$2"
 	current="$(get "$key" || true)"
 	if [ "$current" != "$value" ]; then
+		mark_pending || exit 1
 		uci -q set "$key=$value"
 		changed=1
 	fi
@@ -34,6 +52,7 @@ set_if_changed() {
 
 delete_if_present() {
 	if uci -q show "$1" >/dev/null 2>&1; then
+		mark_pending || exit 1
 		uci -q delete "$1"
 		changed=1
 	fi
@@ -112,19 +131,16 @@ else
 	delete_if_present firewall.wattline_https
 fi
 
-if [ "$changed" -eq 1 ]; then
-	mkdir -p "$(dirname "$APPLY_MARKER")"
-	: > "$APPLY_MARKER"
+if [ "$pending" -eq 1 ]; then
 	if ! uci -q commit firewall; then
-		rm -f "$APPLY_MARKER"
 		exit 1
 	fi
-	if [ "$(value_or wattline.main.wan_access 0)" = 1 ]; then
+	if [ "$marker_phase" = commit ] && [ "$(value_or wattline.main.wan_access 0)" = 1 ]; then
 		logger 'wattline: WAN access enabled: insecure — use TLS/VPN'
 	fi
-fi
-
-if [ "$changed" -eq 1 ] || [ -e "$APPLY_MARKER" ]; then
+	# Keep durable intent across the commit/reload boundary. A reload failure
+	# leaves this phase in place; the next run recommits before retrying reload.
+	printf 'reload\n' > "$APPLY_MARKER" || exit 1
 	if "$FIREWALL_INIT" reload; then
 		rm -f "$APPLY_MARKER"
 	else
