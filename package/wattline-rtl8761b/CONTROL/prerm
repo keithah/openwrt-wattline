@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+DRIVERCTL="${DRIVERCTL:-/usr/lib/wattline/rtl8761b/driverctl}"
+"$DRIVERCTL" restore
+
+exit 0

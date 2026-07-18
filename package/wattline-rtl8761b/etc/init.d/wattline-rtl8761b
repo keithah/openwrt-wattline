@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+
+START=15
+STOP=85
+
+DRIVERCTL="${DRIVERCTL:-/usr/lib/wattline/rtl8761b/driverctl}"
+
+start() {
+	"$DRIVERCTL" activate
+}
+
+stop() {
+	return 0
+}

@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+[ "$(uname -r)" = 5.4.211 ] || {
+	echo 'wattline-rtl8761b requires Linux 5.4.211' >&2
+	exit 1
+}
+[ "$(uname -m)" = aarch64 ] || {
+	echo 'wattline-rtl8761b requires aarch64' >&2
+	exit 1
+}
+
+exit 0

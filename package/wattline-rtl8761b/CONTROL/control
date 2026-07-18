@@ -1,0 +1,10 @@
+Package: wattline-rtl8761b
+Version: 0.1.0
+Architecture: aarch64_cortex-a53
+Maintainer: Keith Ahner
+Depends: wattline-bt
+Section: utils
+Priority: optional
+Description: Verified RTL8761B Bluetooth driver for GL-X3000 Linux 5.4.211
+ Installs a pinned GL.iNet ABI-compatible btusb/btrtl/btintel module set and
+ Realtek firmware for supported RTL8761B USB adapters. Refuses other kernels.

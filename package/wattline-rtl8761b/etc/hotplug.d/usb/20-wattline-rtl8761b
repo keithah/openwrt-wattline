@@ -1,0 +1,38 @@
+#!/bin/sh
+
+[ "${ACTION:-}" = add ] || exit 0
+
+product="${PRODUCT:-}"
+vendor="${product%%/*}"
+rest="${product#*/}"
+[ "$rest" != "$product" ] || exit 0
+device="${rest%%/*}"
+
+vendor="$(printf '%s' "$vendor" | tr 'A-F' 'a-f')"
+device="$(printf '%s' "$device" | tr 'A-F' 'a-f')"
+case "$vendor:$device" in
+	*[!0-9a-f:]*|:*|*:) exit 0 ;;
+esac
+case "${#vendor}" in
+	1) vendor="000$vendor" ;;
+	2) vendor="00$vendor" ;;
+	3) vendor="0$vendor" ;;
+	4) ;;
+	*) exit 0 ;;
+esac
+case "${#device}" in
+	1) device="000$device" ;;
+	2) device="00$device" ;;
+	3) device="0$device" ;;
+	4) ;;
+	*) exit 0 ;;
+esac
+
+case "$vendor:$device" in
+	2357:0604|0bda:8771)
+		DRIVERCTL="${DRIVERCTL:-/usr/lib/wattline/rtl8761b/driverctl}"
+		"$DRIVERCTL" activate --require-device
+		;;
+esac
+
+exit 0
