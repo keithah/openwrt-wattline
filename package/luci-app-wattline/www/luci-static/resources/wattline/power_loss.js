@@ -92,8 +92,6 @@ function display(rule, status, telemetry) {
 			remainingSeconds: Math.max(0, Math.round(total - durationSeconds(runtime.holding_for)))
 		};
 	}
-	if (runtime && runtime.last_fired)
-		return { kind: 'fired', remainingSeconds: 0, lastFired: runtime.last_fired };
 
 	return {
 		kind: 'holding',

@@ -31,11 +31,11 @@ assert.strictEqual(powerLoss.minutes(fixture.canonical), 10);
 
 const customized = Object.assign({}, fixture.canonical, {
 	actions: ['webhook:https://example.test/input-lost', 'shutdown'],
-	custom_field: 'preserve-me'
+	repeat_every: 1800000000000
 });
 const preserved = powerLoss.payload(customized, false, 17, false);
 assert.deepStrictEqual(preserved.actions, customized.actions);
-assert.strictEqual(preserved.custom_field, 'preserve-me');
+assert.strictEqual(preserved.repeat_every, 1800000000000);
 assert.strictEqual(preserved.enabled, false);
 assert.strictEqual(preserved.hold, 1020000000000);
 assert.notStrictEqual(preserved, customized);
@@ -104,5 +104,14 @@ assert.strictEqual(fired.kind, 'fired');
 assert.strictEqual(fired.lastFired, '2026-07-17T12:00:00Z');
 assert.strictEqual(Object.prototype.hasOwnProperty.call(fired, 'succeeded'), false,
 	'last_fired is not proof that shutdown succeeded');
+
+const rearmedHolding = powerLoss.display(fixture.canonical, { rules: [{
+	name: fixture.name,
+	armed: true,
+	last_fired: '2026-07-17T12:00:00Z'
+}] }, telemetry);
+assert.strictEqual(rearmedHolding.kind, 'holding',
+	'an armed rule with a historical firing is holding during a new input loss');
+assert.strictEqual(rearmedHolding.remainingSeconds, 600);
 
 console.log('Power-loss preset behavior tests passed');

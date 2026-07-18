@@ -100,6 +100,8 @@ func TestPowerLossShutdownPresetSemantics(t *testing.T) {
 		t.Fatalf("expected one firing after ten continuous minutes, got %+v", f)
 	} else if len(f[0].Rule.Actions) != 1 || f[0].Rule.Actions[0] != "shutdown" {
 		t.Fatalf("preset fired unexpected actions: %+v", f[0].Rule.Actions)
+	} else if !f[0].Rule.ConfirmShutdown {
+		t.Fatal("preset firing lost shutdown confirmation")
 	}
 	if f := e.Tick(absent, t0.Add(10*time.Minute+time.Second)); len(f) != 0 {
 		t.Fatalf("preset fired more than once without re-arm: %+v", f)
@@ -129,6 +131,8 @@ func TestPowerLossShutdownPresetSemantics(t *testing.T) {
 		t.Fatalf("expected one shutdown firing after ten fresh minutes, got %+v", f)
 	} else if len(f[0].Rule.Actions) != 1 || f[0].Rule.Actions[0] != "shutdown" {
 		t.Fatalf("preset fired unexpected actions: %+v", f[0].Rule.Actions)
+	} else if !f[0].Rule.ConfirmShutdown {
+		t.Fatal("re-armed preset firing lost shutdown confirmation")
 	}
 	if f := e.Tick(absent, t0.Add(46*time.Minute)); len(f) != 0 {
 		t.Fatalf("preset fired more than once without re-arm: %+v", f)
