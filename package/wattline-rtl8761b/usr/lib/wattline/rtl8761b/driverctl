@@ -1,0 +1,377 @@
+#!/bin/sh
+set -eu
+
+EXPECTED_KERNEL=5.4.211
+EXPECTED_MACHINE=aarch64
+EXPECTED_VERMAGIC='5.4.211 SMP mod_unload aarch64'
+
+ROOT_PREFIX="${ROOT_PREFIX:-}"
+PACKAGE_ROOT="${PACKAGE_ROOT:-${ROOT_PREFIX:-/}}"
+PAYLOAD_DIR="${PAYLOAD_DIR:-$ROOT_PREFIX/usr/lib/wattline/rtl8761b}"
+STATE_DIR="${STATE_DIR:-$ROOT_PREFIX/etc/wattline/rtl8761b-stock}"
+LOCK_FILE="${LOCK_FILE:-$ROOT_PREFIX/var/lock/wattline-rtl8761b.lock}"
+SYS_USB="${SYS_USB:-$ROOT_PREFIX/sys/bus/usb/devices}"
+PROC_MODULES="${PROC_MODULES:-$ROOT_PREFIX/proc/modules}"
+WATTLINE_SERVICE="${WATTLINE_SERVICE:-$ROOT_PREFIX/etc/init.d/wattlined}"
+KERNEL_RELEASE="${KERNEL_RELEASE:-$(uname -r)}"
+MACHINE="${MACHINE:-$(uname -m)}"
+MODULE_DIR="$ROOT_PREFIX/lib/modules/$EXPECTED_KERNEL"
+MODULE_LIST="$ROOT_PREFIX/etc/modules.d/bluetooth"
+MANIFEST_FILE="${MANIFEST_FILE:-$PACKAGE_ROOT/usr/share/wattline-rtl8761b/SHA256SUMS}"
+
+log() {
+	printf 'wattline-rtl8761b: %s\n' "$*" >&2
+}
+
+die() {
+	log "$*"
+	exit 1
+}
+
+supported_id() {
+	case "$(printf '%s' "$1" | tr 'A-F' 'a-f')" in
+		2357:0604|0bda:8771) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+detect() {
+	for device in "$SYS_USB"/*; do
+		[ -d "$device" ] || continue
+		[ -r "$device/idVendor" ] || continue
+		[ -r "$device/idProduct" ] || continue
+		vendor="$(tr 'A-F' 'a-f' <"$device/idVendor" | tr -d '\r\n')"
+		product="$(tr 'A-F' 'a-f' <"$device/idProduct" | tr -d '\r\n')"
+		if supported_id "$vendor:$product"; then
+			printf '%s:%s\n' "$vendor" "$product"
+			return 0
+		fi
+	done
+	return 1
+}
+
+admit() {
+	[ "$KERNEL_RELEASE" = "$EXPECTED_KERNEL" ] || {
+		log "unsupported kernel $KERNEL_RELEASE (requires $EXPECTED_KERNEL)"
+		return 1
+	}
+	[ "$MACHINE" = "$EXPECTED_MACHINE" ] || {
+		log "unsupported architecture $MACHINE (requires $EXPECTED_MACHINE)"
+		return 1
+	}
+	for command in awk chmod cmp cp dirname flock grep insmod mkdir modinfo mv rm rmmod sed sha256sum tr; do
+		command -v "$command" >/dev/null 2>&1 || {
+			log "required command is unavailable: $command"
+			return 1
+		}
+	done
+	[ -r "$MANIFEST_FILE" ] || {
+		log "missing artifact manifest: $MANIFEST_FILE"
+		return 1
+	}
+	(
+		cd "$PACKAGE_ROOT"
+		sha256sum -c "$MANIFEST_FILE" >/dev/null
+	) || {
+		log 'packaged module or firmware hash mismatch'
+		return 1
+	}
+	for module in btintel btrtl btusb; do
+		path="$PAYLOAD_DIR/modules/$EXPECTED_KERNEL/$module.ko"
+		[ -r "$path" ] || {
+			log "missing packaged module: $path"
+			return 1
+		}
+		vermagic="$(modinfo -F vermagic "$path" | sed 's/[[:space:]]*$//')"
+		[ "$vermagic" = "$EXPECTED_VERMAGIC" ] || {
+			log "$module vermagic is '$vermagic', expected '$EXPECTED_VERMAGIC'"
+			return 1
+		}
+	done
+	return 0
+}
+
+atomic_install() {
+	source=$1
+	destination=$2
+	temporary="${destination}.wattline-new.$$"
+	rm -f "$temporary"
+	if ! cp "$source" "$temporary"; then
+		rm -f "$temporary"
+		return 1
+	fi
+	chmod 0644 "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	expected="$(sha256sum "$source" | awk '{print $1}')"
+	actual="$(sha256sum "$temporary" | awk '{print $1}')"
+	if [ "$actual" != "$expected" ]; then
+		rm -f "$temporary"
+		return 1
+	fi
+	if ! mv -f "$temporary" "$destination"; then
+		rm -f "$temporary"
+		return 1
+	fi
+}
+
+backup_original() {
+	if [ -f "$STATE_DIR/complete" ]; then
+		return 0
+	fi
+	[ ! -e "$STATE_DIR" ] || {
+		log "incomplete backup exists at $STATE_DIR"
+		return 1
+	}
+	temporary="${STATE_DIR}.new.$$"
+	rm -rf "$temporary"
+	mkdir -p "$temporary" || return 1
+	for module in btintel btrtl btusb; do
+		if [ -f "$MODULE_DIR/$module.ko" ]; then
+			if ! cp "$MODULE_DIR/$module.ko" "$temporary/$module.ko"; then
+				rm -rf "$temporary"
+				return 1
+			fi
+		else
+			: >"$temporary/$module.ko.absent"
+		fi
+	done
+	if [ -f "$MODULE_LIST" ]; then
+		if ! cp "$MODULE_LIST" "$temporary/bluetooth"; then
+			rm -rf "$temporary"
+			return 1
+		fi
+	else
+		: >"$temporary/bluetooth.absent"
+	fi
+	chmod -R go-w "$temporary"
+	: >"$temporary/complete"
+	if ! mv "$temporary" "$STATE_DIR"; then
+		rm -rf "$temporary"
+		return 1
+	fi
+}
+
+is_loaded() {
+	[ -r "$PROC_MODULES" ] && grep -q "^$1 " "$PROC_MODULES"
+}
+
+unload_module() {
+	module=$1
+	if is_loaded "$module"; then
+		rmmod "$module"
+	else
+		rmmod "$module" >/dev/null 2>&1 || true
+	fi
+}
+
+has_hci0() {
+	[ -d "$ROOT_PREFIX/sys/class/bluetooth/hci0" ]
+}
+
+service_action() {
+	action=$1
+	[ -x "$WATTLINE_SERVICE" ] || return 0
+	"$WATTLINE_SERVICE" "$action"
+}
+
+quiesce_runtime() {
+	service_action stop || return 1
+	if has_hci0; then
+		hciconfig hci0 down || return 1
+	fi
+	unload_module btusb || return 1
+	unload_module btrtl || return 1
+	unload_module btintel || return 1
+}
+
+load_packaged_runtime() {
+	insmod "$PAYLOAD_DIR/modules/$EXPECTED_KERNEL/btintel.ko" || return 1
+	insmod "$PAYLOAD_DIR/modules/$EXPECTED_KERNEL/btrtl.ko" || return 1
+	insmod "$PAYLOAD_DIR/modules/$EXPECTED_KERNEL/btusb.ko" || return 1
+}
+
+install_packaged_files() {
+	mkdir -p "$MODULE_DIR" "$(dirname "$MODULE_LIST")"
+	for module in btintel btrtl btusb; do
+		atomic_install "$PAYLOAD_DIR/modules/$EXPECTED_KERNEL/$module.ko" "$MODULE_DIR/$module.ko" || return 1
+	done
+	filtered="${MODULE_LIST}.wattline-filter.$$"
+	if [ -f "$MODULE_LIST" ]; then
+		awk '$1 != "btusb"' "$MODULE_LIST" >"$filtered"
+	else
+		: >"$filtered"
+	fi
+	if ! atomic_install "$filtered" "$MODULE_LIST"; then
+		rm -f "$filtered"
+		return 1
+	fi
+	rm -f "$filtered"
+}
+
+restore_files() {
+	[ -f "$STATE_DIR/complete" ] || {
+		log "no complete stock backup at $STATE_DIR"
+		return 1
+	}
+	for module in btintel btrtl btusb; do
+		if [ -f "$STATE_DIR/$module.ko" ]; then
+			atomic_install "$STATE_DIR/$module.ko" "$MODULE_DIR/$module.ko" || return 1
+		elif [ -f "$STATE_DIR/$module.ko.absent" ]; then
+			rm -f "$MODULE_DIR/$module.ko"
+		else
+			log "backup metadata is missing for $module"
+			return 1
+		fi
+	done
+	if [ -f "$STATE_DIR/bluetooth" ]; then
+		atomic_install "$STATE_DIR/bluetooth" "$MODULE_LIST" || return 1
+	elif [ -f "$STATE_DIR/bluetooth.absent" ]; then
+		rm -f "$MODULE_LIST"
+	else
+		log 'backup metadata is missing for /etc/modules.d/bluetooth'
+		return 1
+	fi
+}
+
+load_stock_runtime() {
+	[ ! -f "$MODULE_DIR/btintel.ko" ] || insmod "$MODULE_DIR/btintel.ko" || return 1
+	[ ! -f "$MODULE_DIR/btrtl.ko" ] || insmod "$MODULE_DIR/btrtl.ko" || return 1
+	[ ! -f "$MODULE_DIR/btusb.ko" ] || insmod "$MODULE_DIR/btusb.ko" || return 1
+}
+
+restore_locked() {
+	remove_backup=$1
+	quiesce_runtime || return 1
+	restore_files || return 1
+	load_stock_runtime || return 1
+	if has_hci0; then
+		hciconfig hci0 up || return 1
+	fi
+	service_action restart || return 1
+	if [ "$remove_backup" = yes ]; then
+		rm -rf "$STATE_DIR"
+	fi
+}
+
+acquire_lock() {
+	mkdir -p "$(dirname "$LOCK_FILE")"
+	exec 9>"$LOCK_FILE"
+	flock -x 9
+}
+
+activate() {
+	require_device=no
+	case "${1:-}" in
+		'') ;;
+		--require-device) require_device=yes ;;
+		*) die "unknown activate option: $1" ;;
+	esac
+	admit || return 1
+	if [ "$require_device" = yes ] && ! detect >/dev/null; then
+		log 'supported RTL8761B USB adapter is not present'
+		return 1
+	fi
+	acquire_lock
+	backup_original || return 1
+	if ! install_packaged_files; then
+		log 'module installation failed; restoring stock files'
+		restore_locked no || log 'automatic rollback also failed; stock backup retained'
+		return 1
+	fi
+	if ! quiesce_runtime || ! load_packaged_runtime; then
+		log 'module activation failed; restoring stock files'
+		restore_locked no || log 'automatic rollback also failed; stock backup retained'
+		return 1
+	fi
+	if has_hci0; then
+		if ! hciconfig hci0 up; then
+			log 'hci0 could not be brought up; restoring stock files'
+			restore_locked no || log 'automatic rollback also failed; stock backup retained'
+			return 1
+		fi
+	elif [ "$require_device" = yes ]; then
+		log 'hci0 did not appear; restoring stock files'
+		restore_locked no || log 'automatic rollback also failed; stock backup retained'
+		return 1
+	fi
+	if ! service_action restart; then
+		log 'wattlined restart failed; restoring stock files'
+		restore_locked no || log 'automatic rollback also failed; stock backup retained'
+		return 1
+	fi
+}
+
+same_file() {
+	[ -f "$1" ] && [ -f "$2" ] && cmp -s "$1" "$2"
+}
+
+module_list_is_packaged() {
+	[ -f "$MODULE_LIST" ] || return 0
+	! awk '$1 == "btusb" { found=1 } END { exit !found }' "$MODULE_LIST"
+}
+
+active_is_packaged() {
+	for module in btintel btrtl btusb; do
+		same_file "$PAYLOAD_DIR/modules/$EXPECTED_KERNEL/$module.ko" "$MODULE_DIR/$module.ko" || return 1
+	done
+	module_list_is_packaged
+}
+
+active_is_stock() {
+	if [ ! -f "$STATE_DIR/complete" ]; then
+		return 0
+	fi
+	for module in btintel btrtl btusb; do
+		if [ -f "$STATE_DIR/$module.ko" ]; then
+			same_file "$STATE_DIR/$module.ko" "$MODULE_DIR/$module.ko" || return 1
+		elif [ -f "$STATE_DIR/$module.ko.absent" ]; then
+			[ ! -e "$MODULE_DIR/$module.ko" ] || return 1
+		else
+			return 1
+		fi
+	done
+	if [ -f "$STATE_DIR/bluetooth" ]; then
+		same_file "$STATE_DIR/bluetooth" "$MODULE_LIST"
+	else
+		[ -f "$STATE_DIR/bluetooth.absent" ] && [ ! -e "$MODULE_LIST" ]
+	fi
+}
+
+status() {
+	if ! admit >/dev/null 2>&1; then
+		printf 'unsupported\n'
+		return 0
+	fi
+	if active_is_packaged; then
+		printf 'packaged\n'
+	elif active_is_stock; then
+		printf 'stock\n'
+	else
+		printf 'drifted\n'
+	fi
+}
+
+restore() {
+	admit || return 1
+	acquire_lock
+	restore_locked yes
+}
+
+usage() {
+	printf 'usage: %s {detect|admit|activate [--require-device]|status|restore}\n' "$0" >&2
+	exit 2
+}
+
+command_name="${1:-}"
+[ "$#" -gt 0 ] || usage
+shift
+case "$command_name" in
+	detect) [ "$#" -eq 0 ] || usage; detect ;;
+	admit) [ "$#" -eq 0 ] || usage; admit ;;
+	activate) [ "$#" -le 1 ] || usage; activate "$@" ;;
+	status) [ "$#" -eq 0 ] || usage; status ;;
+	restore) [ "$#" -eq 0 ] || usage; restore ;;
+	*) usage ;;
+esac
