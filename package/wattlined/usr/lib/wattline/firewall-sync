@@ -12,7 +12,8 @@ marker_phase=commit
 if command -v lock >/dev/null 2>&1; then
 	LOCK_FILE=/var/lock/wattline-firewall
 	lock "$LOCK_FILE"
-	trap 'lock -u "$LOCK_FILE"' EXIT HUP INT TERM
+	trap 'lock -u "$LOCK_FILE"' EXIT
+	trap 'exit 1' HUP INT TERM
 fi
 
 if [ -e "$APPLY_MARKER" ]; then
@@ -27,7 +28,9 @@ get() {
 }
 
 mark_pending() {
-	[ "$pending" -eq 0 ] || return 0
+	if [ "$pending" -eq 1 ] && [ "$marker_phase" = commit ]; then
+		return 0
+	fi
 	mkdir -p "$(dirname "$APPLY_MARKER")" || return 1
 	printf 'commit\n' > "$APPLY_MARKER" || return 1
 	pending=1
@@ -132,15 +135,19 @@ else
 fi
 
 if [ "$pending" -eq 1 ]; then
-	if ! uci -q commit firewall; then
-		exit 1
+	if [ "$marker_phase" = commit ]; then
+		if ! uci -q commit firewall; then
+			exit 1
+		fi
+		if [ "$(value_or wattline.main.wan_access 0)" = 1 ]; then
+			logger 'wattline: WAN access enabled: insecure — use TLS/VPN'
+		fi
+		# Keep durable intent across the commit/reload boundary. A reload
+		# failure leaves this phase in place and retries reload without another
+		# commit. A later mutation first moves the marker back to commit.
+		printf 'reload\n' > "$APPLY_MARKER" || exit 1
+		marker_phase=reload
 	fi
-	if [ "$marker_phase" = commit ] && [ "$(value_or wattline.main.wan_access 0)" = 1 ]; then
-		logger 'wattline: WAN access enabled: insecure — use TLS/VPN'
-	fi
-	# Keep durable intent across the commit/reload boundary. A reload failure
-	# leaves this phase in place; the next run recommits before retrying reload.
-	printf 'reload\n' > "$APPLY_MARKER" || exit 1
 	if "$FIREWALL_INIT" reload; then
 		rm -f "$APPLY_MARKER"
 	else
