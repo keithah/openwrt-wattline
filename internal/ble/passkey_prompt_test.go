@@ -72,3 +72,17 @@ func TestPromptRejectsInvalidAndConcurrentWait(t *testing.T) {
 	}
 	p.Cancel()
 }
+
+func TestPromptRejectsDuplicateTerminalActionsBeforeWaitConsumes(t *testing.T) {
+	p := NewPasskeyPrompt(time.Second)
+	started := make(chan struct{})
+	go func() { _, _ = p.Wait(func() { close(started) }) }()
+	<-started
+	if err := p.Submit("020555"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Submit("020555"); !errors.Is(err, ErrPasskeyNotWaiting) {
+		t.Fatalf("duplicate submit: %v", err)
+	}
+	p.Cancel()
+}

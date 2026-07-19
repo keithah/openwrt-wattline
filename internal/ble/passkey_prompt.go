@@ -18,6 +18,7 @@ type PasskeyPrompt struct {
 	mu       sync.Mutex
 	duration time.Duration
 	waiting  bool
+	terminal bool
 	canceled bool
 	result   chan promptOutcome
 	deadline time.Time
@@ -47,6 +48,7 @@ func (p *PasskeyPrompt) Wait(onWaiting func()) (string, error) {
 		return "", ErrPasskeyCanceled
 	}
 	p.waiting = true
+	p.terminal = false
 	p.deadline = time.Now().Add(p.duration)
 	p.result = make(chan promptOutcome, 1)
 	ch := p.result
@@ -64,6 +66,7 @@ func (p *PasskeyPrompt) Wait(onWaiting func()) (string, error) {
 	}
 	p.mu.Lock()
 	p.waiting = false
+	p.terminal = true
 	p.deadline = time.Time{}
 	p.result = nil
 	p.mu.Unlock()
@@ -84,9 +87,10 @@ func (p *PasskeyPrompt) Submit(pin string) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.waiting || p.result == nil {
+	if !p.waiting || p.result == nil || p.terminal {
 		return ErrPasskeyNotWaiting
 	}
+	p.terminal = true
 	p.result <- promptOutcome{pin: pin}
 	return nil
 }
@@ -94,7 +98,8 @@ func (p *PasskeyPrompt) Submit(pin string) error {
 func (p *PasskeyPrompt) Cancel() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.waiting && p.result != nil {
+	if p.waiting && p.result != nil && !p.terminal {
+		p.terminal = true
 		p.result <- promptOutcome{err: ErrPasskeyCanceled}
 	} else {
 		p.canceled = true
