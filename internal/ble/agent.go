@@ -14,11 +14,23 @@ import (
 type pairingAgent struct{ prompt *PasskeyPrompt }
 
 func (a *pairingAgent) RequestPinCode(device dbus.ObjectPath) (string, *dbus.Error) {
-	if a.prompt != nil && a.prompt.Active() { pin, err := a.prompt.Wait(nil); if err != nil { return "", dbus.NewError("org.bluez.Error.Rejected", []interface{}{err.Error()}) }; return pin, nil }
+	if a.prompt != nil && a.prompt.Active() {
+		pin, err := a.prompt.Wait(nil)
+		if err != nil {
+			return "", dbus.NewError("org.bluez.Error.Rejected", []interface{}{err.Error()})
+		}
+		return pin, nil
+	}
 	return currentAgentPIN(), nil
 }
 func (a *pairingAgent) RequestPasskey(device dbus.ObjectPath) (uint32, *dbus.Error) {
-	if a.prompt != nil && a.prompt.Active() { pin, err := a.prompt.Wait(nil); if err != nil { return 0, dbus.NewError("org.bluez.Error.Rejected", []interface{}{err.Error()}) }; return pinToPasskey(pin), nil }
+	if a.prompt != nil && a.prompt.Active() {
+		pin, err := a.prompt.Wait(nil)
+		if err != nil {
+			return 0, dbus.NewError("org.bluez.Error.Rejected", []interface{}{err.Error()})
+		}
+		return pinToPasskey(pin), nil
+	}
 	return pinToPasskey(currentAgentPIN()), nil
 }
 func (a *pairingAgent) DisplayPinCode(device dbus.ObjectPath, pincode string) *dbus.Error {
@@ -47,7 +59,10 @@ func RegisterPairingAgent(pin string, prompt ...*PasskeyPrompt) (func(), error) 
 	if err != nil {
 		return nil, fmt.Errorf("system bus: %w", err)
 	}
-	var broker *PasskeyPrompt; if len(prompt)>0 { broker = prompt[0] }
+	var broker *PasskeyPrompt
+	if len(prompt) > 0 {
+		broker = prompt[0]
+	}
 	agent := &pairingAgent{prompt: broker}
 	// Export all org.bluez.Agent1 methods.
 	if err := conn.Export(agent, agentPath, "org.bluez.Agent1"); err != nil {
@@ -59,7 +74,9 @@ func RegisterPairingAgent(pin string, prompt ...*PasskeyPrompt) (func(), error) 
 	}
 	mgr.Call("org.bluez.AgentManager1.RequestDefaultAgent", 0, agentPath)
 	return func() {
-		if broker != nil { broker.Cancel() }
+		if broker != nil {
+			broker.Cancel()
+		}
 		mgr.Call("org.bluez.AgentManager1.UnregisterAgent", 0, agentPath)
 	}, nil
 }

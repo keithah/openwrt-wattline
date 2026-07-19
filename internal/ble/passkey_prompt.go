@@ -30,7 +30,6 @@ func (p *PasskeyPrompt) Activate(onWaiting func()) {
 	p.mu.Lock()
 	p.active = true
 	p.waiting = true
-	p.consumed = true
 	p.consumed = false
 	p.terminal = false
 	p.deadline = time.Now().Add(p.duration)
