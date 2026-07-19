@@ -253,6 +253,8 @@ return view.extend({
 			}
 			if (selMac && (p.phase === 'awaiting_pin' || p.phase === 'pin_required')) {
 				var pinInput = E('input', { 'class': 'wl-pin', maxlength: 6, value: pin, inputmode: 'numeric' });
+				var deadline = p.pin_deadline ? Math.max(0, Math.ceil((new Date(p.pin_deadline).getTime() - Date.now()) / 1000)) : null;
+				kids.push(E('div', { 'aria-live': 'polite', 'class': 'wl-note' }, deadline == null ? _('Enter the code shown on the device.') : _('Code expires in ') + deadline + _(' seconds.')));
 				pinInput.addEventListener('input', function () {
 					pinInput.value = pinInput.value.replace(/[^0-9]/g, '');
 					pin = pinInput.value;
@@ -296,7 +298,7 @@ return view.extend({
 			if (p.stage === 'paired') kids.push(E('div', { style: 'color:' + GREEN + ';font-size:13px;margin-top:10px' }, _('Paired. Connecting…')));
 			if (p.stage === 'error') kids.push(E('div', { style: 'color:' + RED + ';font-size:13px;margin-top:10px' }, _('Pairing failed: ') + (p.error || _('unknown error'))));
 			if (p.stage === 'error' && (selMac || p.target)) {
-				var recover = E('button', { 'class': 'wl-btn', style: 'margin-top:10px' }, _('Clear stale pairing & retry'));
+				var recover = E('button', { 'class': 'wl-btn', style: 'margin-top:10px' }, _('Request new pairing code'));
 				if (busy) recover.setAttribute('disabled', '');
 				recover.addEventListener('click', function () {
 					var mac = selMac || p.target;

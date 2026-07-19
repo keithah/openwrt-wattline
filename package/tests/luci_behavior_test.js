@@ -241,7 +241,7 @@ async function pairingProgressTests() {
 		textOf(node).includes('replacement bond rejected'));
 	assert.ok(live, 'current pairing failure is the only live progress message');
 	assert.ok(findElement(rendered.dom, 'summary', 'Technical details'));
-	const recover = findElement(rendered.dom, 'button', 'Clear stale pairing & retry');
+	const recover = findElement(rendered.dom, 'button', 'Request new pairing code');
 	assert.ok(recover, 'failed pairing offers explicit recovery');
 	recover.click();
 	await settle();

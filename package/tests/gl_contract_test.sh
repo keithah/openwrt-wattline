@@ -22,7 +22,7 @@ for route in /device /telemetry /pairing/status /pairing/scan /pairing/request-c
 done
 for label in 'Preparing adapter' 'Clearing stale router bond' 'Locating device' \
 	'Exchanging PIN' 'Confirming bond' 'Trusting device' 'Reconnecting' \
-	'Verifying handshake' 'Saved' 'Technical details' 'Clear stale pairing & retry'; do
+	'Verifying handshake' 'Saved' 'Technical details' 'Request new pairing code'; do
 	need "$VIEW" "$label" "pairing progress $label"
 done
 need "$VIEW" 'aria-live' 'current pairing phase live region'

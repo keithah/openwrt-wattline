@@ -586,6 +586,8 @@
           pairBits.push(btn('Show pairing code', function () { self.prequest(false); }, true, busy));
         }
         if (self.selMac && (p.phase === 'awaiting_pin' || p.phase === 'pin_required')) {
+          var deadline = p.pin_deadline ? Math.max(0, Math.ceil((new Date(p.pin_deadline).getTime() - Date.now()) / 1000)) : null;
+          pairBits.push(el('div', { 'aria-live': 'polite', color: GREY, fontSize: '12px' }, deadline == null ? 'Enter the code shown on the device.' : 'Code expires in ' + deadline + ' seconds.'));
           pairBits.push(el('div', { display: 'flex', alignItems: 'center', marginTop: '12px' }, [
             el('div', { marginRight: '10px' }, [ sub('PIN'),
               h('input', { style: { width: '90px', padding: '7px 9px', fontSize: '14px', border: '1px solid #d0d4d9',
@@ -627,7 +629,7 @@
         if (p.stage === 'paired') pairBits.push(el('div', { color: GREEN, fontSize: '13px', marginTop: '10px' }, 'Paired. Connecting…'));
         if (p.stage === 'error') pairBits.push(el('div', { color: RED, fontSize: '13px', marginTop: '10px' }, 'Pairing failed: ' + (p.error || 'unknown error')));
         if (p.stage === 'error' && (self.selMac || p.target)) pairBits.push(el('div', { marginTop: '10px' }, [
-          btn('Clear stale pairing & retry', function () { self.prequest(true); }, false, busy)
+          btn('Request new pairing code', function () { self.prequest(true); }, false, busy)
         ]));
         offlineCards = [
           card([el('div', { textAlign: 'center', padding: '10px 10px 14px', color: GREY }, [
