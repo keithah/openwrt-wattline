@@ -644,7 +644,7 @@ return view.extend({
 						_('Plug the USB BLE dongle into the router and power on the Link-Power. Already-paired devices connect automatically.')
 					])));
 					var g = gen;
-					var busyStage = lastP && (lastP.stage === 'scanning' || lastP.stage === 'pairing');
+					var busyStage = lastP && (lastP.stage === 'scanning' || lastP.stage === 'pairing' || lastP.phase === 'awaiting_pin' || lastP.phase === 'pin_required');
 					pollN++;
 					if (!lastP || busyStage || pollN % 5 === 0) {
 						api(token, port, 'GET', '/pairing/status').then(function (p) {
