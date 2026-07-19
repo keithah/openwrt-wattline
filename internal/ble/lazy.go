@@ -53,8 +53,8 @@ func (l *lazyPairOps) Scan(dur time.Duration) (found []Found, err error) {
 	return found, err
 }
 
-func (l *lazyPairOps) Pair(mac string) error {
-	return l.do(func(ops PairOps) error { return ops.Pair(mac) })
+func (l *lazyPairOps) Pair(mac string, recover bool, report PairProgress) error {
+	return l.do(func(ops PairOps) error { return ops.Pair(mac, recover, report) })
 }
 
 func (l *lazyPairOps) Trust(mac string) error {

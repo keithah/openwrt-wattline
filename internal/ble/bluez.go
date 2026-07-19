@@ -180,7 +180,7 @@ func (p *bluezPairer) discoverUntilPresent(mac string, timeout time.Duration) er
 // Pair bonds with mac. Any stale bond is removed first so we always attempt a
 // fresh key exchange. The first Pair after a remove has been observed to hang
 // in BlueZ; a CancelPairing + immediate retry recovers it (continue.md).
-func (p *bluezPairer) Pair(mac string) error {
+func (p *bluezPairer) Pair(mac string, _ bool, _ PairProgress) error {
 	dev := p.deviceObj(mac)
 	if paired, err := dev.GetProperty("org.bluez.Device1.Paired"); err == nil {
 		if b, ok := paired.Value().(bool); ok && b {

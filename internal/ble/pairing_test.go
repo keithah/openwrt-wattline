@@ -2,6 +2,8 @@ package ble
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -9,12 +11,13 @@ import (
 
 // fakeOps scripts PairOps for the manager tests.
 type fakeOps struct {
-	mu      sync.Mutex
-	scanRes []Found
-	scanErr error
-	pairErr error
-	calls   []string
-	block   chan struct{} // if non-nil, Scan blocks until closed
+	mu        sync.Mutex
+	scanRes   []Found
+	scanErr   error
+	pairErr   error
+	calls     []string
+	block     chan struct{} // if non-nil, Scan blocks until closed
+	pairBlock chan struct{}
 }
 
 func (f *fakeOps) log(s string) {
@@ -34,8 +37,17 @@ func (f *fakeOps) Scan(time.Duration) ([]Found, error) {
 	}
 	return f.scanRes, f.scanErr
 }
-func (f *fakeOps) Pair(mac string) error {
-	f.log("pair " + mac)
+func (f *fakeOps) Pair(mac string, recover bool, report PairProgress) error {
+	f.log(fmt.Sprintf("pair %t %s", recover, mac))
+	if recover {
+		report(PhaseClearingStaleBond, "Clearing the router's stale pairing record")
+	}
+	report(PhaseLocatingDevice, "Locating Link-Power")
+	report(PhaseExchangingPIN, "Exchanging the pairing PIN")
+	report(PhaseConfirmingBond, "Confirming the Bluetooth bond")
+	if f.pairBlock != nil {
+		<-f.pairBlock
+	}
 	return f.pairErr
 }
 func (f *fakeOps) Trust(mac string) error {
@@ -58,10 +70,11 @@ type pairingHarness struct {
 	waits   int
 	waitOK  bool
 	prepErr error
+	now     time.Time
 }
 
 func newHarness(ops *fakeOps) *pairingHarness {
-	h := &pairingHarness{ops: ops, waitOK: true}
+	h := &pairingHarness{ops: ops, waitOK: true, now: time.Date(2026, 7, 18, 23, 40, 0, 0, time.UTC)}
 	h.p = NewPairing(PairingDeps{
 		Ops:     ops,
 		ScanFor: time.Millisecond,
@@ -69,7 +82,9 @@ func newHarness(ops *fakeOps) *pairingHarness {
 		Pause:   func() { h.mu.Lock(); h.paused++; h.mu.Unlock() },
 		Resume:  func() { h.mu.Lock(); h.resumed++; h.mu.Unlock() },
 		SetPIN:  func(pin string) { h.mu.Lock(); h.pins = append(h.pins, pin); h.mu.Unlock() },
-		WaitConnected: func() bool {
+		WaitConnected: func(report PairProgress) bool {
+			report(PhaseReconnecting, "Reconnecting to Link-Power")
+			report(PhaseVerifyingHandshake, "Verifying the protected Wattline handshake")
 			h.mu.Lock()
 			h.waits++
 			ok := h.waitOK
@@ -81,6 +96,11 @@ func newHarness(ops *fakeOps) *pairingHarness {
 			h.saved = append(h.saved, [2]string{mac, pin})
 			h.mu.Unlock()
 			return nil
+		},
+		Now: func() time.Time {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			return h.now
 		},
 	})
 	return h
@@ -160,7 +180,7 @@ func TestPairSuccessTrustsPersistsAndSetsPIN(t *testing.T) {
 	}
 	waitFor(t, "paired stage", func() bool { return h.p.Status().Stage == StagePaired })
 	calls := ops.got()
-	want := []string{"pair " + mac, "trust " + mac}
+	want := []string{"pair false " + mac, "trust " + mac}
 	if len(calls) != 2 || calls[0] != want[0] || calls[1] != want[1] {
 		t.Fatalf("ops calls = %v, want %v", calls, want)
 	}
@@ -271,6 +291,77 @@ func TestPairPrepareErrorFailsFast(t *testing.T) {
 	}
 }
 
+func TestRecoverProgressTimelineAndElapsedFreeze(t *testing.T) {
+	mac := "DC:04:5A:EB:72:2B"
+	ops := &fakeOps{pairBlock: make(chan struct{})}
+	h := newHarness(ops)
+	if err := h.p.StartRecover(mac, "020555"); err != nil {
+		t.Fatalf("StartRecover: %v", err)
+	}
+	waitFor(t, "confirming bond", func() bool { return h.p.Status().Phase == PhaseConfirmingBond })
+	h.mu.Lock()
+	h.now = h.now.Add(5 * time.Second)
+	h.mu.Unlock()
+	if got := h.p.Status().ElapsedMS; got != 5000 {
+		t.Fatalf("active elapsed_ms = %d, want 5000", got)
+	}
+	if err := h.p.StartRecover(mac, "020555"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("second recover err = %v, want ErrBusy", err)
+	}
+	close(ops.pairBlock)
+	waitFor(t, "paired", func() bool { return h.p.Status().Stage == StagePaired })
+	status := h.p.Status()
+	want := []PairingPhase{
+		PhasePreparingAdapter, PhaseClearingStaleBond, PhaseLocatingDevice,
+		PhaseExchangingPIN, PhaseConfirmingBond, PhaseTrustingDevice,
+		PhaseReconnecting, PhaseVerifyingHandshake, PhaseSavingPairing, PhaseComplete,
+	}
+	if len(status.Events) != len(want) {
+		t.Fatalf("events = %+v, want %d", status.Events, len(want))
+	}
+	for i, event := range status.Events {
+		if event.Phase != want[i] {
+			t.Fatalf("event[%d].phase = %q, want %q", i, event.Phase, want[i])
+		}
+		if strings.Contains(event.Message, "020555") {
+			t.Fatalf("event leaked PIN: %+v", event)
+		}
+	}
+	if status.Phase != PhaseComplete || status.Message == "" {
+		t.Fatalf("completed status = %+v", status)
+	}
+	h.mu.Lock()
+	h.now = h.now.Add(10 * time.Second)
+	h.mu.Unlock()
+	if got := h.p.Status().ElapsedMS; got != status.ElapsedMS {
+		t.Fatalf("finished elapsed changed from %d to %d", status.ElapsedMS, got)
+	}
+	if calls := ops.got(); calls[0] != "pair true "+mac {
+		t.Fatalf("recovery calls = %v", calls)
+	}
+}
+
+func TestPairingProgressCapsEventsAndSuppressesDuplicatePhase(t *testing.T) {
+	now := time.Date(2026, 7, 18, 23, 40, 0, 0, time.UTC)
+	p := NewPairing(PairingDeps{Now: func() time.Time { return now }})
+	if err := p.begin(StagePairing); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		p.setPhase(PairingPhase(fmt.Sprintf("phase_%02d", i)), fmt.Sprintf("event %d", i))
+		now = now.Add(time.Second)
+	}
+	before := len(p.Status().Events)
+	p.setPhase("phase_39", "duplicate state")
+	status := p.Status()
+	if len(status.Events) != 32 || before != 32 {
+		t.Fatalf("event count before=%d after=%d, want 32", before, len(status.Events))
+	}
+	if status.Events[0].Phase != "phase_08" || status.Events[31].Phase != "phase_39" {
+		t.Fatalf("capped events = %+v", status.Events)
+	}
+}
+
 func TestUnpairSyncAndBusy(t *testing.T) {
 	ops := &fakeOps{block: make(chan struct{})}
 	h := newHarness(ops)
@@ -297,7 +388,7 @@ func TestLazyPairOpsSurfacesResolveError(t *testing.T) {
 	if _, err := ops.Scan(time.Millisecond); err == nil {
 		t.Skip("BlueZ available; nothing to assert on this host")
 	}
-	if err := ops.Pair("AA:BB:CC:DD:EE:FF"); err == nil {
+	if err := ops.Pair("AA:BB:CC:DD:EE:FF", false, func(PairingPhase, string) {}); err == nil {
 		t.Fatal("Pair should surface resolve error")
 	}
 }

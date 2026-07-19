@@ -25,9 +25,9 @@ func (s *scriptedOps) Scan(time.Duration) ([]ble.Found, error) {
 	}
 	return s.devices, s.scanErr
 }
-func (s *scriptedOps) Pair(string) error   { return s.pairErr }
-func (s *scriptedOps) Trust(string) error  { return s.trustErr }
-func (s *scriptedOps) Unpair(string) error { return s.unpairErr }
+func (s *scriptedOps) Pair(string, bool, ble.PairProgress) error { return s.pairErr }
+func (s *scriptedOps) Trust(string) error                        { return s.trustErr }
+func (s *scriptedOps) Unpair(string) error                       { return s.unpairErr }
 
 func pairingServer(t *testing.T, ops ble.PairOps) http.Handler {
 	h, _, _ := testServerWith(t, func(d *Deps) {
