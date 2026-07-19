@@ -124,7 +124,8 @@ async function renderStatus(options = {}) {
 		device: options.device || { features: {}, commands: { active: [] }, connection: {} },
 		settings: options.settings || { tls: {}, pairing_always_on: false, wan_access: false, advanced: false },
 		tokens: options.tokens || [],
-		pairing: options.pairing || { open: false }
+		pairing: options.pairing || { open: false },
+		devicePairing: options.devicePairing || { stage: 'idle', devices: [] }
 	};
 	let qrLoads = 0, qrCloses = 0;
 	const clone = (value) => value == null ? value : JSON.parse(JSON.stringify(value));
@@ -146,7 +147,7 @@ async function renderStatus(options = {}) {
 					'/tokens': server.tokens, '/pairing-mode': server.pairing, '/rules': server.rules,
 					'/device/usbc-limit': { output: { watts: 30 } },
 					'/device/bypass-threshold': { volts: 12 }, '/device/schedules': [],
-					'/pairing/status': { stage: 'idle', devices: [] }
+					'/pairing/status': server.devicePairing
 				};
 				return Promise.resolve(clone(values[route]));
 			}
@@ -178,6 +179,7 @@ async function renderStatus(options = {}) {
 		}) },
 		wattlineRefresh: loadModule('refresh.js'),
 		wattlinePowerLoss: loadModule('power_loss.js'),
+		wattlinePairingProgress: loadModule('pairing_progress.js'),
 		E, _: (value) => value, document,
 		window: {
 			location: { hostname: 'router.test' }, addEventListener() {}, alert() {}, prompt() { return null; },
@@ -201,6 +203,52 @@ async function renderStatus(options = {}) {
 		resolveMutation: () => { assert.ok(resolveMutation, 'a mutation is pending'); resolveMutation(); },
 		refreshAdmin: async () => { await pollEntries.find((entry) => entry.seconds === 10).callback(); await settle(); }
 	};
+}
+
+async function pairingProgressTests() {
+	const pairing = loadModule('pairing_progress.js');
+	const status = {
+		stage: 'pairing', phase: 'confirming_bond', message: 'Confirming the replacement bond', elapsed_ms: 17000,
+		target: 'DC:04:5A:EB:72:2B', events: [
+			{ at: '2026-07-18T23:40:00Z', phase: 'preparing_adapter', message: 'Preparing the Bluetooth adapter' },
+			{ at: '2026-07-18T23:40:01Z', phase: 'clearing_stale_bond', message: "Clearing the router's stale pairing record" },
+			{ at: '2026-07-18T23:40:02Z', phase: 'locating_device', message: 'Locating Link-Power' },
+			{ at: '2026-07-18T23:40:03Z', phase: 'exchanging_pin', message: 'Exchanging the PIN' },
+			{ at: '2026-07-18T23:40:04Z', phase: 'confirming_bond', message: 'Confirming the replacement bond' }
+		]
+	};
+	const model = pairing.model(status);
+	assert.deepStrictEqual(model.steps.map((step) => step.label), [
+		'Preparing adapter', 'Clearing stale router bond', 'Locating device', 'Exchanging PIN',
+		'Confirming bond', 'Trusting device', 'Reconnecting', 'Verifying handshake', 'Saved'
+	]);
+	assert.deepStrictEqual(model.steps.map((step) => step.state), [
+		'complete', 'complete', 'complete', 'complete', 'active', 'pending', 'pending', 'pending', 'pending'
+	]);
+	assert.strictEqual(model.elapsed, '17s');
+	assert.strictEqual(JSON.stringify(model.events).includes('020555'), false);
+
+	const failedStatus = Object.assign({}, status, { stage: 'error', phase: 'failed', message: '', error: 'replacement bond rejected',
+		events: status.events.concat([{ phase: 'failed', message: 'replacement bond rejected' }]) });
+	assert.strictEqual(pairing.model(failedStatus).steps.find((step) => step.phase === 'confirming_bond').state, 'failed');
+
+	const rendered = await renderStatus({
+		telemetry: { connected: false }, devicePairing: failedStatus
+	});
+	for (const label of model.steps.map((step) => step.label))
+		assert.ok(textOf(rendered.dom).includes(label), 'renders pairing step ' + label);
+	const live = descendants(rendered.dom).find((node) => node.attributes['aria-live'] === 'polite' &&
+		textOf(node).includes('replacement bond rejected'));
+	assert.ok(live, 'current pairing failure is the only live progress message');
+	assert.ok(findElement(rendered.dom, 'summary', 'Technical details'));
+	const recover = findElement(rendered.dom, 'button', 'Clear stale pairing & retry');
+	assert.ok(recover, 'failed pairing offers explicit recovery');
+	recover.click();
+	await settle();
+	assert.strictEqual(rendered.confirmCalls(), 1);
+	assert.deepStrictEqual(rendered.requests[rendered.requests.length - 1], [
+		'POST', '/pairing/recover', { mac: status.target, pin: '020555' }
+	]);
 }
 
 async function transportTests() {
@@ -568,6 +616,7 @@ async function powerLossCardTests() {
 	await transportTests();
 	await qrTests();
 	await refreshTests();
+	await pairingProgressTests();
 	await powerLossCardTests();
 	validationTests();
 	console.log('LuCI behavior tests passed');

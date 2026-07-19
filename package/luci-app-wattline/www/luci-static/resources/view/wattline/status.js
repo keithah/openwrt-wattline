@@ -6,6 +6,7 @@
 'require wattline.qr as wattlineQR';
 'require wattline.refresh as wattlineRefresh';
 'require wattline.power_loss as wattlinePowerLoss';
+'require wattline.pairing_progress as wattlinePairingProgress';
 
 /* Wattline status view — styled after the PeakDo Link-Power web app, with
    user-facing copy from the LinkPower-2 manual (runtime, Bypass, USB-C
@@ -50,6 +51,11 @@ function css() {
 '.wl-token{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-top:1px solid #e8eaed}' +
 '.wl-qr{display:block;width:180px;height:180px;margin:12px auto;border:1px solid #d7dadd;border-radius:8px}' +
 '.wl-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}' +
+'.wl-pair-progress{margin-top:12px;border-top:1px solid #eef1f4;padding-top:8px}' +
+'.wl-pair-step{display:flex;align-items:center;font-size:13px;margin-top:5px;color:#9aa0a6}' +
+'.wl-pair-step.complete{color:#25b45f}.wl-pair-step.active{color:#f5a623}.wl-pair-step.failed{color:#e5533c}' +
+'.wl-pair-symbol{width:20px;font-weight:700}.wl-pair-details{margin-top:8px;font-size:12px;color:#59636b}' +
+'.wl-pair-log{margin-top:6px;font-family:monospace;white-space:normal}.wl-pair-log div{margin-top:4px}' +
 '@media(max-width:420px){.wl-grid{grid-template-columns:1fr}.wl-key{margin-top:5px}}';
 }
 
@@ -215,6 +221,7 @@ return view.extend({
 		}
 		function buildPairCard(p) {
 			var busy = p.stage === 'scanning' || p.stage === 'pairing';
+			var progress = wattlinePairingProgress.model(p);
 			var kids = [
 				E('div', { 'class': 'wl-cardhead' }, E('div', { 'class': 't' }, _('Pair Link-Power over BLE'))),
 				E('div', { 'class': 'wl-sub' }, _('Power on the Link-Power, keep it near the router, then scan. Make sure no phone or laptop app is connected to it.'))
@@ -260,9 +267,41 @@ return view.extend({
 					_('Default PIN is 020555 (see the manual). If the device shows a PIN on its screen, enter that instead.')));
 			}
 			if (pairMsg) kids.push(E('div', { style: 'color:' + RED + ';font-size:13px;margin-top:10px' }, pairMsg));
-			if (p.stage === 'pairing') kids.push(E('div', { style: 'color:' + ORANGE + ';font-size:13px;margin-top:10px' }, _('Pairing and verifying the connection… this usually takes under a minute.')));
+			if (p.phase || progress.events.length) {
+				kids.push(E('div', { 'class': 'wl-pair-progress' }, progress.steps.map(function (step) {
+					var symbol = step.state === 'complete' ? '✓' : step.state === 'active' ? '●' : step.state === 'failed' ? '!' : '○';
+					return E('div', { 'class': 'wl-pair-step ' + step.state }, [
+						E('span', { 'class': 'wl-pair-symbol' }, symbol), _(step.label)
+					]);
+				})));
+				kids.push(E('div', { 'aria-live': 'polite', 'aria-atomic': 'true',
+					style: 'color:' + (p.stage === 'error' ? RED : ORANGE) + ';font-size:13px;margin-top:9px' },
+					_(progress.message) + (progress.elapsed !== '0s' ? ' · ' + progress.elapsed : '')));
+				var log = progress.events.map(function (event) {
+					return E('div', {}, (event.at ? event.at + ' · ' : '') + event.phase + ' · ' + event.message);
+				});
+				if (p.error) log.push(E('div', { style: 'color:' + RED + ';margin-top:6px' }, p.error));
+				kids.push(E('details', { 'class': 'wl-pair-details' }, [
+					E('summary', {}, _('Technical details')), E('div', { 'class': 'wl-pair-log' }, log)
+				]));
+			}
 			if (p.stage === 'paired') kids.push(E('div', { style: 'color:' + GREEN + ';font-size:13px;margin-top:10px' }, _('Paired. Connecting…')));
 			if (p.stage === 'error') kids.push(E('div', { style: 'color:' + RED + ';font-size:13px;margin-top:10px' }, _('Pairing failed: ') + (p.error || _('unknown error'))));
+			if (p.stage === 'error' && (selMac || p.target)) {
+				var recover = E('button', { 'class': 'wl-btn', style: 'margin-top:10px' }, _('Clear stale pairing & retry'));
+				if (busy) recover.setAttribute('disabled', '');
+				recover.addEventListener('click', function () {
+					var mac = selMac || p.target;
+					var prompt = _("Clear this router's saved Bluetooth pairing and request a fresh PIN bond? ") +
+						_('Link-Power firmware does not expose an erase-all-pairings command.');
+					if (!window.confirm(prompt)) return;
+					pairMsg = '';
+					api(token, port, 'POST', '/pairing/recover', { mac: mac, pin: pin })
+						.then(function () { selMac = mac; pollN = 0; pairKey = null; refresh(); })
+						.catch(function (e) { pairMsg = e.message; redrawPairCard(); });
+				});
+				kids.push(recover);
+			}
 			return E('div', { 'class': 'wl-card' }, kids);
 		}
 		function sw(on, onA, offA) {
@@ -601,7 +640,8 @@ return view.extend({
 						api(token, port, 'GET', '/pairing/status').then(function (p) {
 							if (g !== gen) return; // body was rebuilt since this poll started
 							lastP = p;
-							var key = JSON.stringify([p.stage, p.error, p.devices, selMac, pairMsg]);
+							var key = JSON.stringify([p.stage, p.phase, p.message, p.error, p.target,
+								p.elapsed_ms, p.events, p.devices, selMac, pairMsg]);
 							if (key !== pairKey || !pairCard) { pairKey = key; pairCard = buildPairCard(p); }
 							body.appendChild(pairCard);
 						}).catch(function () {});
