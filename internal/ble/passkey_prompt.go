@@ -87,6 +87,7 @@ func (p *PasskeyPrompt) Wait(onWaiting func()) (string, error) {
 		return "", ErrPasskeyCanceled
 	}
 	p.waiting = true
+	p.consumed = true
 	p.terminal = false
 	p.deadline = time.Now().Add(p.duration)
 	p.result = make(chan promptOutcome, 1)
