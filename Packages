@@ -1,0 +1,62 @@
+Package: gl-app-wattline
+Version: 0.1.2
+Architecture: all
+Maintainer: Keith <keith@kodi.tv>
+Section: gl
+Priority: optional
+Depends: wattlined
+Description: GL.iNet admin-panel (oui) app for Wattline. Adds a native entry under Applications with live battery/port telemetry and DC/USB-C controls, backed by the wattlined REST API via an oui-httpd RPC shim. No separate login (uses the panel session).
+Filename: gl-app-wattline_0.1.2_all.ipk
+Size: 19748
+SHA256sum: fba474858d44f725cf6b86da247af0a055c7cd9da454f1493eac7f9a3ee72940
+
+Package: luci-app-wattline
+Version: 0.1.2
+Architecture: all
+Maintainer: Keith <keith@kodi.tv>
+Section: luci
+Priority: optional
+Depends: luci-base, wattlined
+Description: LuCI web UI for the Wattline Link-Power automation daemon.
+Filename: luci-app-wattline_0.1.2_all.ipk
+Size: 20751
+SHA256sum: e82526ee6c050d8c997a13b3532b28fc3de488a54e33685eb238a1a7a919029e
+
+Package: wattline-bt
+Version: 0.1.2
+Architecture: all
+Maintainer: Keith <keith@kodi.tv>
+Section: utils
+Priority: optional
+Depends: bluez-daemon, dbus, kmod-bluetooth
+Description: Bluetooth stack dependencies for wattlined (USB BLE dongle). kmod-bluetooth ships btusb.ko for CSR8510-class dongles; note the GL-X3000 kernel lacks the RTL/BCM/MTK btusb sub-drivers, so prefer a generic CSR8510 adapter.
+Filename: wattline-bt_0.1.2_all.ipk
+Size: 726
+SHA256sum: 1c1b3e72899a2442038a34cc44556f58ec99af5918f310c73bb5d73b6d186c92
+
+Package: wattline-rtl8761b
+Version: 0.1.2
+Architecture: aarch64_cortex-a53
+Maintainer: Keith Ahner
+Depends: wattline-bt
+Section: utils
+Priority: optional
+Description: Verified RTL8761B Bluetooth driver for GL-X3000 Linux 5.4.211
+ Installs a pinned GL.iNet ABI-compatible btusb/btrtl/btintel module set and
+ Realtek firmware for supported RTL8761B USB adapters. Refuses other kernels.
+Filename: wattline-rtl8761b_0.1.2_aarch64_cortex-a53.ipk
+Size: 163588
+SHA256sum: d6cb02a9f541c4342ddd103464dee94915bd0cca25a5ac175a71998789bccbfc
+
+Package: wattlined
+Version: 0.1.2
+Architecture: aarch64_cortex-a53
+Maintainer: Keith <keith@kodi.tv>
+Section: utils
+Priority: optional
+Depends: wattline-bt
+Description: PeakDo Link-Power BLE monitor + automation daemon for GL.iNet routers.
+Filename: wattlined_0.1.2_aarch64_cortex-a53.ipk
+Size: 3640525
+SHA256sum: dc4f9f4d9fe59c40c8e25d3a84e9594489bddd3620c58cebdec6136c5ae211a5
+

@@ -1,0 +1,21 @@
+<!doctype html><meta charset="utf-8"><title>openwrt-wattline opkg feed</title>
+<style>body{font:16px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;max-width:760px;margin:40px auto;padding:0 16px;color:#202124}code,pre{background:#f3f4f6;border-radius:6px}code{padding:1px 5px}pre{padding:12px;overflow:auto}a{color:#1a73e8}</style>
+<h1>openwrt-wattline &mdash; opkg feed</h1>
+<p>Monitor and control a PeakDo Link-Power power station from an OpenWrt / GL.iNet
+router over Bluetooth LE. Project:
+<a href="https://github.com/keithah/openwrt-wattline">github.com/keithah/openwrt-wattline</a>.</p>
+<h2>Register this feed on the router</h2>
+<pre>echo 'src/gz wattline https://keithah.github.io/openwrt-wattline' &gt;&gt; /etc/opkg/customfeeds.conf
+opkg update
+opkg install wattlined luci-app-wattline gl-app-wattline   # first time (pulls deps)
+opkg upgrade wattlined luci-app-wattline gl-app-wattline    # thereafter</pre>
+<p>Bluetooth needs a USB BLE dongle on most GL routers &mdash; see the project README.</p>
+<h2>Packages</h2>
+<ul>
+<li><a href="Packages">Packages</a> / <a href="Packages.gz">Packages.gz</a> (feed index)</li>
+<li><a href="gl-app-wattline_0.1.2_all.ipk">gl-app-wattline_0.1.2_all.ipk</a></li>
+<li><a href="luci-app-wattline_0.1.2_all.ipk">luci-app-wattline_0.1.2_all.ipk</a></li>
+<li><a href="wattline-bt_0.1.2_all.ipk">wattline-bt_0.1.2_all.ipk</a></li>
+<li><a href="wattline-rtl8761b_0.1.2_aarch64_cortex-a53.ipk">wattline-rtl8761b_0.1.2_aarch64_cortex-a53.ipk</a></li>
+<li><a href="wattlined_0.1.2_aarch64_cortex-a53.ipk">wattlined_0.1.2_aarch64_cortex-a53.ipk</a></li>
+</ul>
