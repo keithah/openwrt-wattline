@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/keithah/openwrt-wattline/internal/ble"
 )
@@ -13,6 +14,7 @@ var (
 	// The Link-Power PIN is a number 0–999999 (API.md BLE_PIN). Rejecting
 	// anything else also keeps arbitrary strings out of the UCI config file.
 	pinRe = regexp.MustCompile(`^[0-9]{0,6}$`)
+	pin6Re = regexp.MustCompile(`^[0-9]{6}$`)
 )
 
 // pairing guards the pairing endpoints: 503 when the platform has no BlueZ
@@ -33,6 +35,9 @@ func pairingErr(w http.ResponseWriter, err error) {
 		writeAPIError(w, "operation_in_progress")
 		return
 	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "pin not requested") { writeAPIError(w, "pairing_pin_not_requested"); return }
+	if strings.Contains(msg, "unsupported") { writeAPIError(w, "capability_unsupported"); return }
 	writeAPIError(w, "ble_operation_failed")
 }
 
@@ -62,6 +67,28 @@ func (s *server) pairingPair(w http.ResponseWriter, r *http.Request, p *ble.Pair
 
 func (s *server) pairingRecover(w http.ResponseWriter, r *http.Request, p *ble.Pairing) {
 	s.pairingStart(w, r, p, true)
+}
+
+func (s *server) pairingRequestCode(w http.ResponseWriter, r *http.Request, p *ble.Pairing) {
+	var req struct { MAC string `json:"mac"`; Recover bool `json:"recover"` }
+	if err := decodeJSON(r, &req); err != nil || !macRe.MatchString(req.MAC) {
+		writeAPIError(w, "invalid_request"); return
+	}
+	if err := p.StartInteractive(req.MAC, req.Recover); err != nil { pairingErr(w, err); return }
+	writeJSON(w, http.StatusAccepted, map[string]string{"status":"pairing"})
+}
+
+func (s *server) pairingSubmitPIN(w http.ResponseWriter, r *http.Request, p *ble.Pairing) {
+	var req struct { PIN string `json:"pin"` }
+	if err := decodeJSON(r, &req); err != nil || !pin6Re.MatchString(req.PIN) { writeAPIError(w, "invalid_request"); return }
+	if err := p.SubmitPIN(req.PIN); err != nil { pairingErr(w, err); return }
+	writeJSON(w, http.StatusAccepted, map[string]string{"status":"pin_submitted"})
+}
+
+func (s *server) pairingCancel(w http.ResponseWriter, r *http.Request, p *ble.Pairing) {
+	if requireNoBody(r) != nil { writeAPIError(w, "invalid_request"); return }
+	if err := p.Cancel(); err != nil { pairingErr(w, err); return }
+	writeJSON(w, http.StatusOK, map[string]string{"status":"canceled"})
 }
 
 func (s *server) pairingStart(w http.ResponseWriter, r *http.Request, p *ble.Pairing, recover bool) {
