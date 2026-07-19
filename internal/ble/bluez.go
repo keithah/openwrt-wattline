@@ -71,6 +71,34 @@ func (p *bluezPairer) deviceObj(mac string) dbus.BusObject {
 	return p.conn.Object("org.bluez", p.devicePath(mac))
 }
 
+func shouldRemoveBeforePair(recover, paired bool) bool { return recover || paired }
+
+func bondConfirmed(value any) bool {
+	paired, ok := value.(bool)
+	return ok && paired
+}
+
+func bluezPairMessage(phase PairingPhase) string {
+	switch phase {
+	case PhaseClearingStaleBond:
+		return "Clearing the router's stale pairing record"
+	case PhaseLocatingDevice:
+		return "Locating Link-Power"
+	case PhaseExchangingPIN:
+		return "Exchanging the pairing PIN"
+	case PhaseConfirmingBond:
+		return "Confirming the Bluetooth bond"
+	default:
+		return ""
+	}
+}
+
+func reportBlueZPair(report PairProgress, phase PairingPhase) {
+	if report != nil {
+		report(phase, bluezPairMessage(phase))
+	}
+}
+
 func discoveryInProgress(err error) bool {
 	if err == nil {
 		return false
@@ -177,26 +205,41 @@ func (p *bluezPairer) discoverUntilPresent(mac string, timeout time.Duration) er
 	return fmt.Errorf("device %s not found during discovery (is it advertising?)", mac)
 }
 
-// Pair bonds with mac. Any stale bond is removed first so we always attempt a
-// fresh key exchange. The first Pair after a remove has been observed to hang
-// in BlueZ; a CancelPairing + immediate retry recovers it (continue.md).
-func (p *bluezPairer) Pair(mac string, _ bool, _ PairProgress) error {
+// Pair bonds with mac. Recovery always removes the router's BlueZ object;
+// ordinary pairing removes only a locally confirmed bond. The first Pair after
+// a remove has been observed to hang, so CancelPairing + retry is retained.
+func (p *bluezPairer) Pair(mac string, recover bool, report PairProgress) error {
 	dev := p.deviceObj(mac)
-	if paired, err := dev.GetProperty("org.bluez.Device1.Paired"); err == nil {
-		if b, ok := paired.Value().(bool); ok && b {
-			if err := p.Unpair(mac); err != nil {
-				return fmt.Errorf("remove stale bond: %w", err)
-			}
+	paired := false
+	if property, err := dev.GetProperty("org.bluez.Device1.Paired"); err == nil {
+		paired = bondConfirmed(property.Value())
+	}
+	if shouldRemoveBeforePair(recover, paired) {
+		if recover {
+			reportBlueZPair(report, PhaseClearingStaleBond)
+		}
+		if err := p.Unpair(mac); err != nil {
+			return fmt.Errorf("remove stale bond: %w", err)
 		}
 	}
+	reportBlueZPair(report, PhaseLocatingDevice)
 	if err := p.discoverUntilPresent(mac, 20*time.Second); err != nil {
 		return err
 	}
+	reportBlueZPair(report, PhaseExchangingPIN)
 	if err := p.pairOnce(mac, 15*time.Second); err != nil {
 		dev.Call("org.bluez.Device1.CancelPairing", 0)
 		if err2 := p.pairOnce(mac, 30*time.Second); err2 != nil {
 			return fmt.Errorf("pair failed (retry after cancel also failed): %w", err2)
 		}
+	}
+	reportBlueZPair(report, PhaseConfirmingBond)
+	pairedProperty, err := p.deviceObj(mac).GetProperty("org.bluez.Device1.Paired")
+	if err != nil {
+		return fmt.Errorf("confirm Bluetooth bond: %w", err)
+	}
+	if !bondConfirmed(pairedProperty.Value()) {
+		return errors.New("BlueZ did not confirm Paired: yes after the PIN exchange")
 	}
 	return nil
 }
@@ -206,7 +249,8 @@ func (p *bluezPairer) pairOnce(mac string, timeout time.Duration) error {
 	defer cancel()
 	call := p.deviceObj(mac).CallWithContext(ctx, "org.bluez.Device1.Pair", 0)
 	if call.Err != nil {
-		// AlreadyExists means BlueZ considers it paired already.
+		// Confirmation reads Device1.Paired after this call; AlreadyExists alone
+		// is never accepted as proof of a stored bond.
 		if strings.Contains(call.Err.Error(), "AlreadyExists") {
 			return nil
 		}
