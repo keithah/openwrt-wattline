@@ -292,12 +292,9 @@ func (p *Pairing) startPair(mac, pin string, recover bool, interactive bool) err
 			resumed = true
 		}
 		defer resume()
-		if interactive && p.d.Prompt != nil {
-			go func() { _, _ = p.d.Prompt.Wait(func(){ p.setPhase(PhaseAwaitingPIN, "Waiting for pairing PIN") }) }()
-			time.Sleep(time.Millisecond)
-		}
+		if interactive && p.d.Prompt != nil { p.d.Prompt.Activate() }
 		err := p.d.Ops.Pair(mac, recover, p.setPhase)
-		if interactive && p.d.Prompt != nil { p.d.Prompt.Cancel() }
+		if interactive && p.d.Prompt != nil { p.d.Prompt.Deactivate() }
 		if err == nil {
 			p.setPhase(PhaseTrustingDevice, "Trusting Link-Power on this router")
 			err = p.d.Ops.Trust(mac)

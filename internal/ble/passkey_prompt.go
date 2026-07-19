@@ -20,9 +20,13 @@ type PasskeyPrompt struct {
 	waiting  bool
 	terminal bool
 	canceled bool
+	active bool
 	result   chan promptOutcome
 	deadline time.Time
 }
+func (p *PasskeyPrompt) Activate() { p.mu.Lock(); p.active = true; p.mu.Unlock() }
+func (p *PasskeyPrompt) Deactivate() { p.mu.Lock(); p.active = false; p.mu.Unlock(); p.Cancel() }
+func (p *PasskeyPrompt) Active() bool { p.mu.Lock(); defer p.mu.Unlock(); return p.active }
 
 type promptOutcome struct {
 	pin string

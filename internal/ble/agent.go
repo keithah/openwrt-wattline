@@ -14,11 +14,11 @@ import (
 type pairingAgent struct{ prompt *PasskeyPrompt }
 
 func (a *pairingAgent) RequestPinCode(device dbus.ObjectPath) (string, *dbus.Error) {
-	if a.prompt != nil { pin, err := a.prompt.Wait(nil); if err != nil { return "", dbus.NewError("org.bluez.Error.Rejected", []interface{}{err.Error()}) }; return pin, nil }
+	if a.prompt != nil && a.prompt.Active() { pin, err := a.prompt.Wait(nil); if err != nil { return "", dbus.NewError("org.bluez.Error.Rejected", []interface{}{err.Error()}) }; return pin, nil }
 	return currentAgentPIN(), nil
 }
 func (a *pairingAgent) RequestPasskey(device dbus.ObjectPath) (uint32, *dbus.Error) {
-	if a.prompt != nil { pin, err := a.prompt.Wait(nil); if err != nil { return 0, dbus.NewError("org.bluez.Error.Rejected", []interface{}{err.Error()}) }; return pinToPasskey(pin), nil }
+	if a.prompt != nil && a.prompt.Active() { pin, err := a.prompt.Wait(nil); if err != nil { return 0, dbus.NewError("org.bluez.Error.Rejected", []interface{}{err.Error()}) }; return pinToPasskey(pin), nil }
 	return pinToPasskey(currentAgentPIN()), nil
 }
 func (a *pairingAgent) DisplayPinCode(device dbus.ObjectPath, pincode string) *dbus.Error {
