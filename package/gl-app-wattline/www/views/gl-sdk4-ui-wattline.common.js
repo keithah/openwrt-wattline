@@ -272,7 +272,7 @@
       },
       pscan: function () { var self = this;
         this.uiErr = '';
-        this.post('/pairing/scan').then(function () { self.ptick = 0; self.tick(); })
+        this.post('/pairing/scan').then(function () { self.selMac = ''; self.ptick = 0; self.tick(); })
           .catch(function (e) { self.uiErr = e.message; });
       },
       ppair: function () { var self = this;
@@ -592,7 +592,7 @@
             el('div', { marginRight: '10px' }, [ sub('PIN'),
               h('input', { style: { width: '90px', padding: '7px 9px', fontSize: '14px', border: '1px solid #d0d4d9',
                 borderRadius: '8px', marginTop: '2px' },
-                attrs: { maxlength: 6, inputmode: 'numeric' },
+                attrs: { maxlength: 6, inputmode: 'numeric', 'aria-label': 'PIN' },
                 domProps: { value: self.pin },
                 on: { input: function (e) {
                   var v = e.target.value.replace(/[^0-9]/g, '').slice(0, 6);

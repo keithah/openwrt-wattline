@@ -231,8 +231,8 @@ return view.extend({
 			if (busy) scanBtn.setAttribute('disabled', '');
 			scanBtn.addEventListener('click', function () {
 				pairMsg = '';
-				api(token, port, 'POST', '/pairing/scan')
-					.then(function () { pollN = 0; pairKey = null; refresh(); })
+			api(token, port, 'POST', '/pairing/scan')
+					.then(function () { selMac = ''; pollN = 0; pairKey = null; refresh(); })
 					.catch(function (e) { pairMsg = e.message; redrawPairCard(); });
 			});
 			kids.push(scanBtn);
@@ -252,7 +252,7 @@ return view.extend({
 				kids.push(E('div', { style: 'margin-top:12px' }, request));
 			}
 			if (selMac && (p.phase === 'awaiting_pin' || p.phase === 'pin_required')) {
-				var pinInput = E('input', { 'class': 'wl-pin', maxlength: 6, value: pin, inputmode: 'numeric' });
+				var pinInput = E('input', { 'class': 'wl-pin', maxlength: 6, value: pin, inputmode: 'numeric', 'aria-label': _('PIN') });
 				var deadline = p.pin_deadline ? Math.max(0, Math.ceil((new Date(p.pin_deadline).getTime() - Date.now()) / 1000)) : null;
 				kids.push(E('div', { 'aria-live': 'polite', 'class': 'wl-note' }, deadline == null ? _('Enter the code shown on the device.') : _('Code expires in ') + deadline + _(' seconds.')));
 				pinInput.addEventListener('input', function () {
@@ -651,7 +651,7 @@ return view.extend({
 							if (g !== gen) return; // body was rebuilt since this poll started
 							lastP = p;
 							var key = JSON.stringify([p.stage, p.phase, p.message, p.error, p.target,
-								p.elapsed_ms, p.events, p.devices, selMac, pairMsg]);
+								p.elapsed_ms, p.pin_deadline, p.events, p.devices, selMac, pairMsg]);
 							if (key !== pairKey || !pairCard) { pairKey = key; pairCard = buildPairCard(p); }
 							body.appendChild(pairCard);
 						}).catch(function () {});
