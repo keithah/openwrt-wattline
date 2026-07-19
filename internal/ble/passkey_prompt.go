@@ -45,6 +45,7 @@ func (p *PasskeyPrompt) Deactivate() {
 	p.active = false
 	if p.waiting && !p.consumed {
 		p.waiting = false
+		p.canceled = true
 		p.deadline = time.Time{}
 		p.result = nil
 		p.terminal = true
