@@ -137,6 +137,52 @@
       return { kind: 'inactive', remainingSeconds: null };
     return { kind: 'holding', remainingSeconds: Math.max(0, Math.round(total - elapsed)) };
   }
+  function pairingPhases(status) {
+    var events = Array.isArray(status && status.events) ? status.events : [];
+    var recovering = status && status.phase === 'clearing_stale_bond' || events.some(function (event) {
+      return event && event.phase === 'clearing_stale_bond';
+    });
+    var phases = [
+      { phase: 'preparing_adapter', label: 'Preparing adapter' },
+      { phase: 'locating_device', label: 'Locating device' },
+      { phase: 'exchanging_pin', label: 'Exchanging PIN' },
+      { phase: 'confirming_bond', label: 'Confirming bond' },
+      { phase: 'trusting_device', label: 'Trusting device' },
+      { phase: 'reconnecting', label: 'Reconnecting' },
+      { phase: 'verifying_handshake', label: 'Verifying handshake' },
+      { phase: 'complete', label: 'Saved' }
+    ];
+    if (recovering) phases.splice(1, 0, { phase: 'clearing_stale_bond', label: 'Clearing stale router bond' });
+    return phases;
+  }
+  function pairingProgressModel(status) {
+    status = status || {};
+    var events = Array.isArray(status.events) ? status.events.map(function (event) {
+      return { at: event.at || '', phase: event.phase || '', message: event.message || '' };
+    }) : [];
+    var phases = pairingPhases(status), current = status.phase || '';
+    if (current === 'saving_pairing') current = 'complete';
+    if (current === 'failed') {
+      for (var i = events.length - 1; i >= 0; i--) {
+        if (events[i].phase && events[i].phase !== 'failed') {
+          current = events[i].phase === 'saving_pairing' ? 'complete' : events[i].phase;
+          break;
+        }
+      }
+    }
+    var currentIndex = phases.map(function (step) { return step.phase; }).indexOf(current);
+    var terminal = status.stage === 'paired' && status.phase === 'complete';
+    var failed = status.stage === 'error';
+    var steps = phases.map(function (step, index) {
+      var state = 'pending';
+      if (terminal || index < currentIndex) state = 'complete';
+      else if (index === currentIndex) state = failed ? 'failed' : 'active';
+      return { phase: step.phase, label: step.label, state: state };
+    });
+    var elapsedSeconds = Math.max(0, Math.floor(Number(status.elapsed_ms) / 1000) || 0);
+    var elapsed = elapsedSeconds >= 60 ? Math.floor(elapsedSeconds / 60) + 'm ' + (elapsedSeconds % 60) + 's' : elapsedSeconds + 's';
+    return { steps: steps, message: status.message || status.error || '', elapsed: elapsed, events: events };
+  }
   function advancedCapabilities(settings, device) {
     var enabled = !!(settings && settings.advanced), available = device && device.available || {};
     var features = device && device.features || {};
@@ -233,6 +279,17 @@
         this.uiErr = '';
         this.post('/pairing/pair', { mac: this.selMac, pin: this.pin }).then(function () { self.ptick = 0; self.tick(); })
           .catch(function (e) { self.uiErr = e.message; });
+      },
+      precover: function () { var self = this;
+        var mac = this.selMac || this.pairing && this.pairing.target;
+        if (!mac) return Promise.resolve(null);
+        var prompt = "Clear this router's saved Bluetooth pairing and request a fresh PIN bond? " +
+          'Link-Power firmware does not expose an erase-all-pairings command.';
+        if (!window.confirm(prompt)) return Promise.resolve(null);
+        this.uiErr = '';
+        return this.post('/pairing/recover', { mac: mac, pin: this.pin }).then(function () {
+          self.selMac = mac; self.ptick = 0; self.tick();
+        }).catch(function (e) { self.uiErr = e.message; });
       },
       act: function (a) { var self = this, operation;
         if (this.isPending(a)) return;
@@ -535,9 +592,31 @@
             'Default PIN is 020555 (see the manual). If the device shows a PIN on its screen, enter that instead.'));
         }
         if (self.uiErr) pairBits.push(el('div', { color: RED, fontSize: '13px', marginTop: '10px' }, self.uiErr));
-        if (p.stage === 'pairing') pairBits.push(el('div', { color: ORANGE, fontSize: '13px', marginTop: '10px' }, 'Pairing and verifying the connection… this usually takes under a minute.'));
+        var progress = pairingProgressModel(p);
+        if (p.phase || progress.events.length) {
+          var progressRows = progress.steps.map(function (step) {
+            var symbol = step.state === 'complete' ? '✓' : step.state === 'active' ? '●' : step.state === 'failed' ? '!' : '○';
+            var color = step.state === 'complete' ? GREEN : step.state === 'active' ? ORANGE : step.state === 'failed' ? RED : GREY;
+            return el('div', { display: 'flex', alignItems: 'center', color: color, fontSize: '13px', marginTop: '5px' }, [
+              el('span', { width: '20px', fontWeight: '700' }, symbol), step.label
+            ]);
+          });
+          pairBits.push(el('div', { marginTop: '12px', borderTop: '1px solid #eef1f4', paddingTop: '8px' }, progressRows));
+          pairBits.push(h('div', { attrs: { 'aria-live': 'polite', 'aria-atomic': 'true' },
+            style: { color: p.stage === 'error' ? RED : ORANGE, fontSize: '13px', marginTop: '9px' } },
+            progress.message + (progress.elapsed !== '0s' ? ' · ' + progress.elapsed : '')));
+          pairBits.push(h('details', { style: { marginTop: '8px', fontSize: '12px', color: '#59636b' } }, [
+            h('summary', { style: { cursor: 'pointer' } }, 'Technical details'),
+            el('div', { marginTop: '6px', fontFamily: 'monospace', whiteSpace: 'normal' }, progress.events.map(function (event) {
+              return el('div', { marginTop: '4px' }, (event.at ? event.at + ' · ' : '') + event.phase + ' · ' + event.message);
+            }).concat(p.error ? [el('div', { color: RED, marginTop: '6px' }, p.error)] : []))
+          ]));
+        }
         if (p.stage === 'paired') pairBits.push(el('div', { color: GREEN, fontSize: '13px', marginTop: '10px' }, 'Paired. Connecting…'));
         if (p.stage === 'error') pairBits.push(el('div', { color: RED, fontSize: '13px', marginTop: '10px' }, 'Pairing failed: ' + (p.error || 'unknown error')));
+        if (p.stage === 'error' && (self.selMac || p.target)) pairBits.push(el('div', { marginTop: '10px' }, [
+          btn('Clear stale pairing & retry', function () { self.precover(); }, false, busy)
+        ]));
         offlineCards = [
           card([el('div', { textAlign: 'center', padding: '10px 10px 14px', color: GREY }, [
             el('div', { fontSize: '15px', color: '#3c4043', marginBottom: '6px' }, 'No power bank connected'),

@@ -13,13 +13,21 @@ need() {
 }
 
 # Canonical API surface and deliberately separate enrollment flows.
-for route in /device /telemetry /pairing/status /pairing/scan /pairing/pair \
+for route in /device /telemetry /pairing/status /pairing/scan /pairing/pair /pairing/recover \
 	/pairing-mode /pairing-mode/qr.png /tokens /settings /tls/rotate \
 	/device/dc /device/usbc/output /device/timers /device/restart \
 	/device/shutdown /device/ota/enter /device/advanced/running-mode \
 	/device/advanced/ble-pin /rules /status; do
 	need "$VIEW" "'$route'" "canonical route $route"
 done
+for label in 'Preparing adapter' 'Clearing stale router bond' 'Locating device' \
+	'Exchanging PIN' 'Confirming bond' 'Trusting device' 'Reconnecting' \
+	'Verifying handshake' 'Saved' 'Technical details' 'Clear stale pairing & retry'; do
+	need "$VIEW" "$label" "pairing progress $label"
+done
+need "$VIEW" 'aria-live' 'current pairing phase live region'
+need "$VIEW" "Clear this router's saved Bluetooth pairing and request a fresh PIN bond" 'honest stale-bond recovery confirmation'
+need "$VIEW" 'does not expose an erase-all-pairings command' 'device-side recovery limitation'
 for label in 'Pair Link-Power over BLE' 'Pair an API client' 'Device identity' \
 	'Hardware / variant' 'Application firmware' 'OTA bootloader' 'Device ID / MAC' \
 	'CID' 'Capabilities' 'Pending commands' 'API clients' 'Revoke' 'MagicDNS' \
@@ -168,6 +176,56 @@ function powerLossHelpers() {
 	const end = source.indexOf('  function advancedCapabilities', start);
 	assert(start >= 0 && end > start, 'power-loss helpers remain inspectable in the actual GL bundle');
 	return Function(source.slice(start, end) + '\nreturn { classify: powerLossClassify, payload: powerLossPayload, minutes: powerLossMinutes, display: powerLossDisplay };')();
+}
+
+function pairingHelpers() {
+	const start = source.indexOf('  function pairingPhases');
+	const end = source.indexOf('  function advancedCapabilities', start);
+	assert(start >= 0 && end > start, 'pairing progress helpers remain inspectable in the actual GL bundle');
+	return Function(source.slice(start, end) + '\nreturn { model: pairingProgressModel };')();
+}
+
+function pairingHelperTests() {
+	const model = pairingHelpers().model({
+		stage: 'pairing', phase: 'confirming_bond', message: 'Confirming the replacement bond', elapsed_ms: 17000,
+		events: [
+			{ at: '2026-07-18T23:40:00Z', phase: 'preparing_adapter', message: 'Preparing the Bluetooth adapter' },
+			{ at: '2026-07-18T23:40:01Z', phase: 'clearing_stale_bond', message: "Clearing the router's stale pairing record" },
+			{ at: '2026-07-18T23:40:02Z', phase: 'locating_device', message: 'Locating Link-Power' },
+			{ at: '2026-07-18T23:40:03Z', phase: 'exchanging_pin', message: 'Exchanging the PIN' },
+			{ at: '2026-07-18T23:40:04Z', phase: 'confirming_bond', message: 'Confirming the replacement bond' }
+		]
+	});
+	assert.deepStrictEqual(model.steps.map((step) => step.label), [
+		'Preparing adapter', 'Clearing stale router bond', 'Locating device', 'Exchanging PIN',
+		'Confirming bond', 'Trusting device', 'Reconnecting', 'Verifying handshake', 'Saved'
+	]);
+	assert.deepStrictEqual(model.steps.map((step) => step.state), [
+		'complete', 'complete', 'complete', 'complete', 'active', 'pending', 'pending', 'pending', 'pending'
+	]);
+	assert.strictEqual(model.message, 'Confirming the replacement bond');
+	assert.strictEqual(model.elapsed, '17s');
+	assert.strictEqual(JSON.stringify(model.events).includes('020555'), false, 'technical event model never synthesizes the PIN');
+
+	const failed = pairingHelpers().model({ stage: 'error', phase: 'failed', error: 'replacement bond rejected',
+		events: [{ phase: 'confirming_bond', message: 'Confirming bond' }, { phase: 'failed', message: 'replacement bond rejected' }] });
+	assert.strictEqual(failed.steps.find((step) => step.phase === 'confirming_bond').state, 'failed');
+	assert.strictEqual(failed.message, 'replacement bond rejected');
+	assert.strictEqual(pairingHelpers().model({ stage: 'paired', phase: 'complete', events: [] }).steps.at(-1).state, 'complete');
+}
+
+async function pairingRecoveryComponentTest() {
+	let prompt = '';
+	const environment = { fetch: () => {}, window: { location: { hostname: 'router.lan' }, confirm: (message) => {
+		prompt = message; return true;
+	} }, document: { activeElement: null }, URL: { createObjectURL() {}, revokeObjectURL() {} } };
+	const methods = componentMethods(environment), calls = [];
+	const context = { selMac: '', pairing: { target: 'DC:04:5A:EB:72:2B' }, pin: '020555', uiErr: '', ptick: 9,
+		post: async (path, body) => { calls.push([path, body]); }, tick() {} };
+	await methods.precover.call(context);
+	assert.deepStrictEqual(calls, [['/pairing/recover', { mac: 'DC:04:5A:EB:72:2B', pin: '020555' }]]);
+	assert.match(prompt, /this router's saved Bluetooth pairing/);
+	assert.match(prompt, /does not expose an erase-all-pairings command/);
 }
 
 function powerLossHelperTests() {
@@ -479,6 +537,8 @@ function timerPresentationTests() {
 (async () => {
 	await transportTests();
 	await lifecycleTests();
+	pairingHelperTests();
+	await pairingRecoveryComponentTest();
 	await actionAndTimerTests();
 	powerLossHelperTests();
 	await powerLossComponentTests();
