@@ -260,6 +260,16 @@ func preferredLANHost(hostname string) string {
 	return hostname + ".local"
 }
 
+func pairingConnectionProgress(snapshot state.Snapshot) (ble.PairingPhase, string, bool) {
+	if snapshot.Connected && snapshot.Connection != nil && snapshot.Connection.Phase == state.ConnectionReady {
+		return "", "", true
+	}
+	if snapshot.Connection != nil && snapshot.Connection.Phase == state.ConnectionHandshaking {
+		return ble.PhaseVerifyingHandshake, "Verifying the protected Wattline handshake", false
+	}
+	return ble.PhaseReconnecting, "Reconnecting to Link-Power", false
+}
+
 // tickOnce evaluates rules and dispatches any firings against the current device.
 func tickOnce(eng *rules.Engine, store *state.Store, dev func() actions.Device,
 	exec *actions.Executor, now time.Time) {
@@ -371,11 +381,17 @@ func run(cfgPath string, stop <-chan struct{}) error {
 		// A pair only counts once the connector reconnects and survives the
 		// protected handshake (continue.md: transient Paired: yes is not
 		// success). The connector retries every 2s; give it a minute.
-		WaitConnected: func() bool {
+		WaitConnected: func(report ble.PairProgress) bool {
 			deadline := time.Now().Add(60 * time.Second)
+			var last ble.PairingPhase
 			for time.Now().Before(deadline) {
-				if store.Snapshot().Connected {
+				phase, message, done := pairingConnectionProgress(store.Snapshot())
+				if done {
 					return true
+				}
+				if phase != last {
+					report(phase, message)
+					last = phase
 				}
 				time.Sleep(500 * time.Millisecond)
 			}

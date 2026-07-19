@@ -19,7 +19,7 @@ func TestContractDocumentation(t *testing.T) {
 	}
 	doc := string(data)
 
-	if got, want := len(routeDescriptors), 56; got != want {
+	if got, want := len(routeDescriptors), 57; got != want {
 		t.Fatalf("registered route count = %d, want %d; update the contract inventory deliberately", got, want)
 	}
 	seen := make(map[string]struct{}, len(routeDescriptors))

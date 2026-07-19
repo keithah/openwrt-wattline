@@ -11,6 +11,7 @@ import (
 
 	"github.com/keithah/openwrt-wattline/internal/actions"
 	"github.com/keithah/openwrt-wattline/internal/auth"
+	"github.com/keithah/openwrt-wattline/internal/ble"
 	"github.com/keithah/openwrt-wattline/internal/config"
 	"github.com/keithah/openwrt-wattline/internal/discovery"
 	"github.com/keithah/openwrt-wattline/internal/proto"
@@ -101,6 +102,28 @@ func TestProductionResolversUseConnectorAuthoritativeSession(t *testing.T) {
 	wiring := string(source)
 	if strings.Contains(wiring, "sess  *ble.Session") || !strings.Contains(wiring, "return conn.Session()") {
 		t.Fatal("daemon controls are not resolved through the connector's authoritative live session")
+	}
+}
+
+func TestPairingConnectionProgress(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		snapshot  state.Snapshot
+		wantPhase ble.PairingPhase
+		wantDone  bool
+	}{
+		{name: "no connection state", snapshot: state.Snapshot{}, wantPhase: ble.PhaseReconnecting},
+		{name: "connecting", snapshot: state.Snapshot{Connection: &state.Connection{Phase: state.ConnectionConnecting}}, wantPhase: ble.PhaseReconnecting},
+		{name: "handshaking", snapshot: state.Snapshot{Connection: &state.Connection{Phase: state.ConnectionHandshaking}}, wantPhase: ble.PhaseVerifyingHandshake},
+		{name: "ready but disconnected", snapshot: state.Snapshot{Connection: &state.Connection{Phase: state.ConnectionReady}}, wantPhase: ble.PhaseReconnecting},
+		{name: "ready", snapshot: state.Snapshot{Connected: true, Connection: &state.Connection{Phase: state.ConnectionReady}}, wantDone: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			phase, message, done := pairingConnectionProgress(tt.snapshot)
+			if phase != tt.wantPhase || done != tt.wantDone || (!done && message == "") {
+				t.Fatalf("progress = (%q, %q, %v), want phase=%q done=%v", phase, message, done, tt.wantPhase, tt.wantDone)
+			}
+		})
 	}
 }
 

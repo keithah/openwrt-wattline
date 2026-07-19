@@ -124,6 +124,9 @@ func pairingScanRoute(s *server, w http.ResponseWriter, r *http.Request) {
 func pairingPairRoute(s *server, w http.ResponseWriter, r *http.Request) {
 	s.pairing(s.pairingPair)(w, r)
 }
+func pairingRecoverRoute(s *server, w http.ResponseWriter, r *http.Request) {
+	s.pairing(s.pairingRecover)(w, r)
+}
 func pairingUnpairRoute(s *server, w http.ResponseWriter, r *http.Request) {
 	s.pairing(s.pairingUnpair)(w, r)
 }
@@ -169,6 +172,7 @@ var routeDescriptors = []routeDescriptor{
 	{"GET", "/api/v1/pairing/status", pairingStatusRoute, clientSettingsRoute, true},
 	{"POST", "/api/v1/pairing/scan", pairingScanRoute, clientSettingsRoute, true},
 	{"POST", "/api/v1/pairing/pair", pairingPairRoute, clientSettingsRoute, true},
+	{"POST", "/api/v1/pairing/recover", pairingRecoverRoute, clientSettingsRoute, true},
 	{"DELETE", "/api/v1/pairing/device/{mac}", pairingUnpairRoute, clientSettingsRoute, true},
 	{"GET", "/api/v1/device/usbc-limit", (*server).getUSBCLimit, clientRoute, true},
 	{"POST", "/api/v1/device/usbc-limit", (*server).setUSBCLimit, clientRoute, true},

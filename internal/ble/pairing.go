@@ -70,8 +70,8 @@ type PairingStatus struct {
 	Message   string         `json:"message,omitempty"`
 	Error     string         `json:"error,omitempty"`
 	Target    string         `json:"target,omitempty"`
-	StartedAt time.Time      `json:"started_at,omitempty"`
-	UpdatedAt time.Time      `json:"updated_at,omitempty"`
+	StartedAt *time.Time     `json:"started_at,omitempty"`
+	UpdatedAt *time.Time     `json:"updated_at,omitempty"`
 	ElapsedMS int64          `json:"elapsed_ms,omitempty"`
 	Events    []PairingEvent `json:"events,omitempty"`
 	Devices   []Found        `json:"devices"`
@@ -142,9 +142,14 @@ func (p *Pairing) Status() PairingStatus {
 	if elapsed < 0 || p.started.IsZero() {
 		elapsed = 0
 	}
+	var startedAt, updatedAt *time.Time
+	if !p.started.IsZero() {
+		started, updated := p.started, p.updated
+		startedAt, updatedAt = &started, &updated
+	}
 	return PairingStatus{
 		Stage: p.stage, Phase: p.phase, Message: p.message, Error: p.err,
-		Target: p.target, StartedAt: p.started, UpdatedAt: p.updated,
+		Target: p.target, StartedAt: startedAt, UpdatedAt: updatedAt,
 		ElapsedMS: elapsed.Milliseconds(),
 		Events:    append([]PairingEvent(nil), p.events...),
 		Devices:   append([]Found(nil), p.devices...),

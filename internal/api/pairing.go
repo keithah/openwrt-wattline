@@ -57,6 +57,14 @@ func (s *server) pairingScan(w http.ResponseWriter, r *http.Request, p *ble.Pair
 }
 
 func (s *server) pairingPair(w http.ResponseWriter, r *http.Request, p *ble.Pairing) {
+	s.pairingStart(w, r, p, false)
+}
+
+func (s *server) pairingRecover(w http.ResponseWriter, r *http.Request, p *ble.Pairing) {
+	s.pairingStart(w, r, p, true)
+}
+
+func (s *server) pairingStart(w http.ResponseWriter, r *http.Request, p *ble.Pairing, recover bool) {
 	var req struct {
 		MAC string `json:"mac"`
 		PIN string `json:"pin"`
@@ -69,7 +77,13 @@ func (s *server) pairingPair(w http.ResponseWriter, r *http.Request, p *ble.Pair
 		writeAPIError(w, "invalid_request")
 		return
 	}
-	if err := p.StartPair(req.MAC, req.PIN); err != nil {
+	var err error
+	if recover {
+		err = p.StartRecover(req.MAC, req.PIN)
+	} else {
+		err = p.StartPair(req.MAC, req.PIN)
+	}
+	if err != nil {
 		pairingErr(w, err)
 		return
 	}

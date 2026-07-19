@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,9 @@ type scriptedOps struct {
 	trustErr  error
 	unpairErr error
 	block     chan struct{}
+	pairBlock chan struct{}
+	mu        sync.Mutex
+	recover   bool
 }
 
 func (s *scriptedOps) Scan(time.Duration) ([]ble.Found, error) {
@@ -25,9 +29,20 @@ func (s *scriptedOps) Scan(time.Duration) ([]ble.Found, error) {
 	}
 	return s.devices, s.scanErr
 }
-func (s *scriptedOps) Pair(string, bool, ble.PairProgress) error { return s.pairErr }
-func (s *scriptedOps) Trust(string) error                        { return s.trustErr }
-func (s *scriptedOps) Unpair(string) error                       { return s.unpairErr }
+func (s *scriptedOps) Pair(_ string, recover bool, report ble.PairProgress) error {
+	s.mu.Lock()
+	s.recover = recover
+	s.mu.Unlock()
+	if recover {
+		report(ble.PhaseClearingStaleBond, "Clearing the router's stale pairing record")
+	}
+	if s.pairBlock != nil {
+		<-s.pairBlock
+	}
+	return s.pairErr
+}
+func (s *scriptedOps) Trust(string) error  { return s.trustErr }
+func (s *scriptedOps) Unpair(string) error { return s.unpairErr }
 
 func pairingServer(t *testing.T, ops ble.PairOps) http.Handler {
 	h, _, _ := testServerWith(t, func(d *Deps) {
@@ -68,6 +83,23 @@ func TestPairingScanFlow(t *testing.T) {
 	}
 }
 
+func TestPairingIdleStatusOmitsOperationMetadata(t *testing.T) {
+	h := pairingServer(t, &scriptedOps{})
+	w := do(t, h, http.MethodGet, "/api/v1/pairing/status", "tok", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status code = %d", w.Code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"started_at", "updated_at", "elapsed_ms", "events"} {
+		if value, ok := got[key]; ok {
+			t.Fatalf("idle status includes %s=%v", key, value)
+		}
+	}
+}
+
 func TestPairingScanBusyIs409(t *testing.T) {
 	ops := &scriptedOps{block: make(chan struct{})}
 	h := pairingServer(t, ops)
@@ -96,30 +128,66 @@ func TestPairingPairFlow(t *testing.T) {
 	}
 }
 
+func TestPairingRecoverFlow(t *testing.T) {
+	ops := &scriptedOps{}
+	h := pairingServer(t, ops)
+	body := `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}`
+	if w := do(t, h, "POST", "/api/v1/pairing/recover", "tok", body); w.Code != 202 {
+		t.Fatalf("recover code = %d body=%s", w.Code, w.Body.String())
+	}
+	got := waitStage(t, h, "paired")
+	if got["target"] != "DC:04:5A:EB:72:2B" || got["phase"] != "complete" {
+		t.Fatalf("recover status = %v", got)
+	}
+	ops.mu.Lock()
+	defer ops.mu.Unlock()
+	if !ops.recover {
+		t.Fatal("recovery flag did not reach PairOps")
+	}
+}
+
+func TestPairingRecoverBusyIs409(t *testing.T) {
+	ops := &scriptedOps{pairBlock: make(chan struct{})}
+	h := pairingServer(t, ops)
+	defer close(ops.pairBlock)
+	body := `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}`
+	if w := do(t, h, "POST", "/api/v1/pairing/recover", "tok", body); w.Code != 202 {
+		t.Fatalf("recover code = %d", w.Code)
+	}
+	waitStage(t, h, "pairing")
+	if w := do(t, h, "POST", "/api/v1/pairing/recover", "tok", body); w.Code != 409 {
+		t.Fatalf("busy recover = %d, want 409", w.Code)
+	}
+}
+
 func TestPairingPairValidatesMAC(t *testing.T) {
 	h := pairingServer(t, &scriptedOps{})
-	for _, body := range []string{`{}`, `{"mac":"nonsense"}`, `not json`,
-		`{"mac":"DC:04:5A:EB:72:2B","pin":"junk"}`,
-		`{"mac":"DC:04:5A:EB:72:2B","pin":"0123456"}`} {
-		if w := do(t, h, "POST", "/api/v1/pairing/pair", "tok", body); w.Code != 400 {
-			t.Fatalf("body %q -> %d, want 400", body, w.Code)
-		} else {
-			exactBody(t, w, `{"error":{"code":"invalid_request","message":"Request is invalid","details":{}}}`)
+	for _, path := range []string{"/api/v1/pairing/pair", "/api/v1/pairing/recover"} {
+		for _, body := range []string{`{}`, `{"mac":"nonsense"}`, `not json`,
+			`{"mac":"DC:04:5A:EB:72:2B","pin":"junk"}`,
+			`{"mac":"DC:04:5A:EB:72:2B","pin":"0123456"}`} {
+			if w := do(t, h, "POST", path, "tok", body); w.Code != 400 {
+				t.Fatalf("%s body %q -> %d, want 400", path, body, w.Code)
+			} else {
+				exactBody(t, w, `{"error":{"code":"invalid_request","message":"Request is invalid","details":{}}}`)
+			}
 		}
 	}
 }
 
 func TestPairingPairUsesExactJSON(t *testing.T) {
 	h := pairingServer(t, &scriptedOps{})
-	for _, body := range []string{
-		`{"mac":"DC:04:5A:EB:72:2B","pin":"020555","extra":true}`,
-		`{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}{}`,
-	} {
-		w := do(t, h, http.MethodPost, "/api/v1/pairing/pair", "tok", body)
-		if w.Code != 400 {
-			t.Fatalf("body %q status %d", body, w.Code)
+	for _, path := range []string{"/api/v1/pairing/pair", "/api/v1/pairing/recover"} {
+		for _, body := range []string{
+			`{"mac":"DC:04:5A:EB:72:2B","pin":"020555","extra":true}`,
+			`{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}{}`,
+		} {
+			w := do(t, h, http.MethodPost, path, "tok", body)
+			if w.Code != 400 {
+				t.Fatalf("%s body %q status %d", path, body, w.Code)
+			}
+			exactBody(t, w, `{"error":{"code":"invalid_request","message":"Request is invalid","details":{}}}`)
 		}
-		exactBody(t, w, `{"error":{"code":"invalid_request","message":"Request is invalid","details":{}}}`)
 	}
 }
 
@@ -164,6 +232,7 @@ func TestPairingUnavailableIsCapabilityUnsupported(t *testing.T) {
 		{"POST", "/api/v1/pairing/scan"},
 		{"GET", "/api/v1/pairing/status"},
 		{"POST", "/api/v1/pairing/pair"},
+		{"POST", "/api/v1/pairing/recover"},
 		{"DELETE", "/api/v1/pairing/device/DC:04:5A:EB:72:2B"},
 	} {
 		if w := do(t, h, c.method, c.path, "tok", ""); w.Code != 409 {
@@ -176,7 +245,9 @@ func TestPairingUnavailableIsCapabilityUnsupported(t *testing.T) {
 
 func TestPairingRequiresAuth(t *testing.T) {
 	h := pairingServer(t, &scriptedOps{})
-	if w := do(t, h, "POST", "/api/v1/pairing/scan", "", ""); w.Code != 401 {
-		t.Fatalf("unauthed scan = %d, want 401", w.Code)
+	for _, path := range []string{"/api/v1/pairing/scan", "/api/v1/pairing/recover"} {
+		if w := do(t, h, "POST", path, "", ""); w.Code != 401 {
+			t.Fatalf("unauthed %s = %d, want 401", path, w.Code)
+		}
 	}
 }

@@ -543,10 +543,22 @@ These authenticated routes pair the router to a Link-Power over BlueZ. They use
 
 | Endpoint | Role | Request | Success | Endpoint-specific errors | BLE I/O |
 |---|---|---|---|---|---|
-| `GET /api/v1/pairing/status` | client | none | `200 {"stage":"idle","devices":[]}`; optional `error`, `target`; device entries are `{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}` | `400 invalid_request` for a nonempty body; `409 capability_unsupported` when BlueZ pairing is unavailable | none |
+| `GET /api/v1/pairing/status` | client | none | `200 {"stage":"idle","devices":[]}`; active/completed operations add `phase`, `message`, `target`, `started_at`, `updated_at`, `elapsed_ms`, and up to 32 `events`; failures add `error`; device entries are `{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}` | `400 invalid_request` for a nonempty body; `409 capability_unsupported` when BlueZ pairing is unavailable | none |
 | `POST /api/v1/pairing/scan` | client | none | `202 {"status":"scanning"}` | `400 invalid_request` for a nonempty body; `409 operation_in_progress`, `409 capability_unsupported`, `502 ble_operation_failed` | asynchronous BlueZ scan |
 | `POST /api/v1/pairing/pair` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` (`pin` may be empty to retain configured PIN) | `202 {"status":"pairing"}` | `400 invalid_request`, `409 operation_in_progress`, `409 capability_unsupported` | asynchronous BlueZ pair/trust and BLE reconnect proof; asynchronous failure appears in status |
+| `POST /api/v1/pairing/recover` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` (same validation as `/pair`) | `202 {"status":"pairing"}` | `400 invalid_request`, `409 operation_in_progress`, `409 capability_unsupported` | removes this router's BlueZ device object, requests a replacement PIN bond, and verifies reconnect; it cannot erase Link-Power's device-side bond table |
 | `DELETE /api/v1/pairing/device/{mac}` | client | none | `200 {"status":"removed"}` | `400 invalid_request` for an invalid MAC or nonempty body, `409 operation_in_progress` while scan/pair is active, `409 capability_unsupported`, `502 ble_operation_failed` | BlueZ unpair, not a device command |
+
+Pairing phases are stable strings: `preparing_adapter`,
+`clearing_stale_bond` (recovery only), `locating_device`, `exchanging_pin`,
+`confirming_bond`, `trusting_device`, `reconnecting`,
+`verifying_handshake`, `saving_pairing`, `complete`, and `failed`. Each event is
+`{"at":"2026-07-18T23:40:01Z","phase":"clearing_stale_bond","message":"Clearing the router's stale pairing record"}`.
+Events are ordered oldest to newest, reset at the start of an operation, and
+contain curated messages without PINs, tokens, key material, or raw D-Bus
+payloads. `elapsed_ms` advances while active and freezes at completion. A
+successful pair or recovery requires both BlueZ `Paired: true` and a protected
+Wattline handshake after reconnect; `AlreadyExists` alone is not success.
 
 ## API-client pairing
 
@@ -820,9 +832,10 @@ The exact rule used in the rows below is
 
 | Endpoint | Role | Exact request | Exact success | Additional errors (status, body, condition) | BLE I/O |
 |---|---|---|---|---|---|
-| `GET /api/v1/pairing/status` | client | no body | `200 {"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}]}` | `400 E(invalid_request)` for a nonempty body; `409 E(capability_unsupported)` when platform/adapter pairing support is unavailable | none |
+| `GET /api/v1/pairing/status` | client | no body | idle: `200 {"stage":"idle","devices":[{"mac":"DC:04:5A:EB:72:2B","name":"Link-Power-2","rssi":-60,"paired":false}]}`; an operation additionally has `phase`, `message`, `target`, RFC3339 `started_at`/`updated_at`, integer `elapsed_ms`, and `events` (`at`, `phase`, `message`); failure also has `error` | `400 E(invalid_request)` for a nonempty body; `409 E(capability_unsupported)` when platform/adapter pairing support is unavailable | none |
 | `POST /api/v1/pairing/scan` | client | no body | `202 {"status":"scanning"}` | `400 E(invalid_request)` for a nonempty body; `409 E(operation_in_progress)` while scan/pair is active; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` if the scan cannot be started | asynchronous BlueZ scan, not a device command |
 | `POST /api/v1/pairing/pair` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` | `202 {"status":"pairing"}` | `400 E(invalid_request)` for malformed JSON, invalid MAC, or a PIN string containing non-digits or more than six digits (empty is allowed); `409 E(operation_in_progress)` while scan/pair is active; `409 E(capability_unsupported)` when pairing support is unavailable | asynchronous BlueZ pair/trust and BLE reconnect proof; later failure is reported by status |
+| `POST /api/v1/pairing/recover` | client | `{"mac":"DC:04:5A:EB:72:2B","pin":"020555"}` | `202 {"status":"pairing"}` | same validation, busy, and capability errors as `/api/v1/pairing/pair` | unconditionally removes this router's BlueZ object, rediscovers, requests and confirms a replacement PIN bond, trusts, reconnects, and verifies the protected handshake; this is not a Link-Power erase-bonds command |
 | `DELETE /api/v1/pairing/device/{mac}` | client | no body; for path `/api/v1/pairing/device/DC:04:5A:EB:72:2B` | `200 {"status":"removed"}` | `400 E(invalid_request)` for invalid MAC or a nonempty body; `409 E(operation_in_progress)` when unpair is busy with scan/pair; `409 E(capability_unsupported)` when pairing support is unavailable; `502 E(ble_operation_failed)` when BlueZ unpair fails | BlueZ unpair, not a device command |
 
 ### Deprecated device-control aliases
