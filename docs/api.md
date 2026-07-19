@@ -562,9 +562,13 @@ payloads. `elapsed_ms` advances while active and freezes at completion. A
 successful pair or recovery requires both BlueZ `Paired: true` and a protected
 Wattline handshake after reconnect; `AlreadyExists` alone is not success.
 
-The `GET /api/v1/pairing/status` response may add API-client enrollment fields
-`pin_required` (boolean), `pin_deadline` (RFC 3339 UTC timestamp or `null`), and
-`awaiting_pin` (boolean). These fields never contain the PIN.
+The `GET /api/v1/pairing/status` response includes additive API-client
+enrollment fields `pin_required` and `awaiting_pin` (booleans), plus
+`pin_deadline` (RFC 3339 UTC timestamp). `pin_required` and `awaiting_pin` are
+true only while a request-code operation is awaiting PIN input; during that
+state `pin_deadline` is present and gives the 25-second deadline. Otherwise
+both booleans are false and `pin_deadline` is `null`. No field ever contains a
+PIN value.
 
 ## API-client pairing
 
@@ -585,8 +589,11 @@ These authenticated endpoints require a client or admin bearer token:
 |---|---|---|---|
 | `POST /api/v1/pairing/request-code` | `{"mac":"DC:04:5A:EB:72:2B"}` or with optional `"recover":true` | `202 {"status":"pairing"}` | `400 E(invalid_request)`, `409 E(operation_in_progress)`, `409 E(capability_unsupported)`, `502 E(ble_operation_failed)` |
 | `POST /api/v1/pairing/submit-pin` | `{"pin":"123456"}`; exactly six ASCII digits | `202 {"status":"pin_submitted"}` | `400 E(invalid_request)`, `409 E(pairing_pin_not_requested)`, `409 E(operation_in_progress)`, `409 E(capability_unsupported)`, `502 E(ble_operation_failed)` |
-| `POST /api/v1/pairing/cancel` | empty body (zero bytes) | `200 {"status":"canceled"}` | `400 E(invalid_request)`, `409 E(operation_in_progress)`, `409 E(capability_unsupported)`, `502 E(ble_operation_failed)` |
+| `POST /api/v1/pairing/cancel` | empty body (zero bytes) | `200 {"status":"canceled"}` | `400 E(invalid_request)`, `409 E(pairing_pin_not_requested)` when no prompt is active, `409 E(operation_in_progress)`, `409 E(capability_unsupported)`, `502 E(ble_operation_failed)` |
 
+`request-code` starts the BLE operation and sets the status fields to awaiting
+PIN; `submit-pin` is accepted only in that state and clears it after submission
+(success or failure). `cancel` clears the same state without BLE PIN input.
 The PIN prompt lasts 25 seconds and has no automatic retry. PINs are never
 echoed or logged. Legacy `/pair` and `/recover` remain compatible. Recovery
 can replace only this router's BlueZ bond; it cannot erase the Link-Power
