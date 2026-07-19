@@ -273,7 +273,7 @@ func (p *Pairing) SubmitPIN(pin string) error {
 	return p.d.Prompt.Submit(pin)
 }
 func (p *Pairing) Cancel() error {
-	if p.d.Prompt == nil {
+	if p.d.Prompt == nil || (!p.d.Prompt.Active() && !p.d.Prompt.Waiting()) {
 		return ErrPasskeyNotWaiting
 	}
 	p.d.Prompt.Cancel()
