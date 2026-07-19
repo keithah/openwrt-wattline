@@ -40,7 +40,20 @@ func (p *PasskeyPrompt) Activate(onWaiting func()) {
 		onWaiting()
 	}
 }
-func (p *PasskeyPrompt) Deactivate()  { p.mu.Lock(); p.active = false; p.mu.Unlock(); p.Cancel() }
+func (p *PasskeyPrompt) Deactivate() {
+	p.mu.Lock()
+	p.active = false
+	if p.waiting && !p.consumed {
+		p.waiting = false
+		p.deadline = time.Time{}
+		p.result = nil
+		p.terminal = true
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+	p.Cancel()
+}
 func (p *PasskeyPrompt) Active() bool { p.mu.Lock(); defer p.mu.Unlock(); return p.active }
 
 type promptOutcome struct {
