@@ -24,7 +24,7 @@ func ScanAndConnectPrefixes(prefixes []string) (Transport, error) {
 
 // RegisterPairingAgent is a no-op off Linux (no BlueZ agent to register).
 // Callers treat a nil error + no-op cancel as "no agent needed".
-func RegisterPairingAgent(pin string) (func(), error) {
+func RegisterPairingAgent(pin string, prompt ...*PasskeyPrompt) (func(), error) {
 	SetAgentPIN(pin)
 	return func() {}, nil
 }
