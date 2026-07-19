@@ -54,6 +54,16 @@ to PASS or FAIL.
   `GET /api/v1/device`. Expected: BlueZ pairs/trusts it, UCI preserves the MAC
   and PIN, connection reaches `ready`, and concurrent scan/pair returns
   `409 operation_in_progress`.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Exercise two-stage pairing with
+  `request-code`, `submit-pin`, and `cancel`. Expected: completion requires
+  BlueZ `Paired:true`, a durable LTK, a protected authenticated handshake, and
+  `Trusted:true`; after router restart, reconnect restores the same state.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Submit one wrong PIN, then test
+  the 25-second timeout and explicit cancel. Expected: one attempt only, no
+  automatic retry, and timeout/cancel cleanup leaves no PIN in status or logs.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Before invoking `recover`, get
+  explicit operator authorization and record it with evidence; verify recovery
+  cannot erase the Link-Power device-side bond table.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Compare `/api/v1/device` with
   the physical unit and protocol reads. Expected: reversed MAC, model, hardware
   variant, application firmware, OTA bootloader firmware, CID, raw FEATURES,
