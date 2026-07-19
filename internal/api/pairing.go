@@ -70,11 +70,12 @@ func (s *server) pairingRecover(w http.ResponseWriter, r *http.Request, p *ble.P
 }
 
 func (s *server) pairingRequestCode(w http.ResponseWriter, r *http.Request, p *ble.Pairing) {
-	var req struct { MAC string `json:"mac"`; Recover bool `json:"recover"` }
+	var req struct { MAC string `json:"mac"`; Recover *bool `json:"recover"` }
 	if err := decodeJSON(r, &req); err != nil || !macRe.MatchString(req.MAC) {
 		writeAPIError(w, "invalid_request"); return
 	}
-	if err := p.StartInteractive(req.MAC, req.Recover); err != nil { pairingErr(w, err); return }
+	recover := req.Recover != nil && *req.Recover
+	if err := p.StartInteractive(req.MAC, recover); err != nil { pairingErr(w, err); return }
 	writeJSON(w, http.StatusAccepted, map[string]string{"status":"pairing"})
 }
 
