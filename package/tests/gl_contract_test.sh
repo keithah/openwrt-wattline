@@ -13,7 +13,7 @@ need() {
 }
 
 # Canonical API surface and deliberately separate enrollment flows.
-for route in /device /telemetry /pairing/status /pairing/scan /pairing/pair /pairing/recover \
+for route in /device /telemetry /pairing/status /pairing/scan /pairing/request-code /pairing/submit-pin /pairing/cancel \
 	/pairing-mode /pairing-mode/qr.png /tokens /settings /tls/rotate \
 	/device/dc /device/usbc/output /device/timers /device/restart \
 	/device/shutdown /device/ota/enter /device/advanced/running-mode \
@@ -197,11 +197,11 @@ function pairingHelperTests() {
 		]
 	});
 	assert.deepStrictEqual(model.steps.map((step) => step.label), [
-		'Preparing adapter', 'Clearing stale router bond', 'Locating device', 'Exchanging PIN',
+		'Preparing adapter', 'Clearing stale router bond', 'Locating device', 'Waiting for displayed code', 'Exchanging PIN',
 		'Confirming bond', 'Trusting device', 'Reconnecting', 'Verifying handshake', 'Saved'
 	]);
 	assert.deepStrictEqual(model.steps.map((step) => step.state), [
-		'complete', 'complete', 'complete', 'complete', 'active', 'pending', 'pending', 'pending', 'pending'
+		'complete', 'complete', 'complete', 'complete', 'complete', 'active', 'pending', 'pending', 'pending', 'pending'
 	]);
 	assert.strictEqual(model.message, 'Confirming the replacement bond');
 	assert.strictEqual(model.elapsed, '17s');
@@ -223,7 +223,7 @@ async function pairingRecoveryComponentTest() {
 	const context = { selMac: '', pairing: { target: 'DC:04:5A:EB:72:2B' }, pin: '020555', uiErr: '', ptick: 9,
 		post: async (path, body) => { calls.push([path, body]); }, tick() {} };
 	await methods.precover.call(context);
-	assert.deepStrictEqual(calls, [['/pairing/recover', { mac: 'DC:04:5A:EB:72:2B', pin: '020555' }]]);
+	assert.deepStrictEqual(calls, [['/pairing/request-code', { mac: 'DC:04:5A:EB:72:2B', recover: true }]]);
 	assert.match(prompt, /this router's saved Bluetooth pairing/);
 	assert.match(prompt, /does not expose an erase-all-pairings command/);
 }

@@ -245,23 +245,31 @@ return view.extend({
 				row.addEventListener('click', function () { selMac = d.mac; redrawPairCard(); });
 				kids.push(row);
 			});
-			if (selMac) {
+			if (selMac && !(p.phase === 'awaiting_pin' || p.phase === 'pin_required')) {
+				var request = E('button', { 'class': 'wl-btn primary' }, _('Show pairing code'));
+				if (busy) request.setAttribute('disabled', '');
+				request.addEventListener('click', function () { pairMsg = ''; api(token, port, 'POST', '/pairing/request-code', { mac: selMac, recover: false }).then(function () { pollN = 0; pairKey = null; refresh(); }).catch(function (e) { pairMsg = e.message; redrawPairCard(); }); });
+				kids.push(E('div', { style: 'margin-top:12px' }, request));
+			}
+			if (selMac && (p.phase === 'awaiting_pin' || p.phase === 'pin_required')) {
 				var pinInput = E('input', { 'class': 'wl-pin', maxlength: 6, value: pin, inputmode: 'numeric' });
 				pinInput.addEventListener('input', function () {
 					pinInput.value = pinInput.value.replace(/[^0-9]/g, '');
 					pin = pinInput.value;
 				});
-				var pairBtn = E('button', { 'class': 'wl-btn primary' }, p.stage === 'pairing' ? _('Pairing…') : _('Pair'));
+				var pairBtn = E('button', { 'class': 'wl-btn primary' }, _('Submit code'));
 				if (busy) pairBtn.setAttribute('disabled', '');
 				pairBtn.addEventListener('click', function () {
 					pairMsg = '';
-					api(token, port, 'POST', '/pairing/pair', { mac: selMac, pin: pin })
+					api(token, port, 'POST', '/pairing/submit-pin', { pin: pin })
 						.then(function () { pollN = 0; pairKey = null; refresh(); })
 						.catch(function (e) { pairMsg = e.message; redrawPairCard(); });
 				});
+				var cancelBtn = E('button', { 'class': 'wl-btn' }, _('Cancel'));
+				cancelBtn.addEventListener('click', function () { api(token, port, 'POST', '/pairing/cancel').then(function () { pollN = 0; pairKey = null; refresh(); }); });
 				kids.push(E('div', { style: 'display:flex;align-items:flex-end;margin-top:12px' }, [
 					E('div', { style: 'margin-right:10px' }, [E('div', { 'class': 'wl-sub' }, _('PIN')), pinInput]),
-					E('div', { style: 'flex:1' }, ''), pairBtn
+					E('div', { style: 'flex:1' }, ''), pairBtn, cancelBtn
 				]));
 				kids.push(E('div', { 'class': 'wl-note' },
 					_('Default PIN is 020555 (see the manual). If the device shows a PIN on its screen, enter that instead.')));
@@ -296,7 +304,7 @@ return view.extend({
 						_('Link-Power firmware does not expose an erase-all-pairings command.');
 					if (!window.confirm(prompt)) return;
 					pairMsg = '';
-					api(token, port, 'POST', '/pairing/recover', { mac: mac, pin: pin })
+					api(token, port, 'POST', '/pairing/request-code', { mac: mac, recover: true })
 						.then(function () { selMac = mac; pollN = 0; pairKey = null; refresh(); })
 						.catch(function (e) { pairMsg = e.message; redrawPairCard(); });
 				});

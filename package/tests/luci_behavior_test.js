@@ -247,7 +247,7 @@ async function pairingProgressTests() {
 	await settle();
 	assert.strictEqual(rendered.confirmCalls(), 1);
 	assert.deepStrictEqual(rendered.requests[rendered.requests.length - 1], [
-		'POST', '/pairing/recover', { mac: status.target, pin: '020555' }
+		'POST', '/pairing/request-code', { mac: status.target, recover: true }
 	]);
 }
 
