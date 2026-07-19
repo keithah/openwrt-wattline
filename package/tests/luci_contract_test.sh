@@ -41,7 +41,7 @@ need "$STATUS" 'wattline\.qr' 'QR lifecycle module integration'
 need "$STATUS" 'wattline\.refresh' 'generation-guarded admin refresh integration'
 need "$STATUS" 'wattline\.power_loss' 'power-loss preset helper integration'
 need "$STATUS" 'wattline\.pairing_progress' 'pairing progress helper integration'
-need "$STATUS" '/pairing/recover' 'BLE stale-bond recovery route'
+need "$STATUS" '/pairing/request-code' 'BLE pairing-code recovery route'
 need "$STATUS" 'aria-live' 'current pairing progress live region'
 for label in 'Preparing adapter' 'Clearing stale router bond' 'Locating device' \
 	'Exchanging PIN' 'Confirming bond' 'Trusting device' 'Reconnecting' \
@@ -49,7 +49,7 @@ for label in 'Preparing adapter' 'Clearing stale router bond' 'Locating device' 
 	need "$PAIRING_PROGRESS" "$label" "pairing progress $label"
 done
 need "$STATUS" 'Technical details' 'pairing technical details disclosure'
-need "$STATUS" 'Clear stale pairing & retry' 'pairing stale-bond recovery action'
+need "$STATUS" 'Request new pairing code' 'pairing stale-bond recovery action'
 need "$STATUS" "Clear this router's saved Bluetooth pairing and request a fresh PIN bond" 'honest stale-bond recovery confirmation'
 need "$STATUS" 'does not expose an erase-all-pairings command' 'device-side recovery limitation'
 need "$STATUS" 'Power-loss shutdown' 'power-loss card title'
