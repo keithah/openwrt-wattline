@@ -267,7 +267,7 @@ func (p *Pairing) StartInteractive(mac string, recover bool) error {
 	return p.startPair(mac, "", recover, true)
 }
 func (p *Pairing) SubmitPIN(pin string) error {
-	if p.d.Prompt == nil {
+	if p.d.Prompt == nil || (!p.d.Prompt.Active() && !p.d.Prompt.Waiting()) {
 		return ErrPasskeyNotWaiting
 	}
 	return p.d.Prompt.Submit(pin)
