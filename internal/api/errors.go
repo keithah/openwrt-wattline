@@ -25,18 +25,19 @@ var errorCatalog = map[string]struct {
 	status  int
 	message string
 }{
-	"unauthorized":           {http.StatusUnauthorized, "Bearer token is missing or invalid"},
-	"invalid_request":        {http.StatusBadRequest, "Request is invalid"},
-	"admin_required":         {http.StatusForbidden, "Administrator token required"},
-	"advanced_disabled":      {http.StatusForbidden, "Advanced operations are disabled"},
-	"not_found":              {http.StatusNotFound, "Resource was not found"},
-	"capability_unsupported": {http.StatusConflict, "Operation is not supported"},
-	"operation_in_progress":  {http.StatusConflict, "Pairing operation already in progress"},
-	"ble_operation_failed":   {http.StatusBadGateway, "BLE operation failed"},
-	"device_disconnected":    {http.StatusServiceUnavailable, "Link-Power is not connected"},
-	"command_timeout":        {http.StatusGatewayTimeout, "Device telemetry did not confirm the command"},
-	"invalid_or_expired_pin": {http.StatusUnauthorized, "Pairing PIN is invalid or expired"},
-	"internal_error":         {http.StatusInternalServerError, "Internal server error"},
+	"unauthorized":              {http.StatusUnauthorized, "Bearer token is missing or invalid"},
+	"invalid_request":           {http.StatusBadRequest, "Request is invalid"},
+	"admin_required":            {http.StatusForbidden, "Administrator token required"},
+	"advanced_disabled":         {http.StatusForbidden, "Advanced operations are disabled"},
+	"not_found":                 {http.StatusNotFound, "Resource was not found"},
+	"capability_unsupported":    {http.StatusConflict, "Operation is not supported"},
+	"operation_in_progress":     {http.StatusConflict, "Pairing operation already in progress"},
+	"pairing_pin_not_requested": {http.StatusConflict, "Pairing PIN was not requested"},
+	"ble_operation_failed":      {http.StatusBadGateway, "BLE operation failed"},
+	"device_disconnected":       {http.StatusServiceUnavailable, "Link-Power is not connected"},
+	"command_timeout":           {http.StatusGatewayTimeout, "Device telemetry did not confirm the command"},
+	"invalid_or_expired_pin":    {http.StatusUnauthorized, "Pairing PIN is invalid or expired"},
+	"internal_error":            {http.StatusInternalServerError, "Internal server error"},
 }
 
 func writeAPIError(w http.ResponseWriter, code string) {
