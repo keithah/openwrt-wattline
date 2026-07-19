@@ -651,7 +651,7 @@ return view.extend({
 							if (g !== gen) return; // body was rebuilt since this poll started
 							lastP = p;
 							var key = JSON.stringify([p.stage, p.phase, p.message, p.error, p.target,
-								p.elapsed_ms, p.pin_deadline, p.events, p.devices, selMac, pairMsg]);
+								p.elapsed_ms, p.pin_deadline, (p.phase === 'awaiting_pin' || p.phase === 'pin_required') ? Math.floor(Date.now() / 1000) : 0, p.events, p.devices, selMac, pairMsg]);
 							if (key !== pairKey || !pairCard) { pairKey = key; pairCard = buildPairCard(p); }
 							body.appendChild(pairCard);
 						}).catch(function () {});
