@@ -102,6 +102,8 @@ func (p *PasskeyPrompt) Cancel() {
 		p.terminal = true
 		p.result <- promptOutcome{err: ErrPasskeyCanceled}
 	} else {
-		p.canceled = true
+		if !p.terminal {
+			p.canceled = true
+		}
 	}
 }

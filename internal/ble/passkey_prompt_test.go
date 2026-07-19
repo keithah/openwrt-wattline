@@ -86,3 +86,28 @@ func TestPromptRejectsDuplicateTerminalActionsBeforeWaitConsumes(t *testing.T) {
 	}
 	p.Cancel()
 }
+
+func TestPromptCancelAfterSubmitDoesNotPoisonNextWait(t *testing.T) {
+	p := NewPasskeyPrompt(time.Second)
+	done := make(chan struct{})
+	go func() { _, _ = p.Wait(func() {}); close(done) }()
+	for !p.Waiting() {
+		time.Sleep(time.Millisecond)
+	}
+	if err := p.Submit("020555"); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	p.Cancel()
+	result := make(chan error, 1)
+	go func() { _, err := p.Wait(func() {}); result <- err }()
+	select {
+	case err := <-result:
+		t.Fatalf("fresh wait returned: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	p.Cancel()
+	if err := <-result; !errors.Is(err, ErrPasskeyCanceled) {
+		t.Fatal(err)
+	}
+}
