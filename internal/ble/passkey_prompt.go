@@ -20,12 +20,27 @@ type PasskeyPrompt struct {
 	waiting  bool
 	terminal bool
 	canceled bool
-	active bool
+	active   bool
+	consumed bool
 	result   chan promptOutcome
 	deadline time.Time
 }
-func (p *PasskeyPrompt) Activate() { p.mu.Lock(); p.active = true; p.mu.Unlock() }
-func (p *PasskeyPrompt) Deactivate() { p.mu.Lock(); p.active = false; p.mu.Unlock(); p.Cancel() }
+
+func (p *PasskeyPrompt) Activate(onWaiting func()) {
+	p.mu.Lock()
+	p.active = true
+	p.waiting = true
+	p.consumed = true
+	p.consumed = false
+	p.terminal = false
+	p.deadline = time.Now().Add(p.duration)
+	p.result = make(chan promptOutcome, 1)
+	p.mu.Unlock()
+	if onWaiting != nil {
+		onWaiting()
+	}
+}
+func (p *PasskeyPrompt) Deactivate()  { p.mu.Lock(); p.active = false; p.mu.Unlock(); p.Cancel() }
 func (p *PasskeyPrompt) Active() bool { p.mu.Lock(); defer p.mu.Unlock(); return p.active }
 
 type promptOutcome struct {
@@ -43,8 +58,28 @@ func NewPasskeyPrompt(timeout time.Duration) *PasskeyPrompt {
 func (p *PasskeyPrompt) Wait(onWaiting func()) (string, error) {
 	p.mu.Lock()
 	if p.waiting {
+		if p.consumed {
+			p.mu.Unlock()
+			return "", ErrPasskeyAlreadyWaiting
+		}
+		p.consumed = true
+		ch, deadline := p.result, p.deadline
 		p.mu.Unlock()
-		return "", ErrPasskeyAlreadyWaiting
+		t := time.NewTimer(time.Until(deadline))
+		defer t.Stop()
+		var out promptOutcome
+		select {
+		case out = <-ch:
+		case <-t.C:
+			out.err = ErrPasskeyTimeout
+		}
+		p.mu.Lock()
+		p.waiting = false
+		p.terminal = true
+		p.deadline = time.Time{}
+		p.result = nil
+		p.mu.Unlock()
+		return out.pin, out.err
 	}
 	if p.canceled {
 		p.canceled = false
