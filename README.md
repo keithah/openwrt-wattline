@@ -415,3 +415,15 @@ real Link-Power traffic. Follow the
 [`GL-X3000 verification checklist`](docs/gl-x3000-verification.md) for the
 remaining on-target and real-BLE checks. No item in that checklist is considered
 verified merely because unit tests pass.
+## Quick install
+
+On a supported GL.iNet/OpenWrt router, run the project-maintained installer:
+
+```sh
+wget -qO- https://keithah.github.io/openwrt-wattline/install.sh | sh
+```
+
+The installer verifies the architecture, preserves existing opkg feeds, selects the GL or LuCI UI, and installs the optional RTL8761B package only when a supported USB adapter is detected. Driver activation is always a separate explicit transaction.
+
+Wattline is licensed under the GNU Affero General Public License, version 3 (AGPL-3.0-or-later); see [LICENSE](LICENSE).
+
