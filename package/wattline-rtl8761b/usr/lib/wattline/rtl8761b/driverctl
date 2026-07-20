@@ -13,11 +13,15 @@ LOCK_FILE="${LOCK_FILE:-$ROOT_PREFIX/var/lock/wattline-rtl8761b.lock}"
 SYS_USB="${SYS_USB:-$ROOT_PREFIX/sys/bus/usb/devices}"
 PROC_MODULES="${PROC_MODULES:-$ROOT_PREFIX/proc/modules}"
 WATTLINE_SERVICE="${WATTLINE_SERVICE:-$ROOT_PREFIX/etc/init.d/wattlined}"
+BOOT_INIT="${BOOT_INIT:-$ROOT_PREFIX/etc/init.d/wattline-rtl8761b}"
+HOTPLUG_MARKER="${HOTPLUG_MARKER:-$ROOT_PREFIX/etc/wattline/rtl8761b.hotplug-enabled}"
 KERNEL_RELEASE="${KERNEL_RELEASE:-$(uname -r)}"
 MACHINE="${MACHINE:-$(uname -m)}"
 MODULE_DIR="$ROOT_PREFIX/lib/modules/$EXPECTED_KERNEL"
 MODULE_LIST="$ROOT_PREFIX/etc/modules.d/bluetooth"
 MANIFEST_FILE="${MANIFEST_FILE:-$PACKAGE_ROOT/usr/share/wattline-rtl8761b/SHA256SUMS}"
+HEALTH_MARKER="${HEALTH_MARKER:-$ROOT_PREFIX/etc/wattline/rtl8761b.health}"
+ROLLBACK_MARKER="${ROLLBACK_MARKER:-$ROOT_PREFIX/etc/wattline/rtl8761b.rollback}"
 
 log() {
 	printf 'wattline-rtl8761b: %s\n' "$*" >&2
@@ -71,7 +75,7 @@ admit() {
 		log "unsupported architecture $MACHINE (requires $EXPECTED_MACHINE)"
 		return 1
 	}
-	for command in awk chmod cmp cp dirname flock grep insmod mkdir modinfo mv rm rmmod sed sha256sum strings tr; do
+	for command in awk chmod cmp cp dirname flock grep hciconfig insmod mkdir modinfo mv rm rmmod sed sha256sum sleep strings tr logger; do
 		command -v "$command" >/dev/null 2>&1 || {
 			log "required command is unavailable: $command"
 			return 1
@@ -255,6 +259,8 @@ load_stock_runtime() {
 
 restore_locked() {
 	remove_backup=$1
+	# A failed restore must not leave the health marker signaling packaged state.
+	rm -f "$HEALTH_MARKER"
 	quiesce_runtime || return 1
 	restore_files || return 1
 	load_stock_runtime || return 1
@@ -265,6 +271,7 @@ restore_locked() {
 	if [ "$remove_backup" = yes ]; then
 		rm -rf "$STATE_DIR"
 	fi
+	rm -f "$ROLLBACK_MARKER"
 }
 
 acquire_lock() {
@@ -287,6 +294,8 @@ activate() {
 	fi
 	acquire_lock
 	backup_original || return 1
+	mkdir -p "$(dirname "$ROLLBACK_MARKER")"
+	: >"$ROLLBACK_MARKER" || return 1
 	if ! install_packaged_files; then
 		log 'module installation failed; restoring stock files'
 		restore_locked no || log 'automatic rollback also failed; stock backup retained'
@@ -313,6 +322,19 @@ activate() {
 		restore_locked no || log 'automatic rollback also failed; stock backup retained'
 		return 1
 	fi
+	health_ok=no
+	for _ in 1 2 3 4 5; do
+		if service_action health; then health_ok=yes; break; fi
+		sleep 1
+	done
+	if [ "$health_ok" != yes ]; then
+		log 'wattlined health check failed; restoring stock files'
+		restore_locked no || log 'automatic rollback also failed; stock backup retained'
+		return 1
+	fi
+	rm -f "$ROLLBACK_MARKER"
+	mkdir -p "$(dirname "$HEALTH_MARKER")"
+	: >"$HEALTH_MARKER"
 }
 
 same_file() {
@@ -368,11 +390,26 @@ status() {
 restore() {
 	admit || return 1
 	acquire_lock
-	restore_locked yes
+	restore_locked no
+}
+
+enable_boot() {
+	[ -f "$HEALTH_MARKER" ] || die "health marker is required before enabling boot activation"
+	[ ! -e "$ROLLBACK_MARKER" ] || die "rollback marker present; refusing to enable boot activation"
+	[ -x "$BOOT_INIT" ] || die "init hook is unavailable: $BOOT_INIT"
+	"$BOOT_INIT" enable || return 1
+	mkdir -p "$(dirname "$HOTPLUG_MARKER")" || return 1
+	: >"$HOTPLUG_MARKER" || return 1
+}
+
+disable_boot() {
+	[ -x "$BOOT_INIT" ] || die "init hook is unavailable: $BOOT_INIT"
+	"$BOOT_INIT" disable
+	rm -f "$HOTPLUG_MARKER"
 }
 
 usage() {
-	printf 'usage: %s {detect|admit|activate [--require-device]|status|restore}\n' "$0" >&2
+	printf 'usage: %s {detect|admit|activate [--require-device]|status|restore|enable-boot|disable-boot}\n' "$0" >&2
 	exit 2
 }
 
@@ -385,5 +422,7 @@ case "$command_name" in
 	activate) [ "$#" -le 1 ] || usage; activate "$@" ;;
 	status) [ "$#" -eq 0 ] || usage; status ;;
 	restore) [ "$#" -eq 0 ] || usage; restore ;;
+	enable-boot) [ "$#" -eq 0 ] || usage; enable_boot ;;
+	disable-boot) [ "$#" -eq 0 ] || usage; disable_boot ;;
 	*) usage ;;
 esac

@@ -145,6 +145,7 @@
     var phases = [
       { phase: 'preparing_adapter', label: 'Preparing adapter' },
       { phase: 'locating_device', label: 'Locating device' },
+      { phase: 'awaiting_pin', label: 'Waiting for displayed code' },
       { phase: 'exchanging_pin', label: 'Exchanging PIN' },
       { phase: 'confirming_bond', label: 'Confirming bond' },
       { phase: 'trusting_device', label: 'Trusting device' },
@@ -214,7 +215,7 @@
     name: 'wattline',
     data: function () {
       return { token: '', config: null, client: null, tel: null, dev: null, err: '', loaded: false,
-        pairing: null, pin: '020555', selMac: '', ptick: 0, uiErr: '',
+        pairing: null, pin: '020555', selMac: '', ptick: 0, uiErr: '', pinDeadline: null,
         usbcLimit: null, threshold: null, thrInput: '', schedules: null,
         etick: 0, ctlErr: '', newSch: { status: 1, type: 1, hour: 8, minute: 0, action: 1, date: '', repeatInput: '' },
         adminTick: 0, settings: null, tokens: [], apiPair: null, adminErr: '', qrURL: '', qrCtl: null,
@@ -271,15 +272,22 @@
       },
       pscan: function () { var self = this;
         this.uiErr = '';
-        this.post('/pairing/scan').then(function () { self.ptick = 0; self.tick(); })
+        this.post('/pairing/scan').then(function () { self.selMac = ''; self.ptick = 0; self.tick(); })
           .catch(function (e) { self.uiErr = e.message; });
       },
       ppair: function () { var self = this;
         if (!this.selMac) return;
         this.uiErr = '';
-        this.post('/pairing/pair', { mac: this.selMac, pin: this.pin }).then(function () { self.ptick = 0; self.tick(); })
+        this.post('/pairing/submit-pin', { pin: this.pin }).then(function () { self.ptick = 0; self.tick(); })
           .catch(function (e) { self.uiErr = e.message; });
       },
+      prequest: function (recover) { var self = this, mac = this.selMac || this.pairing && this.pairing.target;
+        if (!mac) return;
+        this.uiErr = '';
+        this.post('/pairing/request-code', { mac: mac, recover: !!recover }).then(function () { self.selMac = mac; self.ptick = 0; self.tick(); })
+          .catch(function (e) { self.uiErr = e.message; });
+      },
+      pcancel: function () { var self = this; this.post('/pairing/cancel').then(function () { self.ptick = 0; self.tick(); }).catch(function (e) { self.uiErr = e.message; }); },
       precover: function () { var self = this;
         var mac = this.selMac || this.pairing && this.pairing.target;
         if (!mac) return Promise.resolve(null);
@@ -287,7 +295,7 @@
           'Link-Power firmware does not expose an erase-all-pairings command.';
         if (!window.confirm(prompt)) return Promise.resolve(null);
         this.uiErr = '';
-        return this.post('/pairing/recover', { mac: mac, pin: this.pin }).then(function () {
+        return this.post('/pairing/request-code', { mac: mac, recover: true }).then(function () {
           self.selMac = mac; self.ptick = 0; self.tick();
         }).catch(function (e) { self.uiErr = e.message; });
       },
@@ -574,19 +582,25 @@
           el('div', { marginTop: '12px' }, [ btn(p.stage === 'scanning' ? 'Scanning…' : 'Scan for devices', function () { self.pscan(); }, false, busy) ])
         ];
         if (rows.length) pairBits.push(el('div', { marginTop: '6px' }, rows));
-        if (self.selMac) {
+        if (self.selMac && !(p.phase === 'awaiting_pin' || p.phase === 'pin_required')) {
+          pairBits.push(btn('Show pairing code', function () { self.prequest(false); }, true, busy));
+        }
+        if (self.selMac && (p.phase === 'awaiting_pin' || p.phase === 'pin_required')) {
+          var deadline = p.pin_deadline ? Math.max(0, Math.ceil((new Date(p.pin_deadline).getTime() - Date.now()) / 1000)) : null;
+          pairBits.push(el('div', { 'aria-live': 'polite', color: GREY, fontSize: '12px' }, deadline == null ? 'Enter the code shown on the device.' : 'Code expires in ' + deadline + ' seconds.'));
           pairBits.push(el('div', { display: 'flex', alignItems: 'center', marginTop: '12px' }, [
             el('div', { marginRight: '10px' }, [ sub('PIN'),
               h('input', { style: { width: '90px', padding: '7px 9px', fontSize: '14px', border: '1px solid #d0d4d9',
                 borderRadius: '8px', marginTop: '2px' },
-                attrs: { maxlength: 6, inputmode: 'numeric' },
+                attrs: { maxlength: 6, inputmode: 'numeric', 'aria-label': 'PIN' },
                 domProps: { value: self.pin },
                 on: { input: function (e) {
                   var v = e.target.value.replace(/[^0-9]/g, '').slice(0, 6);
                   e.target.value = v; self.pin = v;
                 } } }) ]),
             el('div', { flex: '1' }, ''),
-            btn(p.stage === 'pairing' ? 'Pairing…' : 'Pair', function () { self.ppair(); }, true, busy)
+            btn('Submit code', function () { self.ppair(); }, true, busy),
+            btn('Cancel', function () { self.pcancel(); }, false, busy)
           ]));
           pairBits.push(el('div', { color: GREY, fontSize: '12px', marginTop: '6px' },
             'Default PIN is 020555 (see the manual). If the device shows a PIN on its screen, enter that instead.'));
@@ -615,7 +629,7 @@
         if (p.stage === 'paired') pairBits.push(el('div', { color: GREEN, fontSize: '13px', marginTop: '10px' }, 'Paired. Connecting…'));
         if (p.stage === 'error') pairBits.push(el('div', { color: RED, fontSize: '13px', marginTop: '10px' }, 'Pairing failed: ' + (p.error || 'unknown error')));
         if (p.stage === 'error' && (self.selMac || p.target)) pairBits.push(el('div', { marginTop: '10px' }, [
-          btn('Clear stale pairing & retry', function () { self.precover(); }, false, busy)
+          btn('Request new pairing code', function () { self.prequest(true); }, false, busy)
         ]));
         offlineCards = [
           card([el('div', { textAlign: 'center', padding: '10px 10px 14px', color: GREY }, [

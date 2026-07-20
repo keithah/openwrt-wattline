@@ -11,16 +11,27 @@ to PASS or FAIL.
 
 ## Install, reboot, and credentials
 
-- [ ] **NOT RUN — requires GL-X3000/real BLE** — Transfer all five IPKs, inspect
-  them with `tar tzf`, then install `wattline-bt`, `wattlined`,
-  `luci-app-wattline`, and `gl-app-wattline`. Inspect USB sysfs and install
+Run the hosted installer first. It installs the optional RTL package only when
+USB sysfs reports a supported ID. The driver package is inert when installed.
+Reboot and check router health and dongle presence, then explicitly activate with
+`driverctl activate --require-device`; repeat the health check and reboot-test
+before running `driverctl enable-boot`. Boot enablement requires
+`/etc/wattline/rtl8761b.health` and no `rtl8761b.rollback` marker. Use
+`driverctl disable-boot` to disable only the init hook (it does not alter loaded
+modules). Use `driverctl restore` to return to stock files; investigate any
+remaining rollback marker before retrying activation.
+
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Run the installer, inspect
+  the feed/IPK metadata, then install the base daemon/UI packages. The installer inspects USB sysfs and installs
   `wattline-rtl8761b` only for `2357:0604` or `0bda:8771`. Expected: opkg accepts
   the gzip ustar archives and reports matching package versions/architectures.
-- [ ] **NOT RUN — requires GL-X3000/real BLE** — Before installing the optional
-  driver, record hashes of `/lib/modules/5.4.211/{btintel,btrtl,btusb}.ko` when
-  present and `/etc/modules.d/bluetooth`. Install it, then run `driverctl status`,
-  `modinfo`, `hciconfig -a`, and inspect `dmesg`. Expected: status is `packaged`,
-  vermagic is exact, firmware uploads, and `hci0` is UP without memory errors.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Stage the optional driver:
+  install the package inert, reboot, and verify system health and the supported
+  dongle. Run `driverctl activate --require-device`, repeat the health check,
+  and reboot-test. Only then run `driverctl enable-boot` (it requires the
+  `rtl8761b.health` marker and no `rtl8761b.rollback` marker). Expected:
+  `driverctl status` is `packaged`, vermagic is exact, firmware uploads, and
+  `hci0` is UP without memory errors.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Remove and reinstall
   `wattline-rtl8761b`. Expected: removal restores the recorded stock files and
   autoload list, reinstall preserves the first backup and reactivates cleanly.
@@ -35,8 +46,8 @@ to PASS or FAIL.
   wattlined at S95, the packaged hashes persist, and BLE scanning still works.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Run
   `/etc/init.d/wattlined enable; reboot`, reconnect, then inspect
-  `/etc/init.d/wattlined status` and `logread -e wattline`. Expected: procd starts
-  the daemon once, it survives reboot, and no credential is regenerated.
+  `/etc/init.d/wattlined status` and `logread -e wattline`. Expected: the init script starts
+  the daemon once (using its GL fallback when ubus/procd is unavailable), and it survives reboot, and no credential is regenerated.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Reinstall the same-version IPKs
   using `opkg install --force-reinstall /tmp/*.ipk`. Expected: the binary updates
   while the bootstrap token, managed tokens, certificate, UCI rules, and paired
@@ -54,6 +65,16 @@ to PASS or FAIL.
   `GET /api/v1/device`. Expected: BlueZ pairs/trusts it, UCI preserves the MAC
   and PIN, connection reaches `ready`, and concurrent scan/pair returns
   `409 operation_in_progress`.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Exercise two-stage pairing with
+  `request-code`, `submit-pin`, and `cancel`. Expected: completion requires
+  BlueZ `Paired:true`, a durable LTK, a protected authenticated handshake, and
+  `Trusted:true`; after router restart, reconnect restores the same state.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Submit one wrong PIN, then test
+  the 25-second timeout and explicit cancel. Expected: one attempt only, no
+  automatic retry, and timeout/cancel cleanup leaves no PIN in status or logs.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Before invoking `recover`, get
+  explicit operator authorization and record it with evidence; verify recovery
+  cannot erase the Link-Power device-side bond table.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Compare `/api/v1/device` with
   the physical unit and protocol reads. Expected: reversed MAC, model, hardware
   variant, application firmware, OTA bootloader firmware, CID, raw FEATURES,

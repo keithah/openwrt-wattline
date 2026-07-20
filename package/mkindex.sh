@@ -21,7 +21,7 @@ cat <<HTML
 router over Bluetooth LE. Project:
 <a href="https://github.com/$REPO">github.com/$REPO</a>.</p>
 <h2>Register this feed on the router</h2>
-<pre>echo 'src/gz wattline $PAGES' &gt;&gt; /etc/opkg/customfeeds.conf
+<pre>echo 'src/gz keithah https://keithah.github.io/openwrt-starwatch' &gt;&gt; /etc/opkg/customfeeds.conf
 opkg update
 opkg install wattlined luci-app-wattline gl-app-wattline   # first time (pulls deps)
 opkg upgrade wattlined luci-app-wattline gl-app-wattline    # thereafter</pre>

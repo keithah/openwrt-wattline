@@ -241,13 +241,13 @@ async function pairingProgressTests() {
 		textOf(node).includes('replacement bond rejected'));
 	assert.ok(live, 'current pairing failure is the only live progress message');
 	assert.ok(findElement(rendered.dom, 'summary', 'Technical details'));
-	const recover = findElement(rendered.dom, 'button', 'Clear stale pairing & retry');
+	const recover = findElement(rendered.dom, 'button', 'Request new pairing code');
 	assert.ok(recover, 'failed pairing offers explicit recovery');
 	recover.click();
 	await settle();
 	assert.strictEqual(rendered.confirmCalls(), 1);
 	assert.deepStrictEqual(rendered.requests[rendered.requests.length - 1], [
-		'POST', '/pairing/recover', { mac: status.target, pin: '020555' }
+		'POST', '/pairing/request-code', { mac: status.target, recover: true }
 	]);
 }
 

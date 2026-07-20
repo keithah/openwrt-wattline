@@ -74,9 +74,12 @@ setup_case() {
 		'btrtl 1 1 btusb, Live 0' \
 		'btintel 1 1 btusb, Live 0' >"$CASE/proc-modules"
 	: >"$CASE/calls"
-	cat >"$CASE/wattlined" <<'EOF'
+cat >"$CASE/wattlined" <<'EOF'
 #!/bin/sh
 printf 'wattlined %s\n' "$*" >>"$CALLS"
+[ "$1" = restart ] && [ "${WATTLINE_RESTART_FAIL:-}" = 1 ] && exit 71
+[ "$1" = health ] && [ "${WATTLINE_HEALTH_FAIL:-}" = 1 ] && exit 71
+exit 0
 EOF
 	chmod +x "$CASE/wattlined"
 	export ROOT_PREFIX="$CASE/root"
@@ -86,6 +89,7 @@ EOF
 	export SYS_USB="$CASE/root/sys/bus/usb/devices" WATTLINE_SERVICE="$CASE/wattlined"
 	export CALLS="$CASE/calls" COUNTERS="$CASE/counters" REAL_MODINFO PATH="$TMP/bin:$REAL_PATH"
 	unset FAIL_AT
+	unset WATTLINE_HEALTH_FAIL
 	unset MODINFO_NO_FIELD
 }
 
@@ -133,6 +137,7 @@ insmod $PAYLOAD/modules/5.4.211/btrtl.ko
 insmod $PAYLOAD/modules/5.4.211/btusb.ko
 hciconfig hci0 up
 wattlined restart
+wattlined health
 EOF
 }
 
@@ -205,6 +210,11 @@ run_failures() {
 			fail "temporary file remains at $point"
 		fi
 	done
+	prepare_stock_with_backup
+	export WATTLINE_HEALTH_FAIL=1
+	if "$DRIVERCTL" activate --require-device >/dev/null 2>&1; then fail 'activation unexpectedly succeeded on health failure'; fi
+	assert_same "$STATE_DIR/btintel.ko" "$ROOT_PREFIX/lib/modules/5.4.211/btintel.ko"
+	[ ! -e "$ROOT_PREFIX/etc/wattline/rtl8761b.rollback" ] || fail 'rollback marker survived recovery'
 }
 
 run_restore() {
@@ -216,18 +226,35 @@ run_restore() {
 	printf 'stock-usb\n' | cmp - "$ROOT_PREFIX/lib/modules/5.4.211/btusb.ko" || fail 'btusb not restored'
 	[ ! -e "$ROOT_PREFIX/lib/modules/5.4.211/btrtl.ko" ] || fail 'packaged-only btrtl not removed'
 	grep -Fxq btusb "$ROOT_PREFIX/etc/modules.d/bluetooth" || fail 'module list not restored'
-	[ ! -e "$STATE_DIR" ] || fail 'backup not removed after restore'
+	[ -e "$STATE_DIR" ] || fail 'stock backup was removed after restore'
 
 	setup_case
 	add_usb one 2357 0604
 	"$DRIVERCTL" activate --require-device
 	rm -rf "$CASE/counters" && mkdir "$CASE/counters"
+	mkdir -p "$ROOT_PREFIX/etc/wattline"
+	printf '%s\n' rollback >"$ROOT_PREFIX/etc/wattline/rtl8761b.rollback"
 	export FAIL_AT=insmod:1
 	if "$DRIVERCTL" restore >/dev/null 2>&1; then
 		fail 'restore unexpectedly succeeded with load failure'
 	fi
 	unset FAIL_AT
 	assert_file "$STATE_DIR/complete"
+	assert_file "$ROOT_PREFIX/etc/wattline/rtl8761b.rollback"
+
+	setup_case
+	add_usb one 2357 0604
+	"$DRIVERCTL" activate --require-device
+	rm -rf "$CASE/counters" && mkdir "$CASE/counters"
+	mkdir -p "$ROOT_PREFIX/etc/wattline"
+	printf '%s\n' rollback >"$ROOT_PREFIX/etc/wattline/rtl8761b.rollback"
+	export WATTLINE_RESTART_FAIL=1
+	if "$DRIVERCTL" restore >/dev/null 2>&1; then
+		fail 'restore unexpectedly succeeded with restart failure'
+	fi
+	unset WATTLINE_RESTART_FAIL
+	[ ! -e "$ROOT_PREFIX/etc/wattline/rtl8761b.health" ] || fail 'health marker survived failed restore restart'
+	assert_file "$ROOT_PREFIX/etc/wattline/rtl8761b.rollback"
 }
 
 [ -x "$DRIVERCTL" ] || fail "driverctl is not executable: $DRIVERCTL"

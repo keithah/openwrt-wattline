@@ -1,6 +1,7 @@
 #!/bin/sh
 
 [ "${ACTION:-}" = add ] || exit 0
+[ -f "${HOTPLUG_MARKER:-/etc/wattline/rtl8761b.hotplug-enabled}" ] || exit 0
 
 product="${PRODUCT:-}"
 vendor="${product%%/*}"

@@ -231,8 +231,8 @@ return view.extend({
 			if (busy) scanBtn.setAttribute('disabled', '');
 			scanBtn.addEventListener('click', function () {
 				pairMsg = '';
-				api(token, port, 'POST', '/pairing/scan')
-					.then(function () { pollN = 0; pairKey = null; refresh(); })
+			api(token, port, 'POST', '/pairing/scan')
+					.then(function () { selMac = ''; pollN = 0; pairKey = null; refresh(); })
 					.catch(function (e) { pairMsg = e.message; redrawPairCard(); });
 			});
 			kids.push(scanBtn);
@@ -245,23 +245,33 @@ return view.extend({
 				row.addEventListener('click', function () { selMac = d.mac; redrawPairCard(); });
 				kids.push(row);
 			});
-			if (selMac) {
-				var pinInput = E('input', { 'class': 'wl-pin', maxlength: 6, value: pin, inputmode: 'numeric' });
+			if (selMac && !(p.phase === 'awaiting_pin' || p.phase === 'pin_required')) {
+				var request = E('button', { 'class': 'wl-btn primary' }, _('Show pairing code'));
+				if (busy) request.setAttribute('disabled', '');
+				request.addEventListener('click', function () { pairMsg = ''; api(token, port, 'POST', '/pairing/request-code', { mac: selMac, recover: false }).then(function () { pollN = 0; pairKey = null; refresh(); }).catch(function (e) { pairMsg = e.message; redrawPairCard(); }); });
+				kids.push(E('div', { style: 'margin-top:12px' }, request));
+			}
+			if (selMac && (p.phase === 'awaiting_pin' || p.phase === 'pin_required')) {
+				var pinInput = E('input', { 'class': 'wl-pin', maxlength: 6, value: pin, inputmode: 'numeric', 'aria-label': _('PIN') });
+				var deadline = p.pin_deadline ? Math.max(0, Math.ceil((new Date(p.pin_deadline).getTime() - Date.now()) / 1000)) : null;
+				kids.push(E('div', { 'aria-live': 'polite', 'class': 'wl-note' }, deadline == null ? _('Enter the code shown on the device.') : _('Code expires in ') + deadline + _(' seconds.')));
 				pinInput.addEventListener('input', function () {
 					pinInput.value = pinInput.value.replace(/[^0-9]/g, '');
 					pin = pinInput.value;
 				});
-				var pairBtn = E('button', { 'class': 'wl-btn primary' }, p.stage === 'pairing' ? _('Pairing…') : _('Pair'));
+				var pairBtn = E('button', { 'class': 'wl-btn primary' }, _('Submit code'));
 				if (busy) pairBtn.setAttribute('disabled', '');
 				pairBtn.addEventListener('click', function () {
 					pairMsg = '';
-					api(token, port, 'POST', '/pairing/pair', { mac: selMac, pin: pin })
+					api(token, port, 'POST', '/pairing/submit-pin', { pin: pin })
 						.then(function () { pollN = 0; pairKey = null; refresh(); })
 						.catch(function (e) { pairMsg = e.message; redrawPairCard(); });
 				});
+				var cancelBtn = E('button', { 'class': 'wl-btn' }, _('Cancel'));
+				cancelBtn.addEventListener('click', function () { api(token, port, 'POST', '/pairing/cancel').then(function () { pollN = 0; pairKey = null; refresh(); }); });
 				kids.push(E('div', { style: 'display:flex;align-items:flex-end;margin-top:12px' }, [
 					E('div', { style: 'margin-right:10px' }, [E('div', { 'class': 'wl-sub' }, _('PIN')), pinInput]),
-					E('div', { style: 'flex:1' }, ''), pairBtn
+					E('div', { style: 'flex:1' }, ''), pairBtn, cancelBtn
 				]));
 				kids.push(E('div', { 'class': 'wl-note' },
 					_('Default PIN is 020555 (see the manual). If the device shows a PIN on its screen, enter that instead.')));
@@ -288,7 +298,7 @@ return view.extend({
 			if (p.stage === 'paired') kids.push(E('div', { style: 'color:' + GREEN + ';font-size:13px;margin-top:10px' }, _('Paired. Connecting…')));
 			if (p.stage === 'error') kids.push(E('div', { style: 'color:' + RED + ';font-size:13px;margin-top:10px' }, _('Pairing failed: ') + (p.error || _('unknown error'))));
 			if (p.stage === 'error' && (selMac || p.target)) {
-				var recover = E('button', { 'class': 'wl-btn', style: 'margin-top:10px' }, _('Clear stale pairing & retry'));
+				var recover = E('button', { 'class': 'wl-btn', style: 'margin-top:10px' }, _('Request new pairing code'));
 				if (busy) recover.setAttribute('disabled', '');
 				recover.addEventListener('click', function () {
 					var mac = selMac || p.target;
@@ -296,7 +306,7 @@ return view.extend({
 						_('Link-Power firmware does not expose an erase-all-pairings command.');
 					if (!window.confirm(prompt)) return;
 					pairMsg = '';
-					api(token, port, 'POST', '/pairing/recover', { mac: mac, pin: pin })
+					api(token, port, 'POST', '/pairing/request-code', { mac: mac, recover: true })
 						.then(function () { selMac = mac; pollN = 0; pairKey = null; refresh(); })
 						.catch(function (e) { pairMsg = e.message; redrawPairCard(); });
 				});
@@ -634,14 +644,14 @@ return view.extend({
 						_('Plug the USB BLE dongle into the router and power on the Link-Power. Already-paired devices connect automatically.')
 					])));
 					var g = gen;
-					var busyStage = lastP && (lastP.stage === 'scanning' || lastP.stage === 'pairing');
+					var busyStage = lastP && (lastP.stage === 'scanning' || lastP.stage === 'pairing' || lastP.phase === 'awaiting_pin' || lastP.phase === 'pin_required');
 					pollN++;
 					if (!lastP || busyStage || pollN % 5 === 0) {
 						api(token, port, 'GET', '/pairing/status').then(function (p) {
 							if (g !== gen) return; // body was rebuilt since this poll started
 							lastP = p;
 							var key = JSON.stringify([p.stage, p.phase, p.message, p.error, p.target,
-								p.elapsed_ms, p.events, p.devices, selMac, pairMsg]);
+								p.elapsed_ms, p.pin_deadline, (p.phase === 'awaiting_pin' || p.phase === 'pin_required') ? Math.floor(Date.now() / 1000) : 0, p.events, p.devices, selMac, pairMsg]);
 							if (key !== pairKey || !pairCard) { pairKey = key; pairCard = buildPairCard(p); }
 							body.appendChild(pairCard);
 						}).catch(function () {});

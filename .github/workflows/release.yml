@@ -57,23 +57,3 @@ jobs:
             package/out/*.ipk
             package/out/Packages
             package/out/Packages.gz
-
-      - name: Publish opkg feed to gh-pages
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -eu
-          ver="${{ steps.ver.outputs.version }}"
-          sh package/mkindex.sh package/out "${GITHUB_REPOSITORY}"
-          tmp="$(mktemp -d)"
-          cp package/out/*.ipk package/out/Packages package/out/Packages.gz \
-             package/out/index.html package/out/.nojekyll "$tmp"/
-          cd "$tmp"
-          git init -q -b gh-pages
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -qm "opkg feed: wattline ${ver}"
-          git push -f \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            gh-pages

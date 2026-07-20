@@ -104,6 +104,7 @@ Canonical routes return errors only in this shape:
 | 404 | `not_found` | The requested timer or managed token does not exist. |
 | 409 | `capability_unsupported` | Hardware, characteristic inventory, or current app/OTA mode lacks the operation. |
 | 409 | `operation_in_progress` | A BLE pairing scan or pair operation is already active. |
+| 409 | `pairing_pin_not_requested` | No pairing operation is currently awaiting a PIN. |
 | 502 | `ble_operation_failed` | A required BLE command, read, or write failed. |
 | 503 | `device_disconnected` | Live BLE is required and unavailable. |
 | 504 | `command_timeout` | Telemetry did not confirm a reconciled command in time. |
@@ -120,6 +121,7 @@ The exact error bodies referred to below are:
 | `E(not_found)` | `{"error":{"code":"not_found","message":"Resource was not found","details":{}}}` |
 | `E(capability_unsupported)` | `{"error":{"code":"capability_unsupported","message":"Operation is not supported","details":{}}}` |
 | `E(operation_in_progress)` | `{"error":{"code":"operation_in_progress","message":"Pairing operation already in progress","details":{}}}` |
+| `E(pairing_pin_not_requested)` | `{"error":{"code":"pairing_pin_not_requested","message":"Pairing PIN was not requested","details":{}}}` |
 | `E(ble_operation_failed)` | `{"error":{"code":"ble_operation_failed","message":"BLE operation failed","details":{}}}` |
 | `E(device_disconnected)` | `{"error":{"code":"device_disconnected","message":"Link-Power is not connected","details":{}}}` |
 | `E(command_timeout)` | `{"error":{"code":"command_timeout","message":"Device telemetry did not confirm the command","details":{}}}` |
@@ -560,6 +562,13 @@ payloads. `elapsed_ms` advances while active and freezes at completion. A
 successful pair or recovery requires both BlueZ `Paired: true` and a protected
 Wattline handshake after reconnect; `AlreadyExists` alone is not success.
 
+The `GET /api/v1/pairing/status` response includes additive API-client
+enrollment fields. While a request-code operation awaits input, `phase` is
+`"awaiting_pin"`, `pin_required:true` is present, and `pin_deadline` contains
+the RFC 3339 UTC 25-second deadline. Because these fields use `omitempty`,
+`pin_required` and `pin_deadline` are omitted outside that waiting state. No
+field ever contains a PIN value.
+
 ## API-client pairing
 
 `pairing_pin` is a random, zero-padded six-digit enrollment PIN. Opening mode
@@ -570,6 +579,26 @@ Failures are limited to five per source IP and twenty globally per minute;
 proxy headers do not override the TCP source. Wrong, expired, closed,
 rate-limited, and source-capacity failures are indistinguishable. No pairing
 status or log exposes a PIN to non-admins.
+
+### Two-stage BLE PIN pairing
+
+These authenticated endpoints require a client or admin bearer token:
+
+| Endpoint | Exact request | Exact success | Endpoint-specific errors |
+|---|---|---|---|
+| `POST /api/v1/pairing/request-code` | `{"mac":"DC:04:5A:EB:72:2B"}` or with optional `"recover":true` | `202 {"status":"pairing"}` | `400 E(invalid_request)`, `409 E(operation_in_progress)`, `409 E(capability_unsupported)`, `502 E(ble_operation_failed)` |
+| `POST /api/v1/pairing/submit-pin` | `{"pin":"123456"}`; exactly six ASCII digits | `202 {"status":"pin_submitted"}` | `400 E(invalid_request)`, `409 E(pairing_pin_not_requested)`, `409 E(operation_in_progress)`, `409 E(capability_unsupported)`, `502 E(ble_operation_failed)` |
+| `POST /api/v1/pairing/cancel` | empty body (zero bytes) | `200 {"status":"canceled"}` | `400 E(invalid_request)`, `409 E(pairing_pin_not_requested)` when no prompt is active, `409 E(capability_unsupported)`, `502 E(ble_operation_failed)` |
+
+`request-code` starts the BLE operation and sets the status phase to
+`awaiting_pin`; `submit-pin` is accepted only in that state and clears it after
+submission (success or failure). `cancel` clears the same state without BLE
+PIN input.
+The PIN prompt lasts 25 seconds and has no automatic retry. PINs are never
+echoed or logged. Legacy `/pair` and `/recover` remain compatible. Recovery
+can replace only this router's BlueZ bond; it cannot erase the Link-Power
+device-side bond table, and destructive recovery tests require explicit
+authorization.
 
 ### `POST /api/v1/pair`
 

@@ -41,6 +41,7 @@ const (
 	PhaseClearingStaleBond  PairingPhase = "clearing_stale_bond"
 	PhaseLocatingDevice     PairingPhase = "locating_device"
 	PhaseExchangingPIN      PairingPhase = "exchanging_pin"
+	PhaseAwaitingPIN        PairingPhase = "awaiting_pin"
 	PhaseConfirmingBond     PairingPhase = "confirming_bond"
 	PhaseTrustingDevice     PairingPhase = "trusting_device"
 	PhaseReconnecting       PairingPhase = "reconnecting"
@@ -65,16 +66,18 @@ var ErrBusy = errors.New("pairing operation already in progress")
 
 // PairingStatus is the API-facing snapshot of the pairing state machine.
 type PairingStatus struct {
-	Stage     PairingStage   `json:"stage"`
-	Phase     PairingPhase   `json:"phase,omitempty"`
-	Message   string         `json:"message,omitempty"`
-	Error     string         `json:"error,omitempty"`
-	Target    string         `json:"target,omitempty"`
-	StartedAt *time.Time     `json:"started_at,omitempty"`
-	UpdatedAt *time.Time     `json:"updated_at,omitempty"`
-	ElapsedMS int64          `json:"elapsed_ms,omitempty"`
-	Events    []PairingEvent `json:"events,omitempty"`
-	Devices   []Found        `json:"devices"`
+	Stage       PairingStage   `json:"stage"`
+	Phase       PairingPhase   `json:"phase,omitempty"`
+	Message     string         `json:"message,omitempty"`
+	Error       string         `json:"error,omitempty"`
+	Target      string         `json:"target,omitempty"`
+	StartedAt   *time.Time     `json:"started_at,omitempty"`
+	UpdatedAt   *time.Time     `json:"updated_at,omitempty"`
+	ElapsedMS   int64          `json:"elapsed_ms,omitempty"`
+	Events      []PairingEvent `json:"events,omitempty"`
+	Devices     []Found        `json:"devices"`
+	PinRequired bool           `json:"pin_required,omitempty"`
+	PinDeadline *time.Time     `json:"pin_deadline,omitempty"`
 }
 
 // PairingDeps wires the manager to the daemon: BlueZ primitives, connector
@@ -92,6 +95,7 @@ type PairingDeps struct {
 	// configured PIN" — the manager calls that after a failed attempt so a
 	// wrong GUI PIN never outlives the operation that supplied it.
 	SetPIN func(string)
+	Prompt *PasskeyPrompt
 	// WaitConnected blocks until the connector re-establishes a session (or
 	// times out) after a pair reports success. BlueZ can report Paired: yes
 	// without storing a long-term key; a reconnect that survives the
@@ -150,9 +154,20 @@ func (p *Pairing) Status() PairingStatus {
 	return PairingStatus{
 		Stage: p.stage, Phase: p.phase, Message: p.message, Error: p.err,
 		Target: p.target, StartedAt: startedAt, UpdatedAt: updatedAt,
-		ElapsedMS: elapsed.Milliseconds(),
-		Events:    append([]PairingEvent(nil), p.events...),
-		Devices:   append([]Found(nil), p.devices...),
+		ElapsedMS:   elapsed.Milliseconds(),
+		Events:      append([]PairingEvent(nil), p.events...),
+		Devices:     append([]Found(nil), p.devices...),
+		PinRequired: p.d.Prompt != nil && p.d.Prompt.Waiting(),
+		PinDeadline: func() *time.Time {
+			if p.d.Prompt == nil {
+				return nil
+			}
+			d := p.d.Prompt.Deadline()
+			if d.IsZero() {
+				return nil
+			}
+			return &d
+		}(),
 	}
 }
 
@@ -239,16 +254,33 @@ func (p *Pairing) StartScan() error {
 // (WaitConnected): BlueZ can report a pair as done without storing a
 // long-term key, and only a surviving protected handshake proves the bond.
 func (p *Pairing) StartPair(mac, pin string) error {
-	return p.startPair(mac, pin, false)
+	return p.startPair(mac, pin, false, false)
 }
 
 // StartRecover clears the router's stale BlueZ object and requests a fresh
 // PIN bond. Link-Power exposes no device-side erase-all-bonds command.
 func (p *Pairing) StartRecover(mac, pin string) error {
-	return p.startPair(mac, pin, true)
+	return p.startPair(mac, pin, true, false)
 }
 
-func (p *Pairing) startPair(mac, pin string, recover bool) error {
+func (p *Pairing) StartInteractive(mac string, recover bool) error {
+	return p.startPair(mac, "", recover, true)
+}
+func (p *Pairing) SubmitPIN(pin string) error {
+	if p.d.Prompt == nil || (!p.d.Prompt.Active() && !p.d.Prompt.Waiting()) {
+		return ErrPasskeyNotWaiting
+	}
+	return p.d.Prompt.Submit(pin)
+}
+func (p *Pairing) Cancel() error {
+	if p.d.Prompt == nil || (!p.d.Prompt.Active() && !p.d.Prompt.Waiting()) {
+		return ErrPasskeyNotWaiting
+	}
+	p.d.Prompt.Cancel()
+	return nil
+}
+
+func (p *Pairing) startPair(mac, pin string, recover bool, interactive bool) error {
 	if err := p.begin(StagePairing); err != nil {
 		return err
 	}
@@ -282,7 +314,13 @@ func (p *Pairing) startPair(mac, pin string, recover bool) error {
 			resumed = true
 		}
 		defer resume()
+		if interactive && p.d.Prompt != nil {
+			p.d.Prompt.Activate(func() { p.setPhase(PhaseAwaitingPIN, "Waiting for pairing PIN") })
+		}
 		err := p.d.Ops.Pair(mac, recover, p.setPhase)
+		if interactive && p.d.Prompt != nil {
+			p.d.Prompt.Deactivate()
+		}
 		if err == nil {
 			p.setPhase(PhaseTrustingDevice, "Trusting Link-Power on this router")
 			err = p.d.Ops.Trust(mac)

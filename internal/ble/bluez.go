@@ -227,11 +227,8 @@ func (p *bluezPairer) Pair(mac string, recover bool, report PairProgress) error 
 		return err
 	}
 	reportBlueZPair(report, PhaseExchangingPIN)
-	if err := p.pairOnce(mac, 15*time.Second); err != nil {
-		dev.Call("org.bluez.Device1.CancelPairing", 0)
-		if err2 := p.pairOnce(mac, 30*time.Second); err2 != nil {
-			return fmt.Errorf("pair failed (retry after cancel also failed): %w", err2)
-		}
+	if err := p.pairOnce(mac, 30*time.Second); err != nil {
+		return fmt.Errorf("pair failed: %w", err)
 	}
 	reportBlueZPair(report, PhaseConfirmingBond)
 	pairedProperty, err := p.deviceObj(mac).GetProperty("org.bluez.Device1.Paired")

@@ -127,6 +127,9 @@ func pairingPairRoute(s *server, w http.ResponseWriter, r *http.Request) {
 func pairingRecoverRoute(s *server, w http.ResponseWriter, r *http.Request) {
 	s.pairing(s.pairingRecover)(w, r)
 }
+func pairingRequestCodeRoute(s *server, w http.ResponseWriter, r *http.Request) { s.pairing(s.pairingRequestCode)(w, r) }
+func pairingSubmitPINRoute(s *server, w http.ResponseWriter, r *http.Request) { s.pairing(s.pairingSubmitPIN)(w, r) }
+func pairingCancelRoute(s *server, w http.ResponseWriter, r *http.Request) { s.pairing(s.pairingCancel)(w, r) }
 func pairingUnpairRoute(s *server, w http.ResponseWriter, r *http.Request) {
 	s.pairing(s.pairingUnpair)(w, r)
 }
@@ -173,6 +176,9 @@ var routeDescriptors = []routeDescriptor{
 	{"POST", "/api/v1/pairing/scan", pairingScanRoute, clientSettingsRoute, true},
 	{"POST", "/api/v1/pairing/pair", pairingPairRoute, clientSettingsRoute, true},
 	{"POST", "/api/v1/pairing/recover", pairingRecoverRoute, clientSettingsRoute, true},
+	{"POST", "/api/v1/pairing/request-code", pairingRequestCodeRoute, clientSettingsRoute, false},
+	{"POST", "/api/v1/pairing/submit-pin", pairingSubmitPINRoute, clientSettingsRoute, false},
+	{"POST", "/api/v1/pairing/cancel", pairingCancelRoute, clientSettingsRoute, false},
 	{"DELETE", "/api/v1/pairing/device/{mac}", pairingUnpairRoute, clientSettingsRoute, true},
 	{"GET", "/api/v1/device/usbc-limit", (*server).getUSBCLimit, clientRoute, true},
 	{"POST", "/api/v1/device/usbc-limit", (*server).setUSBCLimit, clientRoute, true},

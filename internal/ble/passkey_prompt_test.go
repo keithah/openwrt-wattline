@@ -1,0 +1,113 @@
+package ble
+
+import (
+	"errors"
+	"testing"
+	"time"
+)
+
+func TestPromptBlocksUntilPINIsSubmitted(t *testing.T) {
+	p := NewPasskeyPrompt(time.Second)
+	result := make(chan struct {
+		pin string
+		err error
+	}, 1)
+	go func() {
+		pin, err := p.Wait(func() {})
+		result <- struct {
+			pin string
+			err error
+		}{pin, err}
+	}()
+	select {
+	case <-result:
+		t.Fatal("returned early")
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := p.Submit("020555"); err != nil {
+		t.Fatal(err)
+	}
+	r := <-result
+	if r.err != nil || r.pin != "020555" {
+		t.Fatalf("got %#v", r)
+	}
+}
+
+func TestPromptTimeoutAndLateSubmit(t *testing.T) {
+	p := NewPasskeyPrompt(5 * time.Millisecond)
+	_, err := p.Wait(func() {})
+	if !errors.Is(err, ErrPasskeyTimeout) {
+		t.Fatal(err)
+	}
+	if err := p.Submit("020555"); !errors.Is(err, ErrPasskeyNotWaiting) {
+		t.Fatal(err)
+	}
+}
+
+func TestPromptCancelAndDuplicates(t *testing.T) {
+	p := NewPasskeyPrompt(time.Second)
+	done := make(chan error, 1)
+	go func() { _, e := p.Wait(func() {}); done <- e }()
+	p.Cancel()
+	if !errors.Is(<-done, ErrPasskeyCanceled) {
+		t.Fatal("not canceled")
+	}
+	if err := p.Submit("020555"); !errors.Is(err, ErrPasskeyNotWaiting) {
+		t.Fatal(err)
+	}
+}
+
+func TestPromptRejectsInvalidAndConcurrentWait(t *testing.T) {
+	p := NewPasskeyPrompt(time.Second)
+	ready := make(chan struct{})
+	go func() { p.Wait(func() { close(ready) }) }()
+	<-ready
+	for _, s := range []string{"12345", "1234567", "１２３４５６", "12a456"} {
+		if err := p.Submit(s); !errors.Is(err, ErrPasskeyInvalid) {
+			t.Errorf("%q: %v", s, err)
+		}
+	}
+	if _, err := p.Wait(func() {}); !errors.Is(err, ErrPasskeyAlreadyWaiting) {
+		t.Fatal(err)
+	}
+	p.Cancel()
+}
+
+func TestPromptRejectsDuplicateTerminalActionsBeforeWaitConsumes(t *testing.T) {
+	p := NewPasskeyPrompt(time.Second)
+	started := make(chan struct{})
+	go func() { _, _ = p.Wait(func() { close(started) }) }()
+	<-started
+	if err := p.Submit("020555"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Submit("020555"); !errors.Is(err, ErrPasskeyNotWaiting) {
+		t.Fatalf("duplicate submit: %v", err)
+	}
+	p.Cancel()
+}
+
+func TestPromptCancelAfterSubmitDoesNotPoisonNextWait(t *testing.T) {
+	p := NewPasskeyPrompt(time.Second)
+	done := make(chan struct{})
+	go func() { _, _ = p.Wait(func() {}); close(done) }()
+	for !p.Waiting() {
+		time.Sleep(time.Millisecond)
+	}
+	if err := p.Submit("020555"); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	p.Cancel()
+	result := make(chan error, 1)
+	go func() { _, err := p.Wait(func() {}); result <- err }()
+	select {
+	case err := <-result:
+		t.Fatalf("fresh wait returned: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	p.Cancel()
+	if err := <-result; !errors.Is(err, ErrPasskeyCanceled) {
+		t.Fatal(err)
+	}
+}

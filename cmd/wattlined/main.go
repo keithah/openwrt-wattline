@@ -311,6 +311,7 @@ func run(cfgPath string, stop <-chan struct{}) error {
 	// The agent may fail to register when bluetoothd/the dongle come up after
 	// the daemon; ensureAgent retries before each pair attempt (idempotent).
 	var agentMu sync.Mutex
+	pairingPrompt := ble.NewPasskeyPrompt(25 * time.Second)
 	agentOK := false
 	ensureAgent := func() error {
 		agentMu.Lock()
@@ -318,7 +319,7 @@ func run(cfgPath string, stop <-chan struct{}) error {
 		if agentOK {
 			return nil
 		}
-		if _, err := ble.RegisterPairingAgent(live.current().BLEPIN); err != nil {
+		if _, err := ble.RegisterPairingAgent(live.current().BLEPIN, pairingPrompt); err != nil {
 			return err
 		}
 		agentOK = true
@@ -378,6 +379,7 @@ func run(cfgPath string, stop <-chan struct{}) error {
 			}
 			ble.SetAgentPIN(pin)
 		},
+		Prompt: pairingPrompt,
 		// A pair only counts once the connector reconnects and survives the
 		// protected handshake (continue.md: transient Paired: yes is not
 		// success). The connector retries every 2s; give it a minute.
