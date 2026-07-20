@@ -78,6 +78,7 @@ cat >"$CASE/wattlined" <<'EOF'
 #!/bin/sh
 printf 'wattlined %s\n' "$*" >>"$CALLS"
 [ "$1" = health ] && [ "${WATTLINE_HEALTH_FAIL:-}" = 1 ] && exit 71
+exit 0
 EOF
 	chmod +x "$CASE/wattlined"
 	export ROOT_PREFIX="$CASE/root"
@@ -134,8 +135,8 @@ insmod $PAYLOAD/modules/5.4.211/btintel.ko
 insmod $PAYLOAD/modules/5.4.211/btrtl.ko
 insmod $PAYLOAD/modules/5.4.211/btusb.ko
 hciconfig hci0 up
-	wattlined restart
-	wattlined health
+wattlined restart
+wattlined health
 EOF
 }
 
@@ -209,7 +210,7 @@ run_failures() {
 		fi
 	done
 	prepare_stock_with_backup
-	WATTLINE_HEALTH_FAIL=1
+	export WATTLINE_HEALTH_FAIL=1
 	if "$DRIVERCTL" activate --require-device >/dev/null 2>&1; then fail 'activation unexpectedly succeeded on health failure'; fi
 	assert_same "$STATE_DIR/btintel.ko" "$ROOT_PREFIX/lib/modules/5.4.211/btintel.ko"
 	[ ! -e "$ROOT_PREFIX/etc/wattline/rtl8761b.rollback" ] || fail 'rollback marker survived recovery'
