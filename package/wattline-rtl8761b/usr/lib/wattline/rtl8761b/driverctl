@@ -18,6 +18,8 @@ MACHINE="${MACHINE:-$(uname -m)}"
 MODULE_DIR="$ROOT_PREFIX/lib/modules/$EXPECTED_KERNEL"
 MODULE_LIST="$ROOT_PREFIX/etc/modules.d/bluetooth"
 MANIFEST_FILE="${MANIFEST_FILE:-$PACKAGE_ROOT/usr/share/wattline-rtl8761b/SHA256SUMS}"
+HEALTH_MARKER="${HEALTH_MARKER:-$ROOT_PREFIX/etc/wattline/rtl8761b.health}"
+ROLLBACK_MARKER="${ROLLBACK_MARKER:-$ROOT_PREFIX/etc/wattline/rtl8761b.rollback}"
 
 log() {
 	printf 'wattline-rtl8761b: %s\n' "$*" >&2
@@ -262,6 +264,7 @@ restore_locked() {
 		hciconfig hci0 up || return 1
 	fi
 	service_action restart || return 1
+	rm -f "$HEALTH_MARKER"
 	if [ "$remove_backup" = yes ]; then
 		rm -rf "$STATE_DIR"
 	fi
@@ -287,6 +290,8 @@ activate() {
 	fi
 	acquire_lock
 	backup_original || return 1
+	mkdir -p "$(dirname "$ROLLBACK_MARKER")"
+	: >"$ROLLBACK_MARKER" || return 1
 	if ! install_packaged_files; then
 		log 'module installation failed; restoring stock files'
 		restore_locked no || log 'automatic rollback also failed; stock backup retained'
@@ -313,6 +318,13 @@ activate() {
 		restore_locked no || log 'automatic rollback also failed; stock backup retained'
 		return 1
 	fi
+	if ! service_action health; then
+		log 'wattlined health check failed; restoring stock files'
+		restore_locked no || log 'automatic rollback also failed; stock backup retained'
+		return 1
+	fi
+	rm -f "$ROLLBACK_MARKER"
+	: >"$HEALTH_MARKER"
 }
 
 same_file() {

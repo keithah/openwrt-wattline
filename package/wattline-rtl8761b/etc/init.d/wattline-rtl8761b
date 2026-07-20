@@ -6,9 +6,11 @@ ENABLED=0
 
 DRIVERCTL="${DRIVERCTL:-/usr/lib/wattline/rtl8761b/driverctl}"
 HEALTH_MARKER="${HEALTH_MARKER:-/etc/wattline/rtl8761b.health}"
+ROLLBACK_MARKER="${ROLLBACK_MARKER:-/etc/wattline/rtl8761b.rollback}"
 
 start() {
 	[ -f "$HEALTH_MARKER" ] || return 0
+	[ ! -e "$ROLLBACK_MARKER" ] || { logger -t wattline-rtl8761b 'rollback pending; refusing boot activation'; return 1; }
 	"$DRIVERCTL" activate
 }
 
