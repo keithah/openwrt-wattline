@@ -75,7 +75,7 @@ admit() {
 		log "unsupported architecture $MACHINE (requires $EXPECTED_MACHINE)"
 		return 1
 	}
-	for command in awk chmod cmp cp dirname flock grep insmod mkdir modinfo mv rm rmmod sed sha256sum strings tr; do
+	for command in awk chmod cmp cp dirname flock grep hciconfig insmod mkdir modinfo mv rm rmmod sed sha256sum sleep strings tr logger; do
 		command -v "$command" >/dev/null 2>&1 || {
 			log "required command is unavailable: $command"
 			return 1
