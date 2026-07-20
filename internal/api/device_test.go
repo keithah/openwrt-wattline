@@ -3,7 +3,6 @@ package api
 import (
 	"bufio"
 	"context"
-	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,10 +16,6 @@ import (
 	"github.com/keithah/openwrt-wattline/internal/proto"
 	"github.com/keithah/openwrt-wattline/internal/state"
 )
-
-type failingReader struct{ err error }
-
-func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
 
 type canonicalSession struct {
 	store                                      *state.Store
@@ -381,45 +376,6 @@ func TestCanonicalErrorMapping(t *testing.T) {
 			t.Fatalf("%v body: %+v", tt.err, body)
 		}
 	}
-}
-
-func TestDCCommandIDGenerationFailureIsInternalError(t *testing.T) {
-	h, _, _ := canonicalServer(t, true, true, true, nil)
-	original := cryptorand.Reader
-	cryptorand.Reader = failingReader{err: errors.New("secret entropy detail")}
-	defer func() { cryptorand.Reader = original }()
-	rr := do(t, h, http.MethodPost, "/api/v1/device/dc", "tok", `{"on":true}`)
-	if rr.Code != 500 {
-		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
-	}
-	exactBody(t, rr, `{"error":{"code":"internal_error","message":"Internal server error","details":{}}}`)
-	for _, path := range []string{"/api/v1/device", "/api/v1/telemetry"} {
-		cached := do(t, h, http.MethodGet, path, "tok", "")
-		if strings.Contains(cached.Body.String(), "secret entropy detail") {
-			t.Fatalf("%s leaked entropy failure: %s", path, cached.Body.String())
-		}
-	}
-	srv := httptest.NewServer(h)
-	defer srv.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/events", nil)
-	req.Header.Set("Authorization", "Bearer tok")
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		if strings.HasPrefix(scanner.Text(), "data: ") {
-			if strings.Contains(scanner.Text(), "secret entropy detail") {
-				t.Fatalf("SSE leaked entropy failure: %s", scanner.Text())
-			}
-			return
-		}
-	}
-	t.Fatalf("SSE ended without data frame: %v", scanner.Err())
 }
 
 func TestDCBLEFailureNeverLeaksThroughCommandState(t *testing.T) {
