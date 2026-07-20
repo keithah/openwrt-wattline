@@ -16,6 +16,7 @@ SERVICE_SCRIPT="${SERVICE_SCRIPT:-/etc/init.d/wattlined}"
 PGREP="${PGREP:-pgrep}"
 DAEMON="/usr/bin/wattlined"
 PIDFILE="${PIDFILE:-/var/run/wattline/wattlined.pid}"
+LOGFILE="${LOGFILE:-/var/log/wattlined.log}"
 
 start() {
 	[ -x "$DAEMON" ] || return 1
@@ -26,14 +27,23 @@ start() {
 	repair_vpn_firewall
 	save_daemon_state || return 1
 	mkdir -p "$(dirname "$PIDFILE")" || return 1
-	"$DAEMON" -config /etc/config/wattline >/dev/null 2>&1 &
-	echo $! > "$PIDFILE"
+	tmp_pid="${PIDFILE}.new.$$"
+	"$DAEMON" -config /etc/config/wattline >>"$LOGFILE" 2>&1 &
+	pid=$!
+	echo "$pid" > "$tmp_pid"
+	if ! kill -0 "$pid" 2>/dev/null; then
+		rm -f "$tmp_pid"
+		return 1
+	fi
+	mv "$tmp_pid" "$PIDFILE"
 }
 
 stop() {
 	if [ -f "$PIDFILE" ]; then
 		pid="$(cat "$PIDFILE" 2>/dev/null || true)"
-		[ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+		if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] && grep -q '/usr/bin/wattlined' "/proc/$pid/cmdline" 2>/dev/null; then
+			kill "$pid" 2>/dev/null || true
+		fi
 		rm -f "$PIDFILE"
 	fi
 }
