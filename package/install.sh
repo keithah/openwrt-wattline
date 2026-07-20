@@ -2,7 +2,8 @@
 # Install the Wattline packages from the project-maintained opkg feed.
 set -eu
 
-feed_url='https://keithah.github.io/openwrt-wattline'
+feed_url="${WATTLINE_FEED_URL:-https://keithah.github.io/openwrt-wattline}"
+package_dir="${WATTLINE_PACKAGE_DIR:-}"
 target_root="${WATTLINE_ROOT:-/}"
 feeds_file="$target_root/etc/opkg/customfeeds.conf"
 keys_dir="$target_root/etc/opkg/keys"
@@ -32,10 +33,10 @@ fi
 
 if [ -e "$target_root/etc/config/glconfig" ] || [ -e "$target_root/usr/lib/oui-httpd" ]; then
 	ui_package='gl-app-wattline'
-	dashboard_url='http://router-address:9633/'
+	dashboard_url='GL admin: Applications -> Wattline'
 else
 	ui_package='luci-app-wattline'
-	dashboard_url='http://router-address:9633/'
+	dashboard_url='http://router-address/cgi-bin/luci/admin/services/wattline'
 fi
 
 feeds_dir=$(dirname "$feeds_file")
@@ -66,8 +67,21 @@ fi
 mv "$tmp_file" "$feeds_file"
 trap - 0 HUP INT TERM
 
-opkg update
-opkg install wattlined "$ui_package"
+if [ -n "$package_dir" ]; then
+	# Development/release validation mode. Globs are resolved on the router and
+	# must identify exactly one build of each required package.
+	opkg install "$package_dir"/wattline-bt_*.ipk \
+		"$package_dir"/wattlined_*.ipk "$package_dir"/"${ui_package}"_*.ipk
+else
+	opkg update
+	opkg install wattlined "$ui_package"
+fi
+
+/etc/init.d/bluetoothd enable
+/etc/init.d/bluetoothd start
+/etc/init.d/wattlined enable
+/etc/init.d/wattlined start
+/etc/init.d/wattlined health || fail 'wattlined failed its startup health check'
 
 # The RTL8761B package is optional. Install it only when a supported USB
 # adapter is physically present; never stage kernel modules on unrelated
@@ -81,8 +95,15 @@ for dev in "$target_root"/sys/bus/usb/devices/*; do
 	esac
 done
 if [ "$rtl_detected" = yes ]; then
-	opkg install "$rtl_pkg"
-	printf '%s\n' 'Detected RTL8761B adapter; optional driver package installed (activation remains explicit).'
+	if [ -n "$package_dir" ]; then
+		opkg install "$package_dir"/wattline-rtl8761b_*.ipk
+	else
+		opkg install "$rtl_pkg"
+	fi
+	driverctl=/usr/lib/wattline/rtl8761b/driverctl
+	"$driverctl" activate --require-device || fail 'RTL8761B activation failed; stock driver was restored'
+	"$driverctl" enable-boot || fail 'RTL8761B passed activation but boot enablement failed'
+	printf '%s\n' 'Detected RTL8761B adapter; driver installed, verified, and enabled for boot.'
 else
 	printf '%s\n' 'No RTL8761B adapter detected; optional driver package not installed.'
 fi
