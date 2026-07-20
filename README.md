@@ -83,10 +83,10 @@ opkg version rejects pax headers and has crashed on ar-form packages.
 
 ## Install or upgrade a router
 
-Use the Starwatch-style installer from the hosted feed:
+Use the product installer from Keith's shared, signed OpenWrt feed:
 
 ```sh
-wget -qO- https://keithah.github.io/openwrt-wattline/install.sh | sh
+wget -qO- https://keithah.github.io/openwrt-starwatch/install-wattline.sh | sh
 ```
 
 The installer verifies `aarch64_cortex-a53`, preserves existing opkg feeds,
@@ -94,6 +94,8 @@ selects the GL.iNet or LuCI panel, and installs the daemon and Bluetooth
 dependencies. It scans `/sys/bus/usb/devices` for RTL8761B IDs `2357:0604` or
 `0bda:8771`; only when one is present does it install
 `wattline-rtl8761b`. No RTL package is staged on routers without that adapter.
+The installer migrates legacy `starwatch` and `wattline` feed entries to one
+`keithah` entry without changing unrelated feeds.
 
 RTL installation is file-only and inert. Runtime activation remains explicit:
 
@@ -344,10 +346,9 @@ verified merely because unit tests pass.
 On a supported GL.iNet/OpenWrt router, run the project-maintained installer:
 
 ```sh
-wget -qO- https://keithah.github.io/openwrt-wattline/install.sh | sh
+wget -qO- https://keithah.github.io/openwrt-starwatch/install-wattline.sh | sh
 ```
 
 The installer verifies the architecture, preserves existing opkg feeds, selects the GL or LuCI UI, and installs the optional RTL8761B package only when a supported USB adapter is detected. Driver activation is always a separate explicit transaction.
 
 Wattline is licensed under the GNU Affero General Public License, version 3 (AGPL-3.0-or-later); see [LICENSE](LICENSE).
-
