@@ -102,14 +102,15 @@ func (p *PasskeyPrompt) Wait(onWaiting func()) (string, error) {
 	p.waiting = true
 	p.consumed = true
 	p.terminal = false
-	p.deadline = time.Now().Add(p.duration)
+	deadline := time.Now().Add(p.duration)
+	p.deadline = deadline
 	p.result = make(chan promptOutcome, 1)
 	ch := p.result
 	p.mu.Unlock()
 	if onWaiting != nil {
 		onWaiting()
 	}
-	t := time.NewTimer(time.Until(p.deadline))
+	t := time.NewTimer(time.Until(deadline))
 	defer t.Stop()
 	var out promptOutcome
 	select {

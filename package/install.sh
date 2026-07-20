@@ -74,9 +74,9 @@ opkg install wattlined "$ui_package"
 # routers.
 rtl_pkg='wattline-rtl8761b'
 rtl_detected=no
-for dev in /sys/bus/usb/devices/*; do
+for dev in "$target_root"/sys/bus/usb/devices/*; do
 	[ -r "$dev/idVendor" ] && [ -r "$dev/idProduct" ] || continue
-	case "$(cat "$dev/idVendor"):\$(cat "$dev/idProduct")" in
+	case "$(cat "$dev/idVendor"):$(cat "$dev/idProduct")" in
 		0bda:8771|2357:0604) rtl_detected=yes; break ;;
 	esac
 done
