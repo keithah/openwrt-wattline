@@ -226,7 +226,7 @@ run_restore() {
 	printf 'stock-usb\n' | cmp - "$ROOT_PREFIX/lib/modules/5.4.211/btusb.ko" || fail 'btusb not restored'
 	[ ! -e "$ROOT_PREFIX/lib/modules/5.4.211/btrtl.ko" ] || fail 'packaged-only btrtl not removed'
 	grep -Fxq btusb "$ROOT_PREFIX/etc/modules.d/bluetooth" || fail 'module list not restored'
-	[ ! -e "$STATE_DIR" ] || fail 'backup not removed after restore'
+	[ -e "$STATE_DIR" ] || fail 'stock backup was removed after restore'
 
 	setup_case
 	add_usb one 2357 0604

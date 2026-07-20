@@ -14,6 +14,7 @@ SYS_USB="${SYS_USB:-$ROOT_PREFIX/sys/bus/usb/devices}"
 PROC_MODULES="${PROC_MODULES:-$ROOT_PREFIX/proc/modules}"
 WATTLINE_SERVICE="${WATTLINE_SERVICE:-$ROOT_PREFIX/etc/init.d/wattlined}"
 BOOT_INIT="${BOOT_INIT:-$ROOT_PREFIX/etc/init.d/wattline-rtl8761b}"
+HOTPLUG_MARKER="${HOTPLUG_MARKER:-$ROOT_PREFIX/etc/wattline/rtl8761b.hotplug-enabled}"
 KERNEL_RELEASE="${KERNEL_RELEASE:-$(uname -r)}"
 MACHINE="${MACHINE:-$(uname -m)}"
 MODULE_DIR="$ROOT_PREFIX/lib/modules/$EXPECTED_KERNEL"
@@ -389,19 +390,20 @@ status() {
 restore() {
 	admit || return 1
 	acquire_lock
-	restore_locked yes
+	restore_locked no
 }
 
 enable_boot() {
 	[ -f "$HEALTH_MARKER" ] || die "health marker is required before enabling boot activation"
 	[ ! -e "$ROLLBACK_MARKER" ] || die "rollback marker present; refusing to enable boot activation"
 	[ -x "$BOOT_INIT" ] || die "init hook is unavailable: $BOOT_INIT"
-	"$BOOT_INIT" enable
+	"$BOOT_INIT" enable && { mkdir -p "$(dirname "$HOTPLUG_MARKER")" 2>/dev/null && : >"$HOTPLUG_MARKER" || true; }
 }
 
 disable_boot() {
 	[ -x "$BOOT_INIT" ] || die "init hook is unavailable: $BOOT_INIT"
 	"$BOOT_INIT" disable
+	rm -f "$HOTPLUG_MARKER"
 }
 
 usage() {

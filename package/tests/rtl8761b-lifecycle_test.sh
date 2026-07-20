@@ -86,9 +86,10 @@ for forbidden in driverctl insmod rmmod hciconfig 'init.d/wattlined enable' 'ini
 done
 
 hotplug="$BASE/etc/hotplug.d/usb/20-wattline-rtl8761b"
+HOTPLUG_MARKER="$TMP/hotplug-enabled"; : >"$HOTPLUG_MARKER"
 for product in 2357/0604/0100 0BDA/8771/0200; do
 	: >"$CALLS"
-	ACTION=add PRODUCT="$product" sh "$hotplug"
+	HOTPLUG_MARKER="$HOTPLUG_MARKER" ACTION=add PRODUCT="$product" sh "$hotplug"
 	assert_calls 'driverctl activate --require-device'
 done
 for row in 'remove 2357/0604/0100' 'add 0a12/0001/0100' 'add malformed'; do
