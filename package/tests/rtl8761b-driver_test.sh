@@ -231,12 +231,15 @@ run_restore() {
 	add_usb one 2357 0604
 	"$DRIVERCTL" activate --require-device
 	rm -rf "$CASE/counters" && mkdir "$CASE/counters"
+	mkdir -p "$ROOT_PREFIX/etc/wattline"
+	printf '%s\n' rollback >"$ROOT_PREFIX/etc/wattline/rtl8761b.rollback"
 	export FAIL_AT=insmod:1
 	if "$DRIVERCTL" restore >/dev/null 2>&1; then
 		fail 'restore unexpectedly succeeded with load failure'
 	fi
 	unset FAIL_AT
 	assert_file "$STATE_DIR/complete"
+	assert_file "$ROOT_PREFIX/etc/wattline/rtl8761b.rollback"
 }
 
 [ -x "$DRIVERCTL" ] || fail "driverctl is not executable: $DRIVERCTL"
