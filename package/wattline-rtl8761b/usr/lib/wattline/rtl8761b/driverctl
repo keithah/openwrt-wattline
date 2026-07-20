@@ -268,6 +268,7 @@ restore_locked() {
 	if [ "$remove_backup" = yes ]; then
 		rm -rf "$STATE_DIR"
 	fi
+	rm -f "$ROLLBACK_MARKER"
 }
 
 acquire_lock() {

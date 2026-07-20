@@ -213,7 +213,7 @@ run_failures() {
 	export WATTLINE_HEALTH_FAIL=1
 	if "$DRIVERCTL" activate --require-device >/dev/null 2>&1; then fail 'activation unexpectedly succeeded on health failure'; fi
 	assert_same "$STATE_DIR/btintel.ko" "$ROOT_PREFIX/lib/modules/5.4.211/btintel.ko"
-	true
+	[ ! -e "$ROOT_PREFIX/etc/wattline/rtl8761b.rollback" ] || fail 'rollback marker survived recovery'
 }
 
 run_restore() {
