@@ -60,20 +60,30 @@ assert_calls ''
 IPKG_INSTROOT=/staging sh "$BASE/CONTROL/postinst"
 assert_calls ''
 IPKG_INSTROOT= sh "$BASE/CONTROL/postinst"
-assert_calls "driverctl admit
-driverctl activate --require-device
-init enable"
+assert_calls ''
 
 : >"$CALLS"
 IPKG_INSTROOT=/staging sh "$BASE/CONTROL/prerm"
 assert_calls ''
 IPKG_INSTROOT= sh "$BASE/CONTROL/prerm"
-assert_calls 'driverctl restore'
+assert_calls ''
 
 : >"$CALLS"
 . "$BASE/etc/init.d/wattline-rtl8761b"
+HEALTH_MARKER="$TMP/health"
+start
+assert_calls ''
+: >"$HEALTH_MARKER"
 start
 assert_calls 'driverctl activate'
+
+# wattlined postinst must retain defaults setup but never perform runtime
+# service activation/restart or driver operations.
+for forbidden in driverctl insmod rmmod hciconfig 'init.d/wattlined enable' 'init.d/wattlined restart'; do
+	if grep -Fq "$forbidden" "$ROOT/package/wattlined/CONTROL/postinst"; then
+		fail "wattlined postinst contains forbidden runtime action: $forbidden"
+	fi
+done
 
 hotplug="$BASE/etc/hotplug.d/usb/20-wattline-rtl8761b"
 for product in 2357/0604/0100 0BDA/8771/0200; do

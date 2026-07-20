@@ -2,10 +2,13 @@
 
 START=15
 STOP=85
+ENABLED=0
 
 DRIVERCTL="${DRIVERCTL:-/usr/lib/wattline/rtl8761b/driverctl}"
+HEALTH_MARKER="${HEALTH_MARKER:-/etc/wattline/rtl8761b.health}"
 
 start() {
+	[ -f "$HEALTH_MARKER" ] || return 0
 	"$DRIVERCTL" activate
 }
 

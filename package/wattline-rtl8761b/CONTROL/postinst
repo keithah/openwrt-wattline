@@ -1,13 +1,5 @@
 #!/bin/sh
 set -eu
 
-[ -n "${IPKG_INSTROOT:-}" ] && exit 0
-
-DRIVERCTL="${DRIVERCTL:-/usr/lib/wattline/rtl8761b/driverctl}"
-INIT_SERVICE="${INIT_SERVICE:-/etc/init.d/wattline-rtl8761b}"
-
-"$DRIVERCTL" admit
-"$DRIVERCTL" activate --require-device
-"$INIT_SERVICE" enable
-
+# Installation is intentionally file-only. Runtime activation is explicit.
 exit 0
