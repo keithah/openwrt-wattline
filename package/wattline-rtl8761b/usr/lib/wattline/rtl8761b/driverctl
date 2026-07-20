@@ -257,6 +257,8 @@ load_stock_runtime() {
 
 restore_locked() {
 	remove_backup=$1
+	# A failed restore must not leave the health marker signaling packaged state.
+	rm -f "$HEALTH_MARKER"
 	quiesce_runtime || return 1
 	restore_files || return 1
 	load_stock_runtime || return 1
@@ -264,7 +266,6 @@ restore_locked() {
 		hciconfig hci0 up || return 1
 	fi
 	service_action restart || return 1
-	rm -f "$HEALTH_MARKER"
 	if [ "$remove_backup" = yes ]; then
 		rm -rf "$STATE_DIR"
 	fi

@@ -77,6 +77,7 @@ setup_case() {
 cat >"$CASE/wattlined" <<'EOF'
 #!/bin/sh
 printf 'wattlined %s\n' "$*" >>"$CALLS"
+[ "$1" = restart ] && [ "${WATTLINE_RESTART_FAIL:-}" = 1 ] && exit 71
 [ "$1" = health ] && [ "${WATTLINE_HEALTH_FAIL:-}" = 1 ] && exit 71
 exit 0
 EOF
@@ -239,6 +240,20 @@ run_restore() {
 	fi
 	unset FAIL_AT
 	assert_file "$STATE_DIR/complete"
+	assert_file "$ROOT_PREFIX/etc/wattline/rtl8761b.rollback"
+
+	setup_case
+	add_usb one 2357 0604
+	"$DRIVERCTL" activate --require-device
+	rm -rf "$CASE/counters" && mkdir "$CASE/counters"
+	mkdir -p "$ROOT_PREFIX/etc/wattline"
+	printf '%s\n' rollback >"$ROOT_PREFIX/etc/wattline/rtl8761b.rollback"
+	export WATTLINE_RESTART_FAIL=1
+	if "$DRIVERCTL" restore >/dev/null 2>&1; then
+		fail 'restore unexpectedly succeeded with restart failure'
+	fi
+	unset WATTLINE_RESTART_FAIL
+	[ ! -e "$ROOT_PREFIX/etc/wattline/rtl8761b.health" ] || fail 'health marker survived failed restore restart'
 	assert_file "$ROOT_PREFIX/etc/wattline/rtl8761b.rollback"
 }
 
