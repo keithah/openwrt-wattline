@@ -71,3 +71,10 @@ reload_service() {
 service_triggers() {
 	procd_add_reload_trigger "wattline"
 }
+
+# Lightweight readiness probe used by dependent services after restart.
+# Do not mutate service state; simply verify the configured daemon process
+# is present.
+health() {
+	"$PGREP" -f '/usr/bin/wattlined -config /etc/config/wattline' >/dev/null 2>&1
+}

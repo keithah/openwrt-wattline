@@ -74,9 +74,10 @@ setup_case() {
 		'btrtl 1 1 btusb, Live 0' \
 		'btintel 1 1 btusb, Live 0' >"$CASE/proc-modules"
 	: >"$CASE/calls"
-	cat >"$CASE/wattlined" <<'EOF'
+cat >"$CASE/wattlined" <<'EOF'
 #!/bin/sh
 printf 'wattlined %s\n' "$*" >>"$CALLS"
+[ "$1" = health ] && [ "${WATTLINE_HEALTH_FAIL:-}" = 1 ] && exit 71
 EOF
 	chmod +x "$CASE/wattlined"
 	export ROOT_PREFIX="$CASE/root"
@@ -86,6 +87,7 @@ EOF
 	export SYS_USB="$CASE/root/sys/bus/usb/devices" WATTLINE_SERVICE="$CASE/wattlined"
 	export CALLS="$CASE/calls" COUNTERS="$CASE/counters" REAL_MODINFO PATH="$TMP/bin:$REAL_PATH"
 	unset FAIL_AT
+	unset WATTLINE_HEALTH_FAIL
 	unset MODINFO_NO_FIELD
 }
 
@@ -132,7 +134,8 @@ insmod $PAYLOAD/modules/5.4.211/btintel.ko
 insmod $PAYLOAD/modules/5.4.211/btrtl.ko
 insmod $PAYLOAD/modules/5.4.211/btusb.ko
 hciconfig hci0 up
-wattlined restart
+	wattlined restart
+	wattlined health
 EOF
 }
 
@@ -205,6 +208,11 @@ run_failures() {
 			fail "temporary file remains at $point"
 		fi
 	done
+	prepare_stock_with_backup
+	WATTLINE_HEALTH_FAIL=1
+	if "$DRIVERCTL" activate --require-device >/dev/null 2>&1; then fail 'activation unexpectedly succeeded on health failure'; fi
+	assert_same "$STATE_DIR/btintel.ko" "$ROOT_PREFIX/lib/modules/5.4.211/btintel.ko"
+	[ ! -e "$ROOT_PREFIX/etc/wattline/rtl8761b.rollback" ] || fail 'rollback marker survived recovery'
 }
 
 run_restore() {

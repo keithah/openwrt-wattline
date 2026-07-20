@@ -318,12 +318,18 @@ activate() {
 		restore_locked no || log 'automatic rollback also failed; stock backup retained'
 		return 1
 	fi
-	if ! service_action health; then
+	health_ok=no
+	for _ in 1 2 3 4 5; do
+		if service_action health; then health_ok=yes; break; fi
+		sleep 1
+	done
+	if [ "$health_ok" != yes ]; then
 		log 'wattlined health check failed; restoring stock files'
 		restore_locked no || log 'automatic rollback also failed; stock backup retained'
 		return 1
 	fi
 	rm -f "$ROLLBACK_MARKER"
+	mkdir -p "$(dirname "$HEALTH_MARKER")"
 	: >"$HEALTH_MARKER"
 }
 
