@@ -397,7 +397,9 @@ enable_boot() {
 	[ -f "$HEALTH_MARKER" ] || die "health marker is required before enabling boot activation"
 	[ ! -e "$ROLLBACK_MARKER" ] || die "rollback marker present; refusing to enable boot activation"
 	[ -x "$BOOT_INIT" ] || die "init hook is unavailable: $BOOT_INIT"
-	"$BOOT_INIT" enable && { mkdir -p "$(dirname "$HOTPLUG_MARKER")" 2>/dev/null && : >"$HOTPLUG_MARKER" || true; }
+	"$BOOT_INIT" enable || return 1
+	mkdir -p "$(dirname "$HOTPLUG_MARKER")" || return 1
+	: >"$HOTPLUG_MARKER" || return 1
 }
 
 disable_boot() {

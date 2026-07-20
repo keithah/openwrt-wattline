@@ -118,15 +118,15 @@ EOF2
 chmod +x "$BOOT_INIT"
 : >"$TMP/health"
 : >"$CALLS"
-HEALTH_MARKER="$TMP/health" ROLLBACK_MARKER="$TMP/rollback" BOOT_INIT="$BOOT_INIT" \
+HEALTH_MARKER="$TMP/health" ROLLBACK_MARKER="$TMP/rollback" HOTPLUG_MARKER="$TMP/hotplug-marker" BOOT_INIT="$BOOT_INIT" \
 	sh "$BASE/usr/lib/wattline/rtl8761b/driverctl" enable-boot
 assert_calls 'boot enable'
 : >"$CALLS"
-HEALTH_MARKER="$TMP/missing" ROLLBACK_MARKER="$TMP/rollback" BOOT_INIT="$BOOT_INIT" \
+HEALTH_MARKER="$TMP/missing" ROLLBACK_MARKER="$TMP/rollback" HOTPLUG_MARKER="$TMP/hotplug-marker" BOOT_INIT="$BOOT_INIT" \
 	sh "$BASE/usr/lib/wattline/rtl8761b/driverctl" enable-boot >/dev/null 2>&1 && fail 'enable-boot ignored missing health marker'
 assert_calls ''
 : >"$TMP/rollback"
-HEALTH_MARKER="$TMP/health" ROLLBACK_MARKER="$TMP/rollback" BOOT_INIT="$BOOT_INIT" \
+HEALTH_MARKER="$TMP/health" ROLLBACK_MARKER="$TMP/rollback" HOTPLUG_MARKER="$TMP/hotplug-marker" BOOT_INIT="$BOOT_INIT" \
 	sh "$BASE/usr/lib/wattline/rtl8761b/driverctl" enable-boot >/dev/null 2>&1 && fail 'enable-boot ignored rollback marker'
 : >"$CALLS"
 HEALTH_MARKER="$TMP/health" ROLLBACK_MARKER="$TMP/rollback" BOOT_INIT="$BOOT_INIT" \
