@@ -74,7 +74,7 @@ if [ -n "$package_dir" ]; then
 		"$package_dir"/wattlined_*.ipk "$package_dir"/"${ui_package}"_*.ipk
 else
 	opkg update
-	opkg install wattlined "$ui_package"
+	opkg install wattline-bt wattlined "$ui_package"
 fi
 
 /etc/init.d/bluetoothd enable
