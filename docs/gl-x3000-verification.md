@@ -11,8 +11,9 @@ to PASS or FAIL.
 
 ## Install, reboot, and credentials
 
-The driver package is inert when installed. Reboot and check router health and
-dongle presence, then explicitly activate with
+Run the hosted installer first. It installs the optional RTL package only when
+USB sysfs reports a supported ID. The driver package is inert when installed.
+Reboot and check router health and dongle presence, then explicitly activate with
 `driverctl activate --require-device`; repeat the health check and reboot-test
 before running `driverctl enable-boot`. Boot enablement requires
 `/etc/wattline/rtl8761b.health` and no `rtl8761b.rollback` marker. Use
@@ -20,9 +21,8 @@ before running `driverctl enable-boot`. Boot enablement requires
 modules). Use `driverctl restore` to return to stock files; investigate any
 remaining rollback marker before retrying activation.
 
-- [ ] **NOT RUN — requires GL-X3000/real BLE** — Transfer all five IPKs, inspect
-  them with `tar tzf`, then install `wattline-bt`, `wattlined`,
-  `luci-app-wattline`, and `gl-app-wattline`. Inspect USB sysfs and install
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Run the installer, inspect
+  the feed/IPK metadata, then install the base daemon/UI packages. The installer inspects USB sysfs and installs
   `wattline-rtl8761b` only for `2357:0604` or `0bda:8771`. Expected: opkg accepts
   the gzip ustar archives and reports matching package versions/architectures.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Stage the optional driver:
@@ -46,8 +46,8 @@ remaining rollback marker before retrying activation.
   wattlined at S95, the packaged hashes persist, and BLE scanning still works.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Run
   `/etc/init.d/wattlined enable; reboot`, reconnect, then inspect
-  `/etc/init.d/wattlined status` and `logread -e wattline`. Expected: procd starts
-  the daemon once, it survives reboot, and no credential is regenerated.
+  `/etc/init.d/wattlined status` and `logread -e wattline`. Expected: the init script starts
+  the daemon once (using its GL fallback when ubus/procd is unavailable), and it survives reboot, and no credential is regenerated.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Reinstall the same-version IPKs
   using `opkg install --force-reinstall /tmp/*.ipk`. Expected: the binary updates
   while the bootstrap token, managed tokens, certificate, UCI rules, and paired

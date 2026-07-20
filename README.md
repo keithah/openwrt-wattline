@@ -83,115 +83,39 @@ opkg version rejects pax headers and has crashed on ar-form packages.
 
 ## Install or upgrade a router
 
-Dropbear may not provide an scp server, so stream the files over SSH:
+Use the Starwatch-style installer from the hosted feed:
 
 ```sh
-for f in package/out/*.ipk; do
-  ssh root@192.168.8.1 "cat > /tmp/$(basename "$f")" < "$f"
-done
-
-ssh root@192.168.8.1 'opkg update && opkg install \
-  /tmp/wattline-bt_*.ipk \
-  /tmp/wattlined_*.ipk \
-  /tmp/luci-app-wattline_*.ipk \
-  /tmp/gl-app-wattline_*.ipk'
+wget -qO- https://keithah.github.io/openwrt-wattline/install.sh | sh
 ```
 
-Install the RTL8761B package only when sysfs identifies a supported adapter:
+The installer verifies `aarch64_cortex-a53`, preserves existing opkg feeds,
+selects the GL.iNet or LuCI panel, and installs the daemon and Bluetooth
+dependencies. It scans `/sys/bus/usb/devices` for RTL8761B IDs `2357:0604` or
+`0bda:8771`; only when one is present does it install
+`wattline-rtl8761b`. No RTL package is staged on routers without that adapter.
+
+RTL installation is file-only and inert. Runtime activation remains explicit:
 
 ```sh
-ssh root@192.168.8.1 '
-for d in /sys/bus/usb/devices/*; do
-  [ -r "$d/idVendor" ] && [ -r "$d/idProduct" ] || continue
-  id="$(tr A-F a-f < "$d/idVendor"):$(tr A-F a-f < "$d/idProduct")"
-  case "$id" in
-    2357:0604|0bda:8771) opkg install /tmp/wattline-rtl8761b_*.ipk; break ;;
-  esac
-done'
+/usr/lib/wattline/rtl8761b/driverctl activate --require-device
+# after health and reboot verification only:
+/usr/lib/wattline/rtl8761b/driverctl enable-boot
 ```
 
-`wattline-rtl8761b` bundles the matching linux-firmware blobs and verified
-`btintel`/`btrtl`/`btusb` modules, installs them transactionally, loads them at
-boot and USB hotplug, and restores the original modules when removed. It
-hard-fails unless the router is `aarch64` on Linux `5.4.211`; a firmware upgrade
-that changes the kernel requires a new driver build and package.
+The driver controller validates the exact kernel, USB identity, module hashes,
+and firmware, creates a rollback marker before mutation, and restores stock
+modules on failure. Use `driverctl restore` for recovery; it preserves the
+stock backup. `disable-boot` removes only the opt-in boot marker.
 
-For a rebuilt package with the same version, use
-`opkg install --force-reinstall /tmp/PACKAGE.ipk`; otherwise opkg skips it.
-Release builds should bump `VERSION`. `make -C package VERSION=1.3.1 feed`
-also creates `Packages` and `Packages.gz` for a normal opkg feed.
+The Wattline init script uses the normal OpenWrt service interface and a direct
+PID-file fallback for GL-X3000 images whose `procd/ubus` supervisor is
+unresponsive. This keeps start/stop/health behavior working without changing
+router firmware.
 
-Installation creates an admin bootstrap token, a managed-token store, and an
-ECDSA P-256 self-signed certificate, then enables and restarts the daemon.
-Private credential directories and files are mode `0700`/`0600`. Confirm startup:
-
-```sh
-ssh root@192.168.8.1 '/etc/init.d/wattlined status; logread -e wattline | tail -n 50'
-```
-
-### Install from the hosted opkg feed (recommended)
-
-A ready-to-use opkg feed is published via GitHub Pages at
-**https://keithah.github.io/openwrt-wattline/**. Register it once and opkg
-handles install and upgrades (it pulls the `bluez`/`dbus`/`kmod-bluetooth`
-dependencies by name from the router's own feeds):
-
-```sh
-ssh root@192.168.8.1
-echo 'src/gz wattline https://keithah.github.io/openwrt-wattline' >> /etc/opkg/customfeeds.conf
-opkg update
-opkg install wattlined luci-app-wattline gl-app-wattline   # first time
-# Add wattline-rtl8761b only after the sysfs check above reports a supported ID.
-opkg upgrade wattlined luci-app-wattline gl-app-wattline    # later releases
-```
-
-The feed is regenerated and published automatically on each release (see
-[Releasing](#releasing)).
-
-### Install from a release
-
-Prefer the hosted feed above. If you'd rather grab files directly, each
-[GitHub release](https://github.com/keithah/openwrt-wattline/releases) attaches
-the five `.ipk`s plus a ready-made opkg feed index (`Packages`, `Packages.gz`).
-To install without building anything:
-
-```sh
-# Download the ipks from the latest release straight to the router
-ssh root@192.168.8.1 'cd /tmp && for p in \
-    wattline-bt_VER_all.ipk \
-    wattline-rtl8761b_VER_aarch64_cortex-a53.ipk \
-    wattlined_VER_aarch64_cortex-a53.ipk \
-    luci-app-wattline_VER_all.ipk \
-    gl-app-wattline_VER_all.ipk; do
-  wget -q "https://github.com/keithah/openwrt-wattline/releases/latest/download/$p"
-done
-opkg update && opkg install /tmp/wattline-bt_*.ipk /tmp/wattlined_*.ipk \
-  /tmp/luci-app-wattline_*.ipk /tmp/gl-app-wattline_*.ipk'
-```
-
-The download includes `wattline-rtl8761b`, but install it separately only after
-the supported-ID sysfs check above succeeds.
-
-The RTL8761B package uses staged activation. Install the package (it is inert
-until explicitly activated), reboot once, and verify the router is healthy and
-the supported dongle is present. Then run
-`/usr/lib/wattline/rtl8761b/driverctl activate --require-device`, perform the
-health check again, and reboot-test before enabling boot activation with
-`driverctl enable-boot`. `enable-boot` requires
-`/etc/wattline/rtl8761b.health` and refuses when
-`/etc/wattline/rtl8761b.rollback` exists; `disable-boot` only removes the init
-hook and never unloads or changes modules. To restore the stock driver, run
-`driverctl restore`; a rollback marker is created during activation and is
-cleared only after recovery succeeds.
-
-Replace `VER` with the release version (for example `0.1.2`). The release
-assets are flat files, so they can also be registered directly as an opkg feed:
-
-```sh
-echo 'src/gz wattline https://github.com/keithah/openwrt-wattline/releases/latest/download' \
-  >> /etc/opkg/customfeeds.conf
-opkg update && opkg install wattlined luci-app-wattline gl-app-wattline
-```
+For development or a pinned release, download the five IPKs from GitHub and
+install only the base packages first. Use the same USB-ID check before installing
+the optional RTL package.
 
 ### Updating without a manual reinstall (opkg feed)
 
