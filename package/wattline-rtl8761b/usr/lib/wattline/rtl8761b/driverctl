@@ -13,6 +13,7 @@ LOCK_FILE="${LOCK_FILE:-$ROOT_PREFIX/var/lock/wattline-rtl8761b.lock}"
 SYS_USB="${SYS_USB:-$ROOT_PREFIX/sys/bus/usb/devices}"
 PROC_MODULES="${PROC_MODULES:-$ROOT_PREFIX/proc/modules}"
 WATTLINE_SERVICE="${WATTLINE_SERVICE:-$ROOT_PREFIX/etc/init.d/wattlined}"
+BOOT_INIT="${BOOT_INIT:-$ROOT_PREFIX/etc/init.d/wattline-rtl8761b}"
 KERNEL_RELEASE="${KERNEL_RELEASE:-$(uname -r)}"
 MACHINE="${MACHINE:-$(uname -m)}"
 MODULE_DIR="$ROOT_PREFIX/lib/modules/$EXPECTED_KERNEL"
@@ -391,8 +392,20 @@ restore() {
 	restore_locked yes
 }
 
+enable_boot() {
+	[ -f "$HEALTH_MARKER" ] || die "health marker is required before enabling boot activation"
+	[ ! -e "$ROLLBACK_MARKER" ] || die "rollback marker present; refusing to enable boot activation"
+	[ -x "$BOOT_INIT" ] || die "init hook is unavailable: $BOOT_INIT"
+	"$BOOT_INIT" enable
+}
+
+disable_boot() {
+	[ -x "$BOOT_INIT" ] || die "init hook is unavailable: $BOOT_INIT"
+	"$BOOT_INIT" disable
+}
+
 usage() {
-	printf 'usage: %s {detect|admit|activate [--require-device]|status|restore}\n' "$0" >&2
+	printf 'usage: %s {detect|admit|activate [--require-device]|status|restore|enable-boot|disable-boot}\n' "$0" >&2
 	exit 2
 }
 
@@ -405,5 +418,7 @@ case "$command_name" in
 	activate) [ "$#" -le 1 ] || usage; activate "$@" ;;
 	status) [ "$#" -eq 0 ] || usage; status ;;
 	restore) [ "$#" -eq 0 ] || usage; restore ;;
+	enable-boot) [ "$#" -eq 0 ] || usage; enable_boot ;;
+	disable-boot) [ "$#" -eq 0 ] || usage; disable_boot ;;
 	*) usage ;;
 esac

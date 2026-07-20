@@ -104,3 +104,30 @@ grep -Fxq 'Architecture: aarch64_cortex-a53' "$BASE/CONTROL/control"
 grep -Fxq 'Depends: wattline-bt' "$BASE/CONTROL/control"
 
 echo 'RTL8761B lifecycle tests passed'
+
+# Boot hook controls require health and refuse rollback; they only call init enable/disable.
+for required in 'enable-boot' 'disable-boot' 'HEALTH_MARKER' 'ROLLBACK_MARKER'; do
+	grep -Fq "$required" "$BASE/usr/lib/wattline/rtl8761b/driverctl" || fail "driverctl missing boot control token: $required"
+done
+BOOT_INIT="$TMP/boot-init"
+cat >"$BOOT_INIT" <<'EOF2'
+#!/bin/sh
+printf 'boot %s\n' "$*" >>"$CALLS"
+EOF2
+chmod +x "$BOOT_INIT"
+: >"$TMP/health"
+: >"$CALLS"
+HEALTH_MARKER="$TMP/health" ROLLBACK_MARKER="$TMP/rollback" BOOT_INIT="$BOOT_INIT" \
+	sh "$BASE/usr/lib/wattline/rtl8761b/driverctl" enable-boot
+assert_calls 'boot enable'
+: >"$CALLS"
+HEALTH_MARKER="$TMP/missing" ROLLBACK_MARKER="$TMP/rollback" BOOT_INIT="$BOOT_INIT" \
+	sh "$BASE/usr/lib/wattline/rtl8761b/driverctl" enable-boot >/dev/null 2>&1 && fail 'enable-boot ignored missing health marker'
+assert_calls ''
+: >"$TMP/rollback"
+HEALTH_MARKER="$TMP/health" ROLLBACK_MARKER="$TMP/rollback" BOOT_INIT="$BOOT_INIT" \
+	sh "$BASE/usr/lib/wattline/rtl8761b/driverctl" enable-boot >/dev/null 2>&1 && fail 'enable-boot ignored rollback marker'
+: >"$CALLS"
+HEALTH_MARKER="$TMP/health" ROLLBACK_MARKER="$TMP/rollback" BOOT_INIT="$BOOT_INIT" \
+	sh "$BASE/usr/lib/wattline/rtl8761b/driverctl" disable-boot
+assert_calls 'boot disable'

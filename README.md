@@ -172,6 +172,18 @@ opkg update && opkg install /tmp/wattline-bt_*.ipk /tmp/wattlined_*.ipk \
 The download includes `wattline-rtl8761b`, but install it separately only after
 the supported-ID sysfs check above succeeds.
 
+The RTL8761B package uses staged activation. Install the package (it is inert
+until explicitly activated), reboot once, and verify the router is healthy and
+the supported dongle is present. Then run
+`/usr/lib/wattline/rtl8761b/driverctl activate --require-device`, perform the
+health check again, and reboot-test before enabling boot activation with
+`driverctl enable-boot`. `enable-boot` requires
+`/etc/wattline/rtl8761b.health` and refuses when
+`/etc/wattline/rtl8761b.rollback` exists; `disable-boot` only removes the init
+hook and never unloads or changes modules. To restore the stock driver, run
+`driverctl restore`; a rollback marker is created during activation and is
+cleared only after recovery succeeds.
+
 Replace `VER` with the release version (for example `0.1.2`). The release
 assets are flat files, so they can also be registered directly as an opkg feed:
 

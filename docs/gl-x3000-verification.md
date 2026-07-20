@@ -11,16 +11,27 @@ to PASS or FAIL.
 
 ## Install, reboot, and credentials
 
+The driver package is inert when installed. Reboot and check router health and
+dongle presence, then explicitly activate with
+`driverctl activate --require-device`; repeat the health check and reboot-test
+before running `driverctl enable-boot`. Boot enablement requires
+`/etc/wattline/rtl8761b.health` and no `rtl8761b.rollback` marker. Use
+`driverctl disable-boot` to disable only the init hook (it does not alter loaded
+modules). Use `driverctl restore` to return to stock files; investigate any
+remaining rollback marker before retrying activation.
+
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Transfer all five IPKs, inspect
   them with `tar tzf`, then install `wattline-bt`, `wattlined`,
   `luci-app-wattline`, and `gl-app-wattline`. Inspect USB sysfs and install
   `wattline-rtl8761b` only for `2357:0604` or `0bda:8771`. Expected: opkg accepts
   the gzip ustar archives and reports matching package versions/architectures.
-- [ ] **NOT RUN — requires GL-X3000/real BLE** — Before installing the optional
-  driver, record hashes of `/lib/modules/5.4.211/{btintel,btrtl,btusb}.ko` when
-  present and `/etc/modules.d/bluetooth`. Install it, then run `driverctl status`,
-  `modinfo`, `hciconfig -a`, and inspect `dmesg`. Expected: status is `packaged`,
-  vermagic is exact, firmware uploads, and `hci0` is UP without memory errors.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Stage the optional driver:
+  install the package inert, reboot, and verify system health and the supported
+  dongle. Run `driverctl activate --require-device`, repeat the health check,
+  and reboot-test. Only then run `driverctl enable-boot` (it requires the
+  `rtl8761b.health` marker and no `rtl8761b.rollback` marker). Expected:
+  `driverctl status` is `packaged`, vermagic is exact, firmware uploads, and
+  `hci0` is UP without memory errors.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Remove and reinstall
   `wattline-rtl8761b`. Expected: removal restores the recorded stock files and
   autoload list, reinstall preserves the first backup and reactivates cleanly.
