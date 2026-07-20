@@ -1,14 +1,42 @@
 #!/bin/sh /etc/rc.common
 # procd service for wattlined
-USE_PROCD=1
+# GL-X3000 firmware images in the field can have a non-responsive ubus/procd
+# supervisor. Keep a small direct-launch fallback so the daemon remains
+# controllable without relying on that supervisor.
+USE_PROCD=0
 START=95
 STOP=10
+EXTRA_COMMANDS="health"
+EXTRA_HELP="\t health\tCheck whether wattlined is running\n"
 RUNTIME_DIR="${RUNTIME_DIR:-/var/run/wattline}"
 DAEMON_STATE="${DAEMON_STATE:-$RUNTIME_DIR/daemon-state}"
 FIREWALL_SYNC="${FIREWALL_SYNC:-/usr/lib/wattline/firewall-sync}"
 VPN_REPAIR="${VPN_REPAIR:-/usr/lib/wattline/vpn-firewall-repair}"
 SERVICE_SCRIPT="${SERVICE_SCRIPT:-/etc/init.d/wattlined}"
 PGREP="${PGREP:-pgrep}"
+DAEMON="/usr/bin/wattlined"
+PIDFILE="${PIDFILE:-/var/run/wattline/wattlined.pid}"
+
+start() {
+	[ -x "$DAEMON" ] || return 1
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+		return 0
+	fi
+	"$FIREWALL_SYNC" || return 1
+	repair_vpn_firewall
+	save_daemon_state || return 1
+	mkdir -p "$(dirname "$PIDFILE")" || return 1
+	"$DAEMON" -config /etc/config/wattline >/dev/null 2>&1 &
+	echo $! > "$PIDFILE"
+}
+
+stop() {
+	if [ -f "$PIDFILE" ]; then
+		pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+		[ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+		rm -f "$PIDFILE"
+	fi
+}
 
 daemon_state() {
 	# wattlined only reloads rule sections on SIGHUP. Any main-section change
