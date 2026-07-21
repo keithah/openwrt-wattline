@@ -5,7 +5,7 @@
 # An OpenWrt .ipk is a GZIPPED TAR (not an ar/.deb archive) wrapping
 # ./debian-binary + ./control.tar.gz + ./data.tar.gz. The router's opkg
 # (verified on GL-X3000, opkg 2021-06-13) segfaults on the ar/.deb form.
-VERSION := 0.1.2
+VERSION := 0.1.5
 ARCH := aarch64_cortex-a53
 # GNU tar required for --owner/--group/--mode normalization (macOS: brew
 # install gnu-tar); BSD tar lacks --mode and emits pax headers opkg rejects.
@@ -72,6 +72,7 @@ ipk-wattlined: bin
 	chmod +x $(OUT)/stage/etc/init.d/wattlined $(OUT)/stage/etc/uci-defaults/99-wattline \
 		$(OUT)/stage/etc/hotplug.d/iface/95-wattline $(OUT)/stage/usr/lib/wattline/firewall-sync \
 		$(OUT)/stage/usr/lib/wattline/vpn-firewall-repair \
+		$(OUT)/stage/usr/lib/wattline/restart-bluetooth-security \
 		$(OUT)/stage/CONTROL/postinst
 	$(call make_ipk,wattlined,$(OUT)/stage,$(ARCH))
 
