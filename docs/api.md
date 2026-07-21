@@ -553,8 +553,10 @@ These authenticated routes pair the router to a Link-Power over BlueZ. They use
 
 Pairing phases are stable strings: `preparing_adapter`,
 `clearing_stale_bond` (recovery only), `locating_device`, `exchanging_pin`,
-`confirming_bond`, `trusting_device`, `reconnecting`,
-`verifying_handshake`, `saving_pairing`, `complete`, and `failed`. Each event is
+`awaiting_pin` (two-stage pairing only), `confirming_bond`, `trusting_device`,
+`resetting_bluetooth` and `retrying_pin` (bounded recovery retry only),
+`reconnecting`, `verifying_handshake`, `saving_pairing`, `complete`, and
+`failed`. Each event is
 `{"at":"2026-07-18T23:40:01Z","phase":"clearing_stale_bond","message":"Clearing the router's stale pairing record"}`.
 Events are ordered oldest to newest, reset at the start of an operation, and
 contain curated messages without PINs, tokens, key material, or raw D-Bus
@@ -594,11 +596,25 @@ These authenticated endpoints require a client or admin bearer token:
 `awaiting_pin`; `submit-pin` is accepted only in that state and clears it after
 submission (success or failure). `cancel` clears the same state without BLE
 PIN input.
-The PIN prompt lasts 25 seconds and has no automatic retry. PINs are never
-echoed or logged. Legacy `/pair` and `/recover` remain compatible. Recovery
-can replace only this router's BlueZ bond; it cannot erase the Link-Power
-device-side bond table, and destructive recovery tests require explicit
-authorization.
+The PIN prompt lasts 25 seconds. PINs are never echoed or logged. The documented
+default Link-Power PIN remains `020555`.
+
+For the unchanged `request-code` request
+`{"mac":"DC:04:5A:EB:72:2B","recover":true}`, recovery has one bounded exception
+to the no-retry rule: only when the first BlueZ PIN/security exchange times
+out, `wattlined` restarts `bluetoothd` once and retries the submitted PIN once.
+Status records the stable phases
+`resetting_bluetooth` and `retrying_pin`. A second timeout is terminal. An
+invalid PIN, a missing target device, or any other failure is terminal without
+a Bluetooth restart or retry. Restarting `bluetoothd` interrupts other local
+Bluetooth sessions on the router, so clients must treat this recovery mode as
+disruptive.
+
+Legacy `/pair` and `/recover` remain compatible. Recovery can replace only this
+router's BlueZ bond; it is not and does not expose a device-side erase-all-bonds
+operation. Recovery is successful only after BlueZ reports the replacement
+bond paired and the reconnected Link-Power completes the protected Wattline
+handshake.
 
 ### `POST /api/v1/pair`
 
