@@ -1,10 +1,8 @@
 #!/bin/sh
 set -u
 
-[ -n "${IPKG_INSTROOT:-}" ] && exit 0
-
 SOURCE=${WATTLINE_NGINX_SOURCE:-/etc/nginx/conf.d/gl-app-wattline.locations}
-LINK=${WATTLINE_NGINX_LINK:-/etc/nginx/gl-conf.d/gl-app-wattline.conf}
+LINK=${WATTLINE_NGINX_LINK:-${IPKG_INSTROOT:-}/etc/nginx/gl-conf.d/gl-app-wattline.conf}
 NGINX=${WATTLINE_NGINX_BIN:-/usr/sbin/nginx}
 NGINX_INIT=${WATTLINE_NGINX_INIT:-/etc/init.d/nginx}
 
@@ -20,6 +18,8 @@ else
 	ln -s "$SOURCE" "$LINK" || exit 1
 	created=1
 fi
+
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
 
 if ! "$NGINX" -t; then
 	[ "${created:-0}" = 1 ] && rm -f "$LINK"

@@ -1,10 +1,12 @@
 # GL.iNet admin-panel ("Applications") integration — recipe & status
 
-**Status: IMPLEMENTED** as `gl-app-wattline` (package/gl-app-wattline/), verified on
-a live GL-X3000. It adds a native **Applications → Wattline** entry that loads with
-no LuCI login and no iframe. This note captures the reverse-engineered mechanism.
-The LuCI app also still ships as an alternative UI (System → Advanced → LuCI →
-Services → Wattline).
+**Native panel UI status: IMPLEMENTED** as `gl-app-wattline`
+(package/gl-app-wattline/) and verified on a live GL-X3000. It adds a native
+**Applications → Wattline** entry that loads with no LuCI login and no iframe.
+The admin-port proxy has separate, still-pending live verification status in
+[Admin-port API proxy](admin-port-proxy.md). This note captures the
+reverse-engineered mechanism. The LuCI app also still ships as an alternative UI
+(System → Advanced → LuCI → Services → Wattline).
 
 ## As-built summary
 
