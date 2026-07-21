@@ -111,3 +111,64 @@ func TestPromptCancelAfterSubmitDoesNotPoisonNextWait(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPasskeyPromptReplaysSubmittedPINOnce(t *testing.T) {
+	p := NewPasskeyPrompt(time.Second)
+	p.Activate(nil)
+	if err := p.Submit("020555"); err != nil {
+		t.Fatal(err)
+	}
+	if pin, err := p.Wait(nil); err != nil || pin != "020555" {
+		t.Fatalf("first = %q, %v", pin, err)
+	}
+	if !p.RearmSubmitted() {
+		t.Fatal("submitted PIN was not rearmed")
+	}
+	if pin, err := p.Wait(nil); err != nil || pin != "020555" {
+		t.Fatalf("replay = %q, %v", pin, err)
+	}
+	if p.RearmSubmitted() {
+		t.Fatal("PIN replayed more than once")
+	}
+	p.Deactivate()
+	if p.RearmSubmitted() {
+		t.Fatal("PIN survived deactivation")
+	}
+}
+
+func TestPasskeyPromptDeactivateClearsSubmittedPINBeforeWait(t *testing.T) {
+	p := NewPasskeyPrompt(time.Second)
+	p.Activate(nil)
+	if err := p.Submit("020555"); err != nil {
+		t.Fatal(err)
+	}
+
+	p.Deactivate()
+
+	if p.submittedPIN != "" {
+		t.Fatal("Deactivate retained the submitted PIN")
+	}
+	if p.RearmSubmitted() {
+		t.Fatal("deactivated PIN was rearmed")
+	}
+}
+
+func TestPasskeyPromptDeactivateClearsSubmittedPINFromConsumedWait(t *testing.T) {
+	p := NewPasskeyPrompt(time.Second)
+	p.Activate(nil)
+	p.mu.Lock()
+	p.consumed = true
+	p.terminal = true
+	p.submittedPIN = "020555"
+	p.result <- promptOutcome{pin: p.submittedPIN}
+	p.mu.Unlock()
+
+	p.Deactivate()
+
+	if p.submittedPIN != "" {
+		t.Fatal("Deactivate retained the submitted PIN")
+	}
+	if p.RearmSubmitted() {
+		t.Fatal("deactivated PIN was rearmed")
+	}
+}

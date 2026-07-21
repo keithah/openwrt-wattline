@@ -15,15 +15,17 @@ var (
 )
 
 type PasskeyPrompt struct {
-	mu       sync.Mutex
-	duration time.Duration
-	waiting  bool
-	terminal bool
-	canceled bool
-	active   bool
-	consumed bool
-	result   chan promptOutcome
-	deadline time.Time
+	mu           sync.Mutex
+	duration     time.Duration
+	waiting      bool
+	terminal     bool
+	canceled     bool
+	active       bool
+	consumed     bool
+	result       chan promptOutcome
+	deadline     time.Time
+	submittedPIN string
+	replayed     bool
 }
 
 func (p *PasskeyPrompt) Activate(onWaiting func()) {
@@ -32,6 +34,8 @@ func (p *PasskeyPrompt) Activate(onWaiting func()) {
 	p.waiting = true
 	p.consumed = false
 	p.terminal = false
+	p.submittedPIN = ""
+	p.replayed = false
 	p.deadline = time.Now().Add(p.duration)
 	p.result = make(chan promptOutcome, 1)
 	p.mu.Unlock()
@@ -42,6 +46,8 @@ func (p *PasskeyPrompt) Activate(onWaiting func()) {
 func (p *PasskeyPrompt) Deactivate() {
 	p.mu.Lock()
 	p.active = false
+	p.submittedPIN = ""
+	p.replayed = true
 	if p.waiting && !p.consumed {
 		p.waiting = false
 		p.canceled = true
@@ -145,8 +151,25 @@ func (p *PasskeyPrompt) Submit(pin string) error {
 		return ErrPasskeyNotWaiting
 	}
 	p.terminal = true
+	p.submittedPIN = pin
 	p.result <- promptOutcome{pin: pin}
 	return nil
+}
+
+func (p *PasskeyPrompt) RearmSubmitted() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.active || p.submittedPIN == "" || p.replayed {
+		return false
+	}
+	p.waiting = true
+	p.consumed = false
+	p.terminal = true
+	p.deadline = time.Now().Add(p.duration)
+	p.result = make(chan promptOutcome, 1)
+	p.result <- promptOutcome{pin: p.submittedPIN}
+	p.replayed = true
+	return true
 }
 
 func (p *PasskeyPrompt) Cancel() {
