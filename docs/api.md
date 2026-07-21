@@ -38,6 +38,12 @@ independently. Both default to IPv4 `0.0.0.0` and IPv6 `[::]`. HTTP is retained
 for compatibility and encrypted VPNs; HTTP exposed directly to WAN is insecure.
 No HTTP-to-HTTPS redirect is implied.
 
+When `gl-app-wattline` is installed on GL.iNet SDK4 firmware,
+`http://ROUTER/wattline/` is an additional reverse-proxied base: for example,
+`/wattline/status` maps to `/api/v1/status`. It preserves the same request and
+response contract, including bearer authentication and SSE. It does not replace
+either direct listener.
+
 OpenWrt packaging keeps `wan_access=0` by default. Netifd-managed WireGuard
 interfaces rely on their configured firewall zones. On GL firmware, a late fw3
 reload can remove an enabled Tailscale daemon's dynamic `ts-*` chains while

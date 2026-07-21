@@ -85,4 +85,14 @@ unset FAIL_NGINX_TEST
 IPKG_INSTROOT="$TMP/root" sh "$POSTINST"
 [ "$(grep -Fc 'init reload' "$CALLS")" -eq "$((before_reload + 1))" ]
 
+DOC="$ROOT/docs/admin-port-proxy.md"
+API_DOC="$ROOT/docs/api.md"
+PANEL_DOC="$ROOT/docs/gl-panel-integration.md"
+need "$DOC" 'http://ROUTER/wattline/' 'admin-port base URL documentation'
+need "$DOC" 'Authorization: Bearer TOKEN' 'proxied bearer contract'
+need "$DOC" 'GoodCloud session plus the Wattline bearer token' 'dual-auth decision'
+need "$DOC" 'GoodCloud relay verification: pending' 'remote verification status'
+need "$API_DOC" 'http://ROUTER/wattline/' 'additional GL API base URL'
+need "$PANEL_DOC" '/wattline/' 'as-built GL proxy route'
+
 echo 'GL nginx proxy tests passed'

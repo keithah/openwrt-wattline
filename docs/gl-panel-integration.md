@@ -19,6 +19,11 @@ Services → Wattline).
   the API token from UCI (the nginx-lua sandbox blocks `io.popen`, so the daemon stays
   the single telemetry source). oui-httpd allows the `root` aclgroup (admin login) by
   default — no ACL file needed.
+- **Admin-port API proxy:** the installed source
+  `/etc/nginx/conf.d/gl-app-wattline.locations` is linked as
+  `/etc/nginx/gl-conf.d/gl-app-wattline.conf`. It maps `/wattline/` to the
+  daemon's `/api/v1/`, requires Wattline bearer authentication, and keeps SSE
+  unbuffered.
 - **Menu** `usr/share/oui/menu.d/wattline.json` (`parent: "applications"`).
 - Packaged as `gl-app-wattline` (arch `all`, Depends `wattlined`), installable/upgradable
   via the opkg feed.
@@ -50,10 +55,11 @@ It is **not** LuCI. An app in the left-nav is three pieces:
    menu type — every GL app, including AdGuard (which has its own web UI), ships a
    native compiled Vue wrapper. Confirmed by grepping every `menu.d/*.json`.
 
-3. **Backend RPC** — a Lua handler at `/usr/lib/oui-httpd/rpc/<name>` plus an nginx
-   fragment in `/etc/nginx/gl-conf.d/<name>.conf`. Called via oui's JSON-RPC.
-   For Wattline this shim can simply proxy the daemon's REST API on `:8377`
-   (or read UCI + shell out), so no daemon changes are needed.
+3. **Backend RPC and API proxy** — a Lua handler at
+   `/usr/lib/oui-httpd/rpc/<name>` is called via oui's JSON-RPC. Wattline also
+   installs an nginx source fragment and its `gl-conf.d` symlink so admin-port
+   `/wattline/` requests reach the daemon's versioned REST API without daemon
+   changes.
 
 ## Precedent
 
@@ -97,7 +103,7 @@ Vuex-rpc path, not an iframe.
 3. Write `/usr/lib/oui-httpd/rpc/wattline` (Lua) that proxies the daemon REST API
    (`GET /telemetry`, `GET/POST /rules`, `POST /device/action`) using the UCI token.
 4. Package: the built `gl-sdk4-ui-wattline.common.js.gz` + `menu.d/wattline.json`
-   (`parent: applications`) + the RPC + nginx fragment, as a gzip-tar/ustar ipk
+   (`parent: applications`) + the RPC, as a gzip-tar/ustar ipk
    (see the Makefile's format notes — GL's opkg segfaults on ar-format ipks and
    rejects pax tar headers).
 5. Reuse the daemon and its REST API unchanged; this is purely an additional UI.
