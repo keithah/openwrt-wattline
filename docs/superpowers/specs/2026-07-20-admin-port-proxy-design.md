@@ -85,8 +85,8 @@ Only `gl-app-wattline` owns the nginx integration because that package already t
 The package build will:
 
 1. Stage the location source at `/etc/nginx/conf.d/gl-app-wattline.locations`.
-2. Install an executable `postinst` that creates or refreshes the `gl-conf.d` symlink, validates nginx configuration, and reloads nginx when running on a live root.
-3. Install an executable `prerm` that removes only Wattline's managed symlink, validates the remaining nginx configuration, and reloads nginx when running on a live root.
+2. Install an executable `postinst` that creates or refreshes the `gl-conf.d` symlink, validates nginx configuration, and runs `nginx -s reload` when running on a live root.
+3. Install an executable `prerm` that removes only Wattline's managed symlink, validates the remaining nginx configuration, and runs `nginx -s reload` when running on a live root. GL's nginx init script has no reload handler.
 4. Skip live-service actions when `IPKG_INSTROOT` is set for image construction.
 
 Scripts must be idempotent. They must not overwrite an unrelated regular file at the managed symlink path. A failed `nginx -t` must not reload nginx. Installation must restore the previous link state if enabling the Wattline fragment makes validation fail, preventing a bad fragment from disrupting the admin panel. Removal must leave nginx usable even if the link is already absent.
@@ -118,6 +118,7 @@ Implementation is test-driven. Package-level tests will cover:
 - idempotent install and removal using a fake nginx/init environment;
 - refusal to overwrite an unrelated active include;
 - validation failure rollback and no reload on invalid configuration;
+- native nginx reload signaling instead of the GL init script's no-op `reload` action;
 - preservation of the repository's gzip-wrapped ustar package format.
 
 Local verification will run the package test suite, `go test ./...`, and `make -C package all` plus package metadata checks.

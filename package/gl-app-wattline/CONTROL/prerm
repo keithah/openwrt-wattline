@@ -4,7 +4,7 @@ set -u
 SOURCE=${WATTLINE_NGINX_SOURCE:-/etc/nginx/conf.d/gl-app-wattline.locations}
 LINK=${WATTLINE_NGINX_LINK:-${IPKG_INSTROOT:-}/etc/nginx/gl-conf.d/gl-app-wattline.conf}
 NGINX=${WATTLINE_NGINX_BIN:-/usr/sbin/nginx}
-NGINX_INIT=${WATTLINE_NGINX_INIT:-/etc/init.d/nginx}
+NGINX_INIT=${WATTLINE_NGINX_INIT:-}
 
 [ -L "$LINK" ] || exit 0
 [ "$(readlink "$LINK")" = "$SOURCE" ] || exit 0
@@ -18,4 +18,8 @@ if ! "$NGINX" -t; then
 	exit 1
 fi
 
-"$NGINX_INIT" reload
+if [ -n "$NGINX_INIT" ]; then
+	"$NGINX_INIT" reload
+else
+	"$NGINX" -s reload
+fi

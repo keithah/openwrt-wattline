@@ -51,7 +51,7 @@
 - Modify: `.github/workflows/release.yml`
 
 **Interfaces:**
-- Consumes: nginx include directory `/etc/nginx/gl-conf.d`, packaged source `/etc/nginx/conf.d/gl-app-wattline.locations`, daemon base `http://127.0.0.1:8377/api/v1/`, `/etc/init.d/nginx reload`.
+- Consumes: nginx include directory `/etc/nginx/gl-conf.d`, packaged source `/etc/nginx/conf.d/gl-app-wattline.locations`, daemon base `http://127.0.0.1:8377/api/v1/`, `/usr/sbin/nginx -s reload`.
 - Produces: managed symlink `/etc/nginx/gl-conf.d/gl-app-wattline.conf` and stable public prefix `/wattline/`.
 - Test seams: `WATTLINE_NGINX_SOURCE`, `WATTLINE_NGINX_LINK`, `WATTLINE_NGINX_BIN`, and `WATTLINE_NGINX_INIT` override their production defaults only for an explicit process environment.
 
@@ -197,7 +197,7 @@ set -u
 SOURCE=${WATTLINE_NGINX_SOURCE:-/etc/nginx/conf.d/gl-app-wattline.locations}
 LINK=${WATTLINE_NGINX_LINK:-/etc/nginx/gl-conf.d/gl-app-wattline.conf}
 NGINX=${WATTLINE_NGINX_BIN:-/usr/sbin/nginx}
-NGINX_INIT=${WATTLINE_NGINX_INIT:-/etc/init.d/nginx}
+NGINX_INIT=${WATTLINE_NGINX_INIT:-}
 
 if [ -L "$LINK" ]; then
 	[ "$(readlink "$LINK")" = "$SOURCE" ] || {
@@ -218,7 +218,11 @@ if ! "$NGINX" -t; then
 	exit 1
 fi
 
-"$NGINX_INIT" reload
+if [ -n "$NGINX_INIT" ]; then
+	"$NGINX_INIT" reload
+else
+	"$NGINX" -s reload
+fi
 ```
 
 Create `package/gl-app-wattline/CONTROL/prerm`:
@@ -232,7 +236,7 @@ set -u
 SOURCE=${WATTLINE_NGINX_SOURCE:-/etc/nginx/conf.d/gl-app-wattline.locations}
 LINK=${WATTLINE_NGINX_LINK:-/etc/nginx/gl-conf.d/gl-app-wattline.conf}
 NGINX=${WATTLINE_NGINX_BIN:-/usr/sbin/nginx}
-NGINX_INIT=${WATTLINE_NGINX_INIT:-/etc/init.d/nginx}
+NGINX_INIT=${WATTLINE_NGINX_INIT:-}
 
 [ -L "$LINK" ] || exit 0
 [ "$(readlink "$LINK")" = "$SOURCE" ] || exit 0
@@ -244,7 +248,11 @@ if ! "$NGINX" -t; then
 	exit 1
 fi
 
-"$NGINX_INIT" reload
+if [ -n "$NGINX_INIT" ]; then
+	"$NGINX_INIT" reload
+else
+	"$NGINX" -s reload
+fi
 ```
 
 The scripts intentionally propagate validation/reload failures instead of ending with unconditional `exit 0`.

@@ -36,7 +36,9 @@ directives.
 `gl-app-wattline` owns the source fragment and manages only its own
 `gl-conf.d` symlink. Install and removal validate nginx before reload and roll
 back the symlink change if validation fails. The generic `wattlined` package
-does not own GL-specific nginx files.
+does not own GL-specific nginx files. GL's nginx init script has no reload
+handler, so the lifecycle scripts use nginx's native `-s reload` signal after
+successful validation.
 
 ## Verification status
 

@@ -68,6 +68,15 @@ sh "$PRERM"
 sh "$PRERM"
 [ "$(grep -Fc 'init reload' "$CALLS")" -eq 4 ]
 
+# GL's nginx init script has no reload handler. Production lifecycle scripts
+# must signal nginx directly; WATTLINE_NGINX_INIT remains only a test seam.
+unset WATTLINE_NGINX_INIT
+sh "$POSTINST"
+grep -Fqx 'nginx -s reload' "$CALLS"
+sh "$PRERM"
+[ "$(grep -Fc 'nginx -s reload' "$CALLS")" -eq 2 ]
+export WATTLINE_NGINX_INIT="$TMP/bin/nginx-init"
+
 echo unrelated > "$WATTLINE_NGINX_LINK"
 if sh "$POSTINST"; then echo 'postinst overwrote an unrelated file' >&2; exit 1; fi
 grep -Fqx unrelated "$WATTLINE_NGINX_LINK"
