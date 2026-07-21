@@ -3,12 +3,33 @@
 package ble
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/godbus/dbus/v5"
 )
+
+func TestClassifyPairCallError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"context sentinel", context.DeadlineExceeded, true},
+		{"dbus deadline text", errors.New("org.bluez.Error.Failed: context deadline exceeded"), true},
+		{"authentication rejected", errors.New("org.bluez.Error.AuthenticationFailed"), false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := classifyPairCallError(test.err)
+			if errors.Is(got, ErrPairSecurityTimeout) != test.want {
+				t.Fatalf("classifyPairCallError(%v) = %v", test.err, got)
+			}
+		})
+	}
+}
 
 func TestDiscoveryInProgress(t *testing.T) {
 	tests := []struct {

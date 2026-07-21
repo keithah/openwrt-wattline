@@ -13,6 +13,8 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
+var ErrPairSecurityTimeout = errors.New("Bluetooth PIN security exchange timed out")
+
 // bluezPairer implements PairOps over the BlueZ D-Bus API. It shares the
 // system bus with the pairing agent (agent.go); the tinygo transport talks to
 // the same bluetoothd, so pairing operates on the same device objects the
@@ -97,6 +99,16 @@ func reportBlueZPair(report PairProgress, phase PairingPhase) {
 	if report != nil {
 		report(phase, bluezPairMessage(phase))
 	}
+}
+
+func classifyPairCallError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "context deadline exceeded") {
+		return fmt.Errorf("%w: %v", ErrPairSecurityTimeout, err)
+	}
+	return err
 }
 
 func discoveryInProgress(err error) bool {
@@ -251,7 +263,7 @@ func (p *bluezPairer) pairOnce(mac string, timeout time.Duration) error {
 		if strings.Contains(call.Err.Error(), "AlreadyExists") {
 			return nil
 		}
-		return call.Err
+		return classifyPairCallError(call.Err)
 	}
 	return nil
 }
