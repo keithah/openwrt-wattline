@@ -118,14 +118,22 @@ func TestPasskeyPromptReplaysSubmittedPINOnce(t *testing.T) {
 	if err := p.Submit("020555"); err != nil {
 		t.Fatal(err)
 	}
-	if pin, err := p.Wait(nil); err != nil || pin != "020555" {
-		t.Fatalf("first = %q, %v", pin, err)
+	pin, err := p.Wait(nil)
+	if err != nil {
+		t.Fatalf("first wait: %v", err)
+	}
+	if pin != "020555" {
+		t.Fatal("first wait returned unexpected PIN")
 	}
 	if !p.RearmSubmitted() {
 		t.Fatal("submitted PIN was not rearmed")
 	}
-	if pin, err := p.Wait(nil); err != nil || pin != "020555" {
-		t.Fatalf("replay = %q, %v", pin, err)
+	pin, err = p.Wait(nil)
+	if err != nil {
+		t.Fatalf("replay wait: %v", err)
+	}
+	if pin != "020555" {
+		t.Fatal("replay wait returned unexpected PIN")
 	}
 	if p.RearmSubmitted() {
 		t.Fatal("PIN replayed more than once")
