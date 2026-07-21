@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,12 +16,15 @@ type scriptedOps struct {
 	devices   []ble.Found
 	scanErr   error
 	pairErr   error
+	pairErrs  []error
 	trustErr  error
 	unpairErr error
 	block     chan struct{}
 	pairBlock chan struct{}
 	mu        sync.Mutex
 	recover   bool
+	prompt    *ble.PasskeyPrompt
+	pairCalls int
 }
 
 func (s *scriptedOps) Scan(time.Duration) ([]ble.Found, error) {
@@ -32,12 +36,25 @@ func (s *scriptedOps) Scan(time.Duration) ([]ble.Found, error) {
 func (s *scriptedOps) Pair(_ string, recover bool, report ble.PairProgress) error {
 	s.mu.Lock()
 	s.recover = recover
+	s.pairCalls++
 	s.mu.Unlock()
 	if recover {
 		report(ble.PhaseClearingStaleBond, "Clearing the router's stale pairing record")
 	}
 	if s.pairBlock != nil {
 		<-s.pairBlock
+	}
+	if s.prompt != nil {
+		if _, err := s.prompt.Wait(func() { report(ble.PhaseAwaitingPIN, "Waiting for pairing PIN") }); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pairErrs) > 0 {
+		err := s.pairErrs[0]
+		s.pairErrs = s.pairErrs[1:]
+		return err
 	}
 	return s.pairErr
 }
@@ -49,6 +66,62 @@ func pairingServer(t *testing.T, ops ble.PairOps) http.Handler {
 		d.Pairing = ble.NewPairing(ble.PairingDeps{Ops: ops, ScanFor: time.Millisecond})
 	})
 	return h
+}
+
+func TestRecoverSecurityRetryAPI(t *testing.T) {
+	prompt := ble.NewPasskeyPrompt(time.Second)
+	ops := &scriptedOps{
+		pairErrs: []error{ble.ErrPairSecurityTimeout, nil},
+		prompt:   prompt,
+	}
+	resets := 0
+	h, _, _ := testServerWith(t, func(d *Deps) {
+		d.Pairing = ble.NewPairing(ble.PairingDeps{
+			Ops: ops, Prompt: prompt,
+			ResetSecurity: func() error { resets++; return nil },
+		})
+	})
+	request := `{"mac":"DC:04:5A:EB:72:2B","recover":true}`
+	if w := do(t, h, http.MethodPost, "/api/v1/pairing/request-code", "tok", request); w.Code != http.StatusAccepted {
+		t.Fatalf("request-code status = %d", w.Code)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !prompt.Waiting() && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !prompt.Waiting() {
+		t.Fatal("pairing prompt never requested a PIN")
+	}
+	if w := do(t, h, http.MethodPost, "/api/v1/pairing/submit-pin", "tok", `{"pin":"020555"}`); w.Code != http.StatusAccepted {
+		t.Fatalf("submit-pin status = %d", w.Code)
+	}
+	got := waitStage(t, h, "paired")
+	deadline = time.Now().Add(2 * time.Second)
+	for prompt.Active() && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if prompt.Active() || prompt.Waiting() {
+		t.Fatal("pairing prompt remained active after the retry completed")
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if strings.Contains(text, "020555") || strings.Contains(text, "tok") {
+		t.Fatal("terminal pairing status leaked submitted credentials")
+	}
+	for _, phase := range []string{"resetting_bluetooth", "retrying_pin"} {
+		if !strings.Contains(text, `"phase":"`+phase+`"`) {
+			t.Fatalf("terminal pairing status missing phase %q", phase)
+		}
+	}
+	ops.mu.Lock()
+	pairCalls := ops.pairCalls
+	ops.mu.Unlock()
+	if resets != 1 || pairCalls != 2 {
+		t.Fatalf("resets=%d pair calls=%d, want 1/2", resets, pairCalls)
+	}
 }
 
 func waitStage(t *testing.T, h http.Handler, want string) map[string]any {

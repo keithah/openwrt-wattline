@@ -15,6 +15,7 @@ type fakeOps struct {
 	scanRes   []Found
 	scanErr   error
 	pairErr   error
+	pairErrs  []error
 	calls     []string
 	block     chan struct{} // if non-nil, Scan blocks until closed
 	pairBlock chan struct{}
@@ -48,6 +49,13 @@ func (f *fakeOps) Pair(mac string, recover bool, report PairProgress) error {
 	if f.pairBlock != nil {
 		<-f.pairBlock
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.pairErrs) > 0 {
+		err := f.pairErrs[0]
+		f.pairErrs = f.pairErrs[1:]
+		return err
+	}
 	return f.pairErr
 }
 func (f *fakeOps) Trust(mac string) error {
@@ -60,17 +68,19 @@ func (f *fakeOps) Unpair(mac string) error {
 }
 
 type pairingHarness struct {
-	p       *Pairing
-	ops     *fakeOps
-	mu      sync.Mutex
-	paused  int
-	resumed int
-	pins    []string
-	saved   [][2]string
-	waits   int
-	waitOK  bool
-	prepErr error
-	now     time.Time
+	p            *Pairing
+	ops          *fakeOps
+	mu           sync.Mutex
+	paused       int
+	resumed      int
+	resets       int
+	prepareCalls int
+	pins         []string
+	saved        [][2]string
+	waits        int
+	waitOK       bool
+	prepErr      error
+	now          time.Time
 }
 
 func newHarness(ops *fakeOps) *pairingHarness {
@@ -78,10 +88,21 @@ func newHarness(ops *fakeOps) *pairingHarness {
 	h.p = NewPairing(PairingDeps{
 		Ops:     ops,
 		ScanFor: time.Millisecond,
-		Prepare: func() error { return h.prepErr },
-		Pause:   func() { h.mu.Lock(); h.paused++; h.mu.Unlock() },
-		Resume:  func() { h.mu.Lock(); h.resumed++; h.mu.Unlock() },
-		SetPIN:  func(pin string) { h.mu.Lock(); h.pins = append(h.pins, pin); h.mu.Unlock() },
+		Prepare: func() error {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.prepareCalls++
+			return h.prepErr
+		},
+		ResetSecurity: func() error {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.resets++
+			return nil
+		},
+		Pause:  func() { h.mu.Lock(); h.paused++; h.mu.Unlock() },
+		Resume: func() { h.mu.Lock(); h.resumed++; h.mu.Unlock() },
+		SetPIN: func(pin string) { h.mu.Lock(); h.pins = append(h.pins, pin); h.mu.Unlock() },
 		WaitConnected: func(report PairProgress) bool {
 			report(PhaseReconnecting, "Reconnecting to Link-Power")
 			report(PhaseVerifyingHandshake, "Verifying the protected Wattline handshake")
@@ -104,6 +125,101 @@ func newHarness(ops *fakeOps) *pairingHarness {
 		},
 	})
 	return h
+}
+
+func TestRecoverSecurityRetry(t *testing.T) {
+	tests := []struct {
+		name       string
+		errs       []error
+		recover    bool
+		wantResets int
+		wantPairs  int
+		wantStage  PairingStage
+	}{
+		{"timeout then success", []error{ErrPairSecurityTimeout, nil}, true, 1, 2, StagePaired},
+		{"timeout twice stops", []error{ErrPairSecurityTimeout, ErrPairSecurityTimeout}, true, 1, 2, StageError},
+		{"auth failure no reset", []error{errors.New("authentication failed")}, true, 0, 1, StageError},
+		{"ordinary pair timeout no reset", []error{ErrPairSecurityTimeout}, false, 0, 1, StageError},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const mac = "DC:04:5A:EB:72:2B"
+			ops := &fakeOps{pairErrs: append([]error(nil), test.errs...)}
+			h := newHarness(ops)
+			var err error
+			if test.recover {
+				err = h.p.StartRecover(mac, "020555")
+			} else {
+				err = h.p.StartPair(mac, "020555")
+			}
+			if err != nil {
+				t.Fatalf("start pair: %v", err)
+			}
+			waitFor(t, "terminal pairing stage", func() bool {
+				return h.p.Status().Stage == test.wantStage
+			})
+
+			calls := ops.got()
+			pairs, trusts := 0, 0
+			for _, call := range calls {
+				if strings.HasPrefix(call, "pair ") {
+					pairs++
+				}
+				if strings.HasPrefix(call, "trust ") {
+					trusts++
+				}
+			}
+			h.mu.Lock()
+			resets, prepares := h.resets, h.prepareCalls
+			paused, resumed := h.paused, h.resumed
+			saved := len(h.saved)
+			pins := append([]string(nil), h.pins...)
+			h.mu.Unlock()
+			if resets != test.wantResets || pairs != test.wantPairs || prepares != test.wantPairs {
+				t.Fatalf("resets=%d pairs=%d prepares=%d, want %d/%d/%d", resets, pairs, prepares, test.wantResets, test.wantPairs, test.wantPairs)
+			}
+			if paused != 1 || resumed != 1 {
+				t.Fatalf("paused=%d resumed=%d, want 1/1", paused, resumed)
+			}
+			wantSuccessCalls := 0
+			if test.wantStage == StagePaired {
+				wantSuccessCalls = 1
+			}
+			if trusts != wantSuccessCalls || saved != wantSuccessCalls {
+				t.Fatalf("trusts=%d saved=%d, want %d/%d", trusts, saved, wantSuccessCalls, wantSuccessCalls)
+			}
+			if test.wantStage == StagePaired {
+				if len(pins) != 1 {
+					t.Fatal("successful retry did not retain exactly one submitted PIN override")
+				}
+			} else if len(pins) != 2 || pins[1] != "" {
+				t.Fatal("failed pairing did not restore the configured PIN")
+			}
+			status := h.p.Status()
+			phases := make([]PairingPhase, len(status.Events))
+			for i, event := range status.Events {
+				phases[i] = event.Phase
+				if strings.Contains(event.Message, "020555") {
+					t.Fatal("pairing event leaked submitted PIN")
+				}
+			}
+			resetAt, retryAt := -1, -1
+			for i, phase := range phases {
+				if phase == PhaseResettingBluetooth {
+					resetAt = i
+				}
+				if phase == PhaseRetryingPIN {
+					retryAt = i
+				}
+			}
+			if test.wantResets == 1 && !(resetAt >= 0 && retryAt > resetAt) {
+				t.Fatalf("recovery phases out of order: %v", phases)
+			}
+			if test.wantResets == 0 && (resetAt >= 0 || retryAt >= 0) {
+				t.Fatalf("unexpected recovery phases: %v", phases)
+			}
+		})
+	}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {

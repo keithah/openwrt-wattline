@@ -2,6 +2,7 @@ package ble
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -44,6 +45,8 @@ const (
 	PhaseAwaitingPIN        PairingPhase = "awaiting_pin"
 	PhaseConfirmingBond     PairingPhase = "confirming_bond"
 	PhaseTrustingDevice     PairingPhase = "trusting_device"
+	PhaseResettingBluetooth PairingPhase = "resetting_bluetooth"
+	PhaseRetryingPIN        PairingPhase = "retrying_pin"
 	PhaseReconnecting       PairingPhase = "reconnecting"
 	PhaseVerifyingHandshake PairingPhase = "verifying_handshake"
 	PhaseSavingPairing      PairingPhase = "saving_pairing"
@@ -89,8 +92,11 @@ type PairingDeps struct {
 	// Prepare runs before a pair attempt; used to (re)register the BlueZ
 	// agent when it wasn't available at daemon startup.
 	Prepare func() error
-	Pause   func()
-	Resume  func()
+	// ResetSecurity clears stale local Bluetooth security state before the
+	// single bounded recovery retry.
+	ResetSecurity func() error
+	Pause         func()
+	Resume        func()
 	// SetPIN updates the agent PIN. An empty string means "restore the
 	// configured PIN" — the manager calls that after a failed attempt so a
 	// wrong GUI PIN never outlives the operation that supplied it.
@@ -289,12 +295,6 @@ func (p *Pairing) startPair(mac, pin string, recover bool, interactive bool) err
 	p.mu.Unlock()
 	p.setPhase(PhasePreparingAdapter, "Preparing the Bluetooth adapter")
 	go func() {
-		if p.d.Prepare != nil {
-			if err := p.d.Prepare(); err != nil {
-				p.finish(StagePaired, err)
-				return
-			}
-		}
 		if pin != "" && p.d.SetPIN != nil {
 			p.d.SetPIN(pin)
 		}
@@ -303,9 +303,7 @@ func (p *Pairing) startPair(mac, pin string, recover bool, interactive bool) err
 				p.d.SetPIN("")
 			}
 		}
-		if p.d.Pause != nil {
-			p.d.Pause()
-		}
+		paused := false
 		resumed := false
 		resume := func() {
 			if !resumed && p.d.Resume != nil {
@@ -316,14 +314,37 @@ func (p *Pairing) startPair(mac, pin string, recover bool, interactive bool) err
 		defer resume()
 		if interactive && p.d.Prompt != nil {
 			p.d.Prompt.Activate(func() { p.setPhase(PhaseAwaitingPIN, "Waiting for pairing PIN") })
+			defer p.d.Prompt.Deactivate()
 		}
-		err := p.d.Ops.Pair(mac, recover, p.setPhase)
-		if interactive && p.d.Prompt != nil {
-			p.d.Prompt.Deactivate()
-		}
-		if err == nil {
+		pairPass := func() error {
+			if p.d.Prepare != nil {
+				if err := p.d.Prepare(); err != nil {
+					return err
+				}
+			}
+			if !paused {
+				if p.d.Pause != nil {
+					p.d.Pause()
+				}
+				paused = true
+			}
+			if err := p.d.Ops.Pair(mac, recover, p.setPhase); err != nil {
+				return err
+			}
 			p.setPhase(PhaseTrustingDevice, "Trusting Link-Power on this router")
-			err = p.d.Ops.Trust(mac)
+			return p.d.Ops.Trust(mac)
+		}
+		err := pairPass()
+		if recover && errors.Is(err, ErrPairSecurityTimeout) && p.d.ResetSecurity != nil {
+			p.setPhase(PhaseResettingBluetooth, "Resetting stale Bluetooth security state")
+			if resetErr := p.d.ResetSecurity(); resetErr != nil {
+				err = fmt.Errorf("reset Bluetooth security: %w", resetErr)
+			} else if !interactive || p.d.Prompt == nil || p.d.Prompt.RearmSubmitted() {
+				p.setPhase(PhaseRetryingPIN, "Retrying the pairing PIN exchange")
+				err = pairPass()
+			} else {
+				err = errors.New("the submitted pairing PIN was unavailable for retry")
+			}
 		}
 		if err != nil {
 			restorePIN()
