@@ -402,8 +402,8 @@ func TestPairPrepareErrorFailsFast(t *testing.T) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.paused != 0 {
-		t.Fatalf("paused connector despite Prepare failure")
+	if h.paused != 0 || h.resumed != 0 {
+		t.Fatalf("paused=%d resumed=%d after Prepare failure, want 0/0", h.paused, h.resumed)
 	}
 }
 

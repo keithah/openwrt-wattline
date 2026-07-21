@@ -306,10 +306,12 @@ func (p *Pairing) startPair(mac, pin string, recover bool, interactive bool) err
 		paused := false
 		resumed := false
 		resume := func() {
-			if !resumed && p.d.Resume != nil {
+			if paused && !resumed && p.d.Resume != nil {
 				p.d.Resume()
 			}
-			resumed = true
+			if paused {
+				resumed = true
+			}
 		}
 		defer resume()
 		if interactive && p.d.Prompt != nil {
