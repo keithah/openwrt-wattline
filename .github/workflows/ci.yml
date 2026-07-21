@@ -10,11 +10,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           cache-dependency-path: go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: Vet
         run: go vet ./...
       - name: Test
@@ -29,6 +33,7 @@ jobs:
             package/tests/luci_contract_test.sh \
             package/tests/gl_contract_test.sh \
             package/tests/feed-migrate-test.sh \
+            package/tests/release-readiness_test.sh \
             package/tests/rtl8761b-artifacts_test.sh \
             package/tests/rtl8761b-driver_test.sh \
             package/tests/rtl8761b-lifecycle_test.sh; do
@@ -36,7 +41,7 @@ jobs:
           done
           node package/tests/luci_behavior_test.js
           node package/tests/power_loss_behavior_test.js
-      - name: Build packages (ipks + metadata check)
-        run: make -C package feed
+      - name: Build product packages
+        run: make -C package all
       - name: Release inventory
-        run: sh package/tests/release-inventory_test.sh package/out 0.1.2
+        run: sh package/tests/release-inventory_test.sh package/out 0.1.4

@@ -5,7 +5,7 @@
 # An OpenWrt .ipk is a GZIPPED TAR (not an ar/.deb archive) wrapping
 # ./debian-binary + ./control.tar.gz + ./data.tar.gz. The router's opkg
 # (verified on GL-X3000, opkg 2021-06-13) segfaults on the ar/.deb form.
-VERSION := 0.1.2
+VERSION := 0.1.4
 ARCH := aarch64_cortex-a53
 # GNU tar required for --owner/--group/--mode normalization (macOS: brew
 # install gnu-tar); BSD tar lacks --mode and emits pax headers opkg rejects.
@@ -49,13 +49,16 @@ define make_ipk
 	# --format ustar: OpenWrt's opkg tar parser rejects pax extended headers
 	#   (typeflag 'x'/0x78), which macOS BSD tar emits by default.
 	# COPYFILE_DISABLE: keep BSD tar from injecting AppleDouble (._*) entries.
-	COPYFILE_DISABLE=1 $(TAR) --format ustar --owner=0 --group=0 --numeric-owner \
-		--mode='go-w' --exclude=CONTROL -czf $(OUT)/data.tar.gz -C $(OUT)/stage-$(1) .
-	COPYFILE_DISABLE=1 $(TAR) --format ustar --owner=0 --group=0 --numeric-owner \
-		--mode='go-w' -czf $(OUT)/control.tar.gz -C $(OUT)/stage-$(1)/CONTROL .
+	COPYFILE_DISABLE=1 $(TAR) --format ustar --sort=name --mtime='@0' \
+		--owner=0 --group=0 --numeric-owner --mode='go-w' --exclude=CONTROL \
+		-czf $(OUT)/data.tar.gz -C $(OUT)/stage-$(1) .
+	COPYFILE_DISABLE=1 $(TAR) --format ustar --sort=name --mtime='@0' \
+		--owner=0 --group=0 --numeric-owner --mode='go-w' \
+		-czf $(OUT)/control.tar.gz -C $(OUT)/stage-$(1)/CONTROL .
 	echo "2.0" > $(OUT)/debian-binary
 	# Outer wrapper is a gzipped ustar tar (OpenWrt ipk format), NOT ar.
-	( cd $(OUT) && COPYFILE_DISABLE=1 $(TAR) --format ustar -czf $(1)_$(VERSION)_$(3).ipk \
+	( cd $(OUT) && COPYFILE_DISABLE=1 $(TAR) --format ustar --sort=name --mtime='@0' \
+		-czf $(1)_$(VERSION)_$(3).ipk \
 		./debian-binary ./control.tar.gz ./data.tar.gz )
 	rm -f $(OUT)/data.tar.gz $(OUT)/control.tar.gz $(OUT)/debian-binary
 endef
@@ -107,7 +110,7 @@ ipk-luci:
 ipk-glapp:
 	rm -rf $(OUT)/stage-gl
 	mkdir -p $(OUT)/stage-gl/www/views $(OUT)/stage-gl/usr/share/oui/menu.d $(OUT)/stage-gl/usr/lib/oui-httpd/rpc
-	gzip -9 -c gl-app-wattline/www/views/gl-sdk4-ui-wattline.common.js > $(OUT)/stage-gl/www/views/gl-sdk4-ui-wattline.common.js.gz
+	gzip -9n -c gl-app-wattline/www/views/gl-sdk4-ui-wattline.common.js > $(OUT)/stage-gl/www/views/gl-sdk4-ui-wattline.common.js.gz
 	cp gl-app-wattline/usr/share/oui/menu.d/wattline.json $(OUT)/stage-gl/usr/share/oui/menu.d/
 	cp gl-app-wattline/usr/lib/oui-httpd/rpc/wattline $(OUT)/stage-gl/usr/lib/oui-httpd/rpc/
 	cp -r gl-app-wattline/CONTROL $(OUT)/stage-gl/

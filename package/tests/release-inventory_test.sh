@@ -21,23 +21,4 @@ expected="$(printf '%s\n' "$expected" | sort)"
 	exit 1
 }
 
-[ -s "$OUT/Packages" ] || {
-	echo 'missing Packages feed index' >&2
-	exit 1
-}
-[ -s "$OUT/Packages.gz" ] || {
-	echo 'missing Packages.gz feed index' >&2
-	exit 1
-}
-[ "$(grep -c '^Package:' "$OUT/Packages")" -eq 5 ] || {
-	echo 'feed index does not contain exactly five packages' >&2
-	exit 1
-}
-for package in wattlined wattline-bt wattline-rtl8761b luci-app-wattline gl-app-wattline; do
-	[ "$(grep -c "^Package: $package$" "$OUT/Packages")" -eq 1 ] || {
-		echo "feed index is missing or duplicates $package" >&2
-		exit 1
-	}
-done
-
 echo 'Release inventory tests passed'

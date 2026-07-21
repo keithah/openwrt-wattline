@@ -100,7 +100,7 @@ for row in 'remove 2357/0604/0100' 'add 0a12/0001/0100' 'add malformed'; do
 done
 
 grep -Fxq 'Package: wattline-rtl8761b' "$BASE/CONTROL/control"
-grep -Fxq 'Version: 0.1.2' "$BASE/CONTROL/control"
+grep -Fxq 'Version: 0.1.4' "$BASE/CONTROL/control"
 grep -Fxq 'Architecture: aarch64_cortex-a53' "$BASE/CONTROL/control"
 grep -Fxq 'Depends: wattline-bt' "$BASE/CONTROL/control"
 

@@ -1,6 +1,6 @@
 name: Release
 
-# Tag a release to trigger:  git tag v0.1.2 && git push origin v0.1.2
+# Tag a release to trigger: git tag v0.1.4 && git push origin v0.1.4
 on:
   push:
     tags: ['v*']
@@ -8,15 +8,28 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: wattline-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
 
       - name: Test
         run: go test ./... -count=1
@@ -30,6 +43,8 @@ jobs:
             package/tests/provisioning_test.sh \
             package/tests/luci_contract_test.sh \
             package/tests/gl_contract_test.sh \
+            package/tests/feed-migrate-test.sh \
+            package/tests/release-readiness_test.sh \
             package/tests/rtl8761b-artifacts_test.sh \
             package/tests/rtl8761b-driver_test.sh \
             package/tests/rtl8761b-lifecycle_test.sh; do
@@ -38,22 +53,85 @@ jobs:
           node package/tests/luci_behavior_test.js
           node package/tests/power_loss_behavior_test.js
 
-      - name: Derive version from tag
+      - name: Derive and verify version from tag
         id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag must have the form vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          mapfile -t defaults < <(sed -nE 's/^VERSION := ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' package/Makefile)
+          if (( ${#defaults[@]} != 1 )) || [[ "${defaults[0]}" != "$version" ]]; then
+            echo "Tag version $version must equal the single package/Makefile default" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Build ipks + opkg feed index
-        run: make -C package VERSION=${{ steps.ver.outputs.version }} feed
+      - name: Verify tagged installer source
+        run: |
+          test -s package/install.sh
+          sh -n package/install.sh
 
-      - name: Verify release inventory
+      - name: Build product IPKs
+        run: make -C package VERSION=${{ steps.ver.outputs.version }} all
+
+      - name: Verify exact release inventory
         run: sh package/tests/release-inventory_test.sh package/out ${{ steps.ver.outputs.version }}
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: v${{ steps.ver.outputs.version }}
-          generate_release_notes: true
-          files: |
-            package/out/*.ipk
-            package/out/Packages
-            package/out/Packages.gz
+      - name: Create or verify immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=$TAG
+          expected=$(printf '%s\n' \
+            "gl-app-wattline_${VERSION}_all.ipk" \
+            "luci-app-wattline_${VERSION}_all.ipk" \
+            "wattline-bt_${VERSION}_all.ipk" \
+            "wattline-rtl8761b_${VERSION}_aarch64_cortex-a53.ipk" \
+            "wattlined_${VERSION}_aarch64_cortex-a53.ipk" | sort)
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            release_assets=$(gh release view "$tag" --json assets --jq '.assets[].name' | sort)
+            if [[ "$release_assets" != "$expected" ]]; then
+              echo "Release $tag exists with an unexpected asset inventory" >&2
+              diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$release_assets") || true
+              exit 1
+            fi
+
+            existing_dir=$(mktemp -d)
+            cleanup() {
+              if [[ -n "${existing_dir:-}" && -d "$existing_dir" ]]; then
+                rm -rf -- "$existing_dir"
+              fi
+            }
+            trap cleanup EXIT
+            gh release download "$tag" --dir "$existing_dir"
+            downloaded=$(find "$existing_dir" -maxdepth 1 -type f -printf '%f\n' | sort)
+            if [[ "$downloaded" != "$expected" ]]; then
+              echo "Downloaded release $tag has an unexpected asset inventory" >&2
+              diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$downloaded") || true
+              exit 1
+            fi
+            while IFS= read -r asset; do
+              cmp -- "package/out/$asset" "$existing_dir/$asset"
+            done <<< "$expected"
+            echo "Release $tag assets match the freshly built product IPKs"
+            exit 0
+          fi
+
+          mapfile -t assets < <(
+            while IFS= read -r asset; do
+              printf 'package/out/%s\n' "$asset"
+            done <<< "$expected"
+          )
+          gh release create "$tag" "${assets[@]}" \
+            --verify-tag \
+            --title "$tag" \
+            --generate-notes
