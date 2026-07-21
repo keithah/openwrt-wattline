@@ -295,9 +295,6 @@ func (p *Pairing) startPair(mac, pin string, recover bool, interactive bool) err
 	p.mu.Unlock()
 	p.setPhase(PhasePreparingAdapter, "Preparing the Bluetooth adapter")
 	go func() {
-		if pin != "" && p.d.SetPIN != nil {
-			p.d.SetPIN(pin)
-		}
 		restorePIN := func() {
 			if pin != "" && p.d.SetPIN != nil {
 				p.d.SetPIN("")
@@ -323,6 +320,9 @@ func (p *Pairing) startPair(mac, pin string, recover bool, interactive bool) err
 				if err := p.d.Prepare(); err != nil {
 					return err
 				}
+			}
+			if pin != "" && p.d.SetPIN != nil {
+				p.d.SetPIN(pin)
 			}
 			if !paused {
 				if p.d.Pause != nil {

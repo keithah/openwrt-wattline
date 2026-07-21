@@ -25,6 +25,7 @@ type scriptedOps struct {
 	recover   bool
 	prompt    *ble.PasskeyPrompt
 	pairCalls int
+	pairHook  func()
 }
 
 func (s *scriptedOps) Scan(time.Duration) ([]ble.Found, error) {
@@ -38,6 +39,9 @@ func (s *scriptedOps) Pair(_ string, recover bool, report ble.PairProgress) erro
 	s.recover = recover
 	s.pairCalls++
 	s.mu.Unlock()
+	if s.pairHook != nil {
+		s.pairHook()
+	}
 	if recover {
 		report(ble.PhaseClearingStaleBond, "Clearing the router's stale pairing record")
 	}
@@ -121,6 +125,93 @@ func TestRecoverSecurityRetryAPI(t *testing.T) {
 	ops.mu.Unlock()
 	if resets != 1 || pairCalls != 2 {
 		t.Fatalf("resets=%d pair calls=%d, want 1/2", resets, pairCalls)
+	}
+}
+
+func TestPairingRecoverExplicitPINSurvivesPrepareResetRetryAndPersists(t *testing.T) {
+	const (
+		mac           = "DC:04:5A:EB:72:2B"
+		configuredPIN = "111111"
+		submittedPIN  = "020555"
+	)
+	var mu sync.Mutex
+	activePIN := configuredPIN
+	pairPINMatches := make([]bool, 0, 2)
+	var persisted, handshakeVerified bool
+	ops := &scriptedOps{pairErrs: []error{ble.ErrPairSecurityTimeout, nil}}
+	ops.pairHook = func() {
+		mu.Lock()
+		pairPINMatches = append(pairPINMatches, activePIN == submittedPIN)
+		mu.Unlock()
+	}
+	resets := 0
+	h, _, _ := testServerWith(t, func(d *Deps) {
+		d.Pairing = ble.NewPairing(ble.PairingDeps{
+			Ops: ops,
+			Prepare: func() error {
+				mu.Lock()
+				activePIN = configuredPIN
+				mu.Unlock()
+				return nil
+			},
+			ResetSecurity: func() error {
+				mu.Lock()
+				resets++
+				mu.Unlock()
+				return nil
+			},
+			SetPIN: func(pin string) {
+				mu.Lock()
+				defer mu.Unlock()
+				if pin == "" {
+					activePIN = configuredPIN
+					return
+				}
+				activePIN = pin
+			},
+			WaitConnected: func(report ble.PairProgress) bool {
+				report(ble.PhaseVerifyingHandshake, "Verifying protected handshake")
+				mu.Lock()
+				handshakeVerified = true
+				mu.Unlock()
+				return true
+			},
+			Persist: func(gotMAC, gotPIN string) error {
+				mu.Lock()
+				persisted = gotMAC == mac && gotPIN == submittedPIN
+				mu.Unlock()
+				return nil
+			},
+		})
+	})
+	body := `{"mac":"` + mac + `","pin":"` + submittedPIN + `"}`
+	if w := do(t, h, http.MethodPost, "/api/v1/pairing/recover", "tok", body); w.Code != http.StatusAccepted {
+		t.Fatalf("recover status = %d", w.Code)
+	}
+	got := waitStage(t, h, "paired")
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), submittedPIN) || strings.Contains(string(encoded), "tok") {
+		t.Fatal("terminal pairing status leaked credentials")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if resets != 1 {
+		t.Fatalf("security resets = %d, want 1", resets)
+	}
+	if len(pairPINMatches) != 2 || !pairPINMatches[0] || !pairPINMatches[1] {
+		t.Fatal("submitted PIN was not active at both pair boundaries")
+	}
+	if !persisted {
+		t.Fatal("verified recovery did not persist the submitted pairing values")
+	}
+	if !handshakeVerified {
+		t.Fatal("recovery persisted without protected handshake verification")
+	}
+	if got["phase"] != string(ble.PhaseComplete) {
+		t.Fatalf("terminal phase = %v, want complete", got["phase"])
 	}
 }
 

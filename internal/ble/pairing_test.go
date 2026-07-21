@@ -19,6 +19,7 @@ type fakeOps struct {
 	calls     []string
 	block     chan struct{} // if non-nil, Scan blocks until closed
 	pairBlock chan struct{}
+	pairHook  func()
 }
 
 func (f *fakeOps) log(s string) {
@@ -40,6 +41,9 @@ func (f *fakeOps) Scan(time.Duration) ([]Found, error) {
 }
 func (f *fakeOps) Pair(mac string, recover bool, report PairProgress) error {
 	f.log(fmt.Sprintf("pair %t %s", recover, mac))
+	if f.pairHook != nil {
+		f.pairHook()
+	}
 	if recover {
 		report(PhaseClearingStaleBond, "Clearing the router's stale pairing record")
 	}
@@ -189,10 +193,10 @@ func TestRecoverSecurityRetry(t *testing.T) {
 				t.Fatalf("trusts=%d saved=%d, want %d/%d", trusts, saved, wantSuccessCalls, wantSuccessCalls)
 			}
 			if test.wantStage == StagePaired {
-				if len(pins) != 1 {
-					t.Fatal("successful retry did not retain exactly one submitted PIN override")
+				if len(pins) != test.wantPairs {
+					t.Fatal("successful pairing did not apply the submitted PIN once per pair pass")
 				}
-			} else if len(pins) != 2 || pins[1] != "" {
+			} else if len(pins) != test.wantPairs+1 || pins[len(pins)-1] != "" {
 				t.Fatal("failed pairing did not restore the configured PIN")
 			}
 			status := h.p.Status()
@@ -219,6 +223,53 @@ func TestRecoverSecurityRetry(t *testing.T) {
 				t.Fatalf("unexpected recovery phases: %v", phases)
 			}
 		})
+	}
+}
+
+func TestRecoverExplicitPINReappliedAfterPrepareOnEveryPass(t *testing.T) {
+	const (
+		mac           = "DC:04:5A:EB:72:2B"
+		configuredPIN = "111111"
+		submittedPIN  = "020555"
+	)
+	var mu sync.Mutex
+	activePIN := configuredPIN
+	pairPINMatches := make([]bool, 0, 2)
+	ops := &fakeOps{pairErrs: []error{ErrPairSecurityTimeout, nil}}
+	ops.pairHook = func() {
+		mu.Lock()
+		pairPINMatches = append(pairPINMatches, activePIN == submittedPIN)
+		mu.Unlock()
+	}
+	p := NewPairing(PairingDeps{
+		Ops: ops,
+		Prepare: func() error {
+			mu.Lock()
+			activePIN = configuredPIN
+			mu.Unlock()
+			return nil
+		},
+		ResetSecurity: func() error { return nil },
+		SetPIN: func(pin string) {
+			mu.Lock()
+			defer mu.Unlock()
+			if pin == "" {
+				activePIN = configuredPIN
+				return
+			}
+			activePIN = pin
+		},
+		WaitConnected: func(PairProgress) bool { return true },
+	})
+
+	if err := p.StartRecover(mac, submittedPIN); err != nil {
+		t.Fatalf("StartRecover: %v", err)
+	}
+	waitFor(t, "paired stage", func() bool { return p.Status().Stage == StagePaired })
+	mu.Lock()
+	defer mu.Unlock()
+	if len(pairPINMatches) != 2 || !pairPINMatches[0] || !pairPINMatches[1] {
+		t.Fatal("submitted PIN was not active at both pair boundaries")
 	}
 }
 

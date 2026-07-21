@@ -82,6 +82,13 @@ grep -Fq 'GODEBUG=' "$INIT"
 grep -Fq 'multipathtcp=0' "$INIT"
 grep -Fq 'procd_set_param env GODEBUG=' "$INIT"
 
+# The init script must append the Go runtime hardening without introducing a
+# leading comma or discarding settings supplied by the operator.
+got_godebug="$(GODEBUG= sh -c '. "$1"; printf "%s" "$GODEBUG"' sh "$INIT")"
+[ "$got_godebug" = 'multipathtcp=0' ]
+got_godebug="$(GODEBUG='netdns=go' sh -c '. "$1"; printf "%s" "$GODEBUG"' sh "$INIT")"
+[ "$got_godebug" = 'netdns=go,multipathtcp=0' ]
+
 FIREWALL_SYNC="$TMP/firewall-sync"
 VPN_REPAIR="$TMP/vpn-repair"
 SERVICE_SCRIPT="$TMP/service"
@@ -112,7 +119,7 @@ chmod +x "$FIREWALL_SYNC" "$VPN_REPAIR" "$SERVICE_SCRIPT" "$PGREP"
 # lifecycle functions with harmless injected commands.
 . "$INIT"
 procd_open_instance() { printf 'procd-open\n' >> "$CALLS"; }
-procd_set_param() { :; }
+procd_set_param() { printf '%s\n' "$*" >> "$CALLS"; }
 procd_close_instance() { :; }
 save_daemon_state
 [ "$(ls -ld "$RUNTIME_DIR" | awk '{print $1}')" = drwx------ ]
@@ -168,5 +175,37 @@ fi
 [ "$(grep -Fc 'pgrep' "$CALLS" || true)" -eq "$before_pgrep" ]
 cmp -s "$DAEMON_STATE" "$TMP/daemon-state.good"
 rm -f "$FAIL_UCI_SHOW"
+
+# The direct-launch fallback inherits the exported runtime hardening.
+DAEMON="$TMP/direct-daemon"
+DAEMON_ENV="$TMP/direct-daemon.godebug"
+PIDFILE="$TMP/direct-daemon.pid"
+LOGFILE="$TMP/direct-daemon.log"
+export DAEMON_ENV
+cat > "$DAEMON" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${GODEBUG:-}" > "$DAEMON_ENV"
+trap 'exit 0' TERM INT
+while :; do
+	sleep 1 &
+	wait "$!"
+done
+EOF
+chmod +x "$DAEMON"
+GODEBUG='direct-test,multipathtcp=0'
+export GODEBUG
+start
+direct_pid="$(cat "$PIDFILE")"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	[ -s "$DAEMON_ENV" ] && break
+	sleep 0.02
+done
+[ "$(cat "$DAEMON_ENV")" = "$GODEBUG" ]
+kill "$direct_pid"
+rm -f "$PIDFILE"
+
+# The procd launch path receives the same value as an explicit env argument.
+start_service
+grep -Fqx "env GODEBUG=$GODEBUG" "$CALLS"
 
 echo "provisioning tests passed"
