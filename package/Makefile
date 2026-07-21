@@ -105,12 +105,14 @@ ipk-luci:
 # so gzip the source bundle into the staging tree.
 ipk-glapp:
 	rm -rf $(OUT)/stage-gl
-	mkdir -p $(OUT)/stage-gl/www/views $(OUT)/stage-gl/usr/share/oui/menu.d $(OUT)/stage-gl/usr/lib/oui-httpd/rpc
+	mkdir -p $(OUT)/stage-gl/www/views $(OUT)/stage-gl/usr/share/oui/menu.d \
+		$(OUT)/stage-gl/usr/lib/oui-httpd/rpc $(OUT)/stage-gl/etc/nginx/conf.d
 	gzip -9 -c gl-app-wattline/www/views/gl-sdk4-ui-wattline.common.js > $(OUT)/stage-gl/www/views/gl-sdk4-ui-wattline.common.js.gz
 	cp gl-app-wattline/usr/share/oui/menu.d/wattline.json $(OUT)/stage-gl/usr/share/oui/menu.d/
 	cp gl-app-wattline/usr/lib/oui-httpd/rpc/wattline $(OUT)/stage-gl/usr/lib/oui-httpd/rpc/
+	cp gl-app-wattline/etc/nginx/conf.d/gl-app-wattline.locations $(OUT)/stage-gl/etc/nginx/conf.d/
 	cp -r gl-app-wattline/CONTROL $(OUT)/stage-gl/
-	chmod +x $(OUT)/stage-gl/CONTROL/postinst
+	chmod +x $(OUT)/stage-gl/CONTROL/postinst $(OUT)/stage-gl/CONTROL/prerm
 	$(call make_ipk,gl-app-wattline,$(OUT)/stage-gl,all)
 
 clean:

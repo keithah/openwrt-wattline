@@ -46,6 +46,21 @@ for ipk in "$@"; do
 	fi
 
 	case "$(basename "$ipk")" in
+		gl-app-wattline_*.ipk)
+			control_listing="$tmp/control.tar.gz.list"
+			data_listing="$tmp/data.tar.gz.list"
+			for path in ./postinst ./prerm; do
+				if ! awk -v path="$path" '$1 == "-rwxr-xr-x" && $6 == path { found = 1 } END { exit !found }' "$control_listing"; then
+					echo "$ipk: CONTROL/${path#./} is missing or not mode 0755" >&2
+					failed=1
+				fi
+			done
+			path=./etc/nginx/conf.d/gl-app-wattline.locations
+			if ! awk -v path="$path" '$1 == "-rw-r--r--" && $6 == path { found = 1 } END { exit !found }' "$data_listing"; then
+				echo "$ipk: $path is missing or not mode 0644" >&2
+				failed=1
+			fi
+			;;
 		wattlined_*.ipk)
 			listing="$tmp/data.tar.gz.list"
 			if [ "$("$TAR" -xOzf "$tmp/control.tar.gz" ./conffiles 2>/dev/null)" != /etc/config/wattline ]; then

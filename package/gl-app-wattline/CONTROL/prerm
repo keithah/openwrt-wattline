@@ -1,0 +1,21 @@
+#!/bin/sh
+set -u
+
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+SOURCE=${WATTLINE_NGINX_SOURCE:-/etc/nginx/conf.d/gl-app-wattline.locations}
+LINK=${WATTLINE_NGINX_LINK:-/etc/nginx/gl-conf.d/gl-app-wattline.conf}
+NGINX=${WATTLINE_NGINX_BIN:-/usr/sbin/nginx}
+NGINX_INIT=${WATTLINE_NGINX_INIT:-/etc/init.d/nginx}
+
+[ -L "$LINK" ] || exit 0
+[ "$(readlink "$LINK")" = "$SOURCE" ] || exit 0
+rm -f "$LINK" || exit 1
+
+if ! "$NGINX" -t; then
+	ln -s "$SOURCE" "$LINK"
+	echo 'gl-app-wattline: nginx validation failed; proxy removal was rolled back' >&2
+	exit 1
+fi
+
+"$NGINX_INIT" reload

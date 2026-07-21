@@ -1,5 +1,30 @@
 #!/bin/sh
-# Reload nginx so the new /www/views bundle + oui menu entry are served.
-# The oui menu is read per panel load, so a browser refresh shows the app.
-[ -n "$IPKG_INSTROOT" ] || /etc/init.d/nginx reload 2>/dev/null
-exit 0
+set -u
+
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+SOURCE=${WATTLINE_NGINX_SOURCE:-/etc/nginx/conf.d/gl-app-wattline.locations}
+LINK=${WATTLINE_NGINX_LINK:-/etc/nginx/gl-conf.d/gl-app-wattline.conf}
+NGINX=${WATTLINE_NGINX_BIN:-/usr/sbin/nginx}
+NGINX_INIT=${WATTLINE_NGINX_INIT:-/etc/init.d/nginx}
+
+if [ -L "$LINK" ]; then
+	[ "$(readlink "$LINK")" = "$SOURCE" ] || {
+		echo "gl-app-wattline: refusing to replace unrelated nginx include $LINK" >&2
+		exit 1
+	}
+elif [ -e "$LINK" ]; then
+	echo "gl-app-wattline: refusing to replace unrelated nginx include $LINK" >&2
+	exit 1
+else
+	ln -s "$SOURCE" "$LINK" || exit 1
+	created=1
+fi
+
+if ! "$NGINX" -t; then
+	[ "${created:-0}" = 1 ] && rm -f "$LINK"
+	echo 'gl-app-wattline: nginx validation failed; proxy was not enabled' >&2
+	exit 1
+fi
+
+"$NGINX_INIT" reload
