@@ -3,6 +3,7 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 WORKFLOW="$ROOT/.github/workflows/release.yml"
+CI_WORKFLOW="$ROOT/.github/workflows/ci.yml"
 
 assert_fixed() {
 	needle=$1
@@ -32,9 +33,25 @@ for control in \
 	assert_fixed 'Version: 0.1.4' "$ROOT/$control"
 done
 
-assert_contains 'uses: actions/checkout@v7' "$WORKFLOW"
-assert_contains 'uses: actions/setup-go@v6' "$WORKFLOW"
-assert_contains 'uses: actions/setup-node@v6' "$WORKFLOW"
+for workflow in "$CI_WORKFLOW" "$WORKFLOW"; do
+	assert_contains 'uses: actions/checkout@v7' "$workflow"
+	assert_contains 'uses: actions/setup-go@v7' "$workflow"
+	assert_contains 'uses: actions/setup-node@v7' "$workflow"
+	if grep -Eq 'uses: actions/(checkout|setup-go|setup-node)@v[0-6]([^0-9]|$)' "$workflow"; then
+		echo "stale official action major in ${workflow#"$ROOT/"}" >&2
+		exit 1
+	fi
+done
+
+awk '
+	/^permissions:$/ { in_permissions = 1; next }
+	in_permissions && /^  contents: read$/ { found = 1; next }
+	in_permissions && /^[^ ]/ { in_permissions = 0 }
+	END { exit !found }
+' "$CI_WORKFLOW" || {
+	echo 'CI workflow must declare top-level contents: read permission' >&2
+	exit 1
+}
 assert_contains 'make -C package VERSION=${{ steps.ver.outputs.version }} all' "$WORKFLOW"
 assert_contains 'gh release view "$tag" --json assets' "$WORKFLOW"
 assert_contains 'gh release download "$tag"' "$WORKFLOW"
