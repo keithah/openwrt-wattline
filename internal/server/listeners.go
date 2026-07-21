@@ -132,6 +132,11 @@ func validateEndpoint(name string, ep Endpoint) error {
 
 func listen(ctx context.Context, network, host string, port int) (net.Listener, error) {
 	lc := net.ListenConfig{}
+	// Go 1.24 enabled MPTCP for listeners by default. GL-X3000 firmware 4.8.3
+	// exposes MPTCP through its 5.4 kernel, but connections to those sockets
+	// remain stuck in SYN_RECV. Wattline needs predictable ordinary TCP on all
+	// supported router kernels, so opt out independently of the Go toolchain.
+	lc.SetMultipathTCP(false)
 	if network == "tcp6" {
 		lc.Control = func(_, _ string, raw syscall.RawConn) error {
 			var optionErr error

@@ -61,6 +61,53 @@ func TestListenerHTTPAndHTTPSIndependent(t *testing.T) {
 	}
 }
 
+func TestListenerOptsOutOfMultipathTCP(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("MPTCP is only available on Linux")
+	}
+	t.Setenv("GODEBUG", "multipathtcp=1")
+	l, err := listen(context.Background(), "tcp4", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	accepted := make(chan *net.TCPConn, 1)
+	errs := make(chan error, 1)
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			errs <- err
+			return
+		}
+		accepted <- conn.(*net.TCPConn)
+	}()
+
+	var dialer net.Dialer
+	dialer.SetMultipathTCP(true)
+	client, err := dialer.Dial("tcp4", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case server := <-accepted:
+		defer server.Close()
+		usingMPTCP, err := server.MultipathTCP()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if usingMPTCP {
+			t.Fatal("listener negotiated MPTCP; Wattline requires ordinary TCP for GL-X3000 compatibility")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener did not accept connection")
+	}
+}
+
 func TestListenerBoundsRequestReadsWithoutTimingOutSSEWrites(t *testing.T) {
 	port := freePort(t, "tcp4", "127.0.0.1")
 	group, err := Start(context.Background(), ListenerConfig{

@@ -17,6 +17,10 @@ PGREP="${PGREP:-pgrep}"
 DAEMON="/usr/bin/wattlined"
 PIDFILE="${PIDFILE:-/var/run/wattline/wattlined.pid}"
 LOGFILE="${LOGFILE:-/var/log/wattlined.log}"
+# Defense in depth for Go 1.24+ builds. The daemon also disables MPTCP on its
+# listeners, but this protects startup if an older binary is restored.
+GODEBUG="${GODEBUG:+${GODEBUG},}multipathtcp=0"
+export GODEBUG
 
 start() {
 	[ -x "$DAEMON" ] || return 1
@@ -84,6 +88,7 @@ start_service() {
 	save_daemon_state || return 1
 	procd_open_instance
 	procd_set_param command /usr/bin/wattlined -config /etc/config/wattline
+	procd_set_param env GODEBUG="$GODEBUG"
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
