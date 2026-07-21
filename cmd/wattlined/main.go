@@ -308,24 +308,14 @@ func run(cfgPath string, stop <-chan struct{}) error {
 		current := live.current()
 		return current.TLSCert, current.TLSKey
 	}
-	// The agent may fail to register when bluetoothd/the dongle come up after
-	// the daemon; ensureAgent retries before each pair attempt (idempotent).
-	var agentMu sync.Mutex
 	pairingPrompt := ble.NewPasskeyPrompt(25 * time.Second)
-	agentOK := false
-	ensureAgent := func() error {
-		agentMu.Lock()
-		defer agentMu.Unlock()
-		if agentOK {
-			return nil
-		}
-		if _, err := ble.RegisterPairingAgent(live.current().BLEPIN, pairingPrompt); err != nil {
-			return err
-		}
-		agentOK = true
-		return nil
-	}
-	if err := ensureAgent(); err != nil {
+	// Registration may fail when bluetoothd/the dongle comes up after the
+	// daemon. Failed attempts remain retryable, and a security reset invalidates
+	// the old DBus registration before the pairing retry prepares a new one.
+	agent := newPairingAgentRegistration(func() (func(), error) {
+		return ble.RegisterPairingAgent(live.current().BLEPIN, pairingPrompt)
+	})
+	if err := agent.Ensure(); err != nil {
 		log.Printf("wattline: pairing agent unavailable (non-fatal, retried on pair): %v", err)
 	}
 
@@ -368,9 +358,18 @@ func run(cfgPath string, stop <-chan struct{}) error {
 
 	pairing := ble.NewPairing(ble.PairingDeps{
 		Ops:     ble.NewLazyPairOps(),
-		Prepare: ensureAgent,
-		Pause:   conn.Pause,
-		Resume:  conn.Resume,
+		Prepare: agent.Ensure,
+		ResetSecurity: func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+			if err := ble.RunSecurityReset(ctx, "/usr/lib/wattline/restart-bluetooth-security"); err != nil {
+				return err
+			}
+			agent.Invalidate()
+			return nil
+		},
+		Pause:  conn.Pause,
+		Resume: conn.Resume,
 		// Empty pin = restore the configured PIN (reloaded from disk, since a
 		// prior successful pair may have persisted a new one).
 		SetPIN: func(pin string) {
