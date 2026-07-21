@@ -13,7 +13,7 @@
 - Preserve `http://ROUTER:8377/api/v1` and all existing daemon, BLE, CORS, rule, webhook, and SSE behavior.
 - Map `/wattline/<path>` exactly to `http://127.0.0.1:8377/api/v1/<path>`.
 - Preserve and explicitly forward `Authorization`; never inject the UCI token into nginx.
-- Use HTTP/1.1, an empty upstream `Connection` header, disabled buffering/cache, and a one-hour read timeout for SSE.
+- Use HTTP/1.1, an empty upstream `Connection` header, disabled buffering, no cache-module directive, and a one-hour read timeout for SSE. GL nginx is built with `--without-http-cache`.
 - Package the integration only in `gl-app-wattline`.
 - Keep package archives as gzip-wrapped ustar, never `ar`/Debian format or pax tar.
 - Never reload nginx after a failed `nginx -t`.
@@ -84,8 +84,11 @@ need "$FRAGMENT" 'proxy_http_version 1.1;' 'SSE HTTP version'
 need "$FRAGMENT" 'proxy_set_header Authorization $http_authorization;' 'bearer forwarding'
 need "$FRAGMENT" 'proxy_set_header Connection "";' 'persistent SSE upstream'
 need "$FRAGMENT" 'proxy_buffering off;' 'SSE buffering disabled'
-need "$FRAGMENT" 'proxy_cache off;' 'SSE cache disabled'
 need "$FRAGMENT" 'proxy_read_timeout 1h;' 'long-lived SSE timeout'
+if grep -Fq 'proxy_cache' "$FRAGMENT"; then
+	echo 'forbidden: GL nginx is built --without-http-cache' >&2
+	exit 1
+fi
 need "$MAKEFILE" 'gl-app-wattline/etc/nginx/conf.d/gl-app-wattline.locations' 'fragment staging'
 need "$MAKEFILE" 'stage-gl/CONTROL/prerm' 'prerm executable mode'
 
@@ -177,7 +180,6 @@ location ^~ /wattline/ {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_buffering off;
-    proxy_cache off;
     proxy_read_timeout 1h;
 }
 ```
@@ -365,8 +367,9 @@ Wattline independent of undocumented `oui` cookies and Lua internals.
 ## Streaming
 
 The package uses HTTP/1.1, clears the upstream `Connection` header, disables
-proxy buffering and caching, and permits a one-hour read so `/wattline/events`
-remains an SSE stream.
+proxy buffering, configures no proxy cache, and permits a one-hour read so
+`/wattline/events` remains an SSE stream. GL nginx is built without its HTTP
+cache module, so cache-module directives must not be used.
 
 ## Package lifecycle
 
@@ -551,4 +554,3 @@ git status --short --branch
 ```
 
 Expected: tests pass, the branch is clean, and no router credentials, bearer tokens, cookies, or GoodCloud secrets appear in the diff or commit.
-

@@ -26,8 +26,10 @@ Wattline independent of undocumented `oui` cookies and Lua internals.
 ## Streaming
 
 The package uses HTTP/1.1, clears the upstream `Connection` header, disables
-proxy buffering and caching, and permits a one-hour read so `/wattline/events`
-remains an SSE stream.
+proxy buffering, configures no proxy cache, and permits a one-hour read so
+`/wattline/events` remains an SSE stream. GL firmware builds nginx with
+`--without-http-cache`, so the fragment deliberately uses no cache-module
+directives.
 
 ## Package lifecycle
 

@@ -56,14 +56,13 @@ location ^~ /wattline/ {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_buffering off;
-    proxy_cache off;
     proxy_read_timeout 1h;
 }
 ```
 
 The trailing slashes on both the location and `proxy_pass` are intentional: nginx replaces `/wattline/` with `/api/v1/`, preserving the remainder of the path and query string. The exact `/wattline` location provides a stable canonical redirect.
 
-SSE requires HTTP/1.1, disabled proxy buffering and caching, an empty upstream `Connection` header, and a read timeout longer than normal idle intervals. Response headers, status codes, request bodies, query strings, and streaming bytes otherwise pass through unchanged.
+SSE requires HTTP/1.1, disabled proxy buffering, an empty upstream `Connection` header, and a read timeout longer than normal idle intervals. The fragment does not configure a proxy cache: GL firmware builds nginx with `--without-http-cache`, so cache-module directives are invalid. Response headers, status codes, request bodies, query strings, and streaming bytes otherwise pass through unchanged.
 
 ## Authentication Decision
 
@@ -113,7 +112,7 @@ Implementation is test-driven. Package-level tests will cover:
 
 - the exact `/wattline/` to `/api/v1/` proxy mapping;
 - explicit Authorization forwarding;
-- the SSE directives (`proxy_http_version 1.1`, empty `Connection`, buffering/cache disabled, long timeout);
+- the SSE directives (`proxy_http_version 1.1`, empty `Connection`, buffering disabled, no cache-module directive, long timeout);
 - staging the fragment and both lifecycle scripts into the `.ipk`;
 - executable modes for lifecycle scripts;
 - idempotent install and removal using a fake nginx/init environment;
@@ -144,4 +143,3 @@ GoodCloud verification requires its authenticated remote-admin URL and cannot be
 4. Confirm the relay preserves `Authorization` and does not buffer SSE.
 
 Until those remote checks pass, LAN admin-port support may be called verified, but GoodCloud compatibility must remain explicitly marked unverified.
-

@@ -22,8 +22,11 @@ need "$FRAGMENT" 'proxy_http_version 1.1;' 'SSE HTTP version'
 need "$FRAGMENT" 'proxy_set_header Authorization $http_authorization;' 'bearer forwarding'
 need "$FRAGMENT" 'proxy_set_header Connection "";' 'persistent SSE upstream'
 need "$FRAGMENT" 'proxy_buffering off;' 'SSE buffering disabled'
-need "$FRAGMENT" 'proxy_cache off;' 'SSE cache disabled'
 need "$FRAGMENT" 'proxy_read_timeout 1h;' 'long-lived SSE timeout'
+if grep -Fq 'proxy_cache' "$FRAGMENT"; then
+	echo 'forbidden: GL nginx is built --without-http-cache' >&2
+	exit 1
+fi
 need "$MAKEFILE" 'gl-app-wattline/etc/nginx/conf.d/gl-app-wattline.locations' 'fragment staging'
 need "$MAKEFILE" 'stage-gl/CONTROL/prerm' 'prerm executable mode'
 
