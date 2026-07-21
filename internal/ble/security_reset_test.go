@@ -47,7 +47,7 @@ func TestRunSecurityResetDoesNotPassCallerEnvironment(t *testing.T) {
 		t.Fatal("RunSecurityReset() error = nil")
 	}
 	if strings.Contains(err.Error(), "super-secret-token") {
-		t.Fatalf("error leaked caller environment: %v", err)
+		t.Fatal("error leaked caller environment")
 	}
 }
 
@@ -55,12 +55,43 @@ func TestRunSecurityResetRedactsTokenAndPINOutput(t *testing.T) {
 	helper := writeResetScript(t, "printf 'adapter failed\\ntoken=hunter2 PIN: 020555\\n'; exit 1")
 	err := RunSecurityReset(context.Background(), helper)
 	if err == nil || !strings.Contains(err.Error(), "adapter failed") {
-		t.Fatalf("error omitted helper diagnostic: %v", err)
+		t.Fatal("error omitted the nonsecret helper diagnostic")
 	}
 	for _, secret := range []string{"hunter2", "020555"} {
 		if strings.Contains(err.Error(), secret) {
-			t.Fatalf("error leaked %q: %v", secret, err)
+			t.Fatal("error leaked a token or PIN value")
 		}
+	}
+}
+
+func TestSafeSecurityResetOutputRedactsCredentialForms(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"authorization bearer", "adapter failed: Authorization: Bearer abc", "adapter failed: Authorization: Bearer <redacted>"},
+		{"bare bearer", "adapter failed: Bearer abc", "adapter failed: Bearer <redacted>"},
+		{"pin code", "adapter failed: PIN code: 020555", "adapter failed: PIN code: <redacted>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if safeSecurityResetOutput(tt.in) != tt.want {
+				t.Fatal("sanitized helper output did not match the safe expected diagnostic")
+			}
+		})
+	}
+}
+
+func TestRunSecurityResetCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := RunSecurityReset(ctx, writeResetScript(t, "exit 0"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal("RunSecurityReset() did not preserve context.Canceled")
+	}
+	if !strings.Contains(err.Error(), "canceled") || strings.Contains(err.Error(), "timed out") {
+		t.Fatal("RunSecurityReset() did not distinguish cancellation from timeout")
 	}
 }
 

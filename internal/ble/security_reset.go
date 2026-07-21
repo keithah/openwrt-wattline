@@ -12,7 +12,10 @@ import (
 
 const securityResetOutputLimit = 4 * 1024
 
-var securityResetSecret = regexp.MustCompile(`(?i)\b(token|pin)(?:\s*[:=]\s*|\s+)\S+`)
+var (
+	securityResetBearer = regexp.MustCompile(`(?i)\b(bearer)\s+\S+`)
+	securityResetSecret = regexp.MustCompile(`(?i)\b(token|pin(?:[\s_-]+code)?)(?:\s*[:=]\s*|\s+)\S+`)
+)
 
 type cappedOutput struct {
 	mu sync.Mutex
@@ -39,7 +42,8 @@ func (w *cappedOutput) String() string {
 }
 
 func safeSecurityResetOutput(output string) string {
-	output = securityResetSecret.ReplaceAllString(output, "${1}=<redacted>")
+	output = securityResetBearer.ReplaceAllString(output, "${1} <redacted>")
+	output = securityResetSecret.ReplaceAllString(output, "${1}: <redacted>")
 	if len(output) > securityResetOutputLimit {
 		output = output[:securityResetOutputLimit]
 	}
@@ -68,7 +72,10 @@ func RunSecurityReset(ctx context.Context, helper string) error {
 		return nil
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return fmt.Errorf("security reset helper timed out: %w", ctxErr)
+		if ctxErr == context.DeadlineExceeded {
+			return fmt.Errorf("security reset helper timed out: %w", ctxErr)
+		}
+		return fmt.Errorf("security reset helper canceled: %w", ctxErr)
 	}
 	if diagnostic := safeSecurityResetOutput(output.String()); diagnostic != "" {
 		return fmt.Errorf("security reset helper: %w; output: %s", err, diagnostic)
