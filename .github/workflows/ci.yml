@@ -28,6 +28,7 @@ jobs:
             package/tests/provisioning_test.sh \
             package/tests/luci_contract_test.sh \
             package/tests/gl_contract_test.sh \
+            package/tests/feed-migrate-test.sh \
             package/tests/rtl8761b-artifacts_test.sh \
             package/tests/rtl8761b-driver_test.sh \
             package/tests/rtl8761b-lifecycle_test.sh; do
