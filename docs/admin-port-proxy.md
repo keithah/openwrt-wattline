@@ -38,7 +38,12 @@ does not own GL-specific nginx files.
 
 ## Verification status
 
-- LAN GL-X3000 verification: pending
+- Local package verification (2026-07-21): passed. All Go tests and the ten
+  package shell suites passed; all five gzip-ustar packages built and passed
+  both metadata checks.
+- LAN GL-X3000 verification: pending. Strict non-interactive SSH to
+  `192.168.8.1:22` timed out before the router identity and service baseline
+  could be checked, so no router changes were made.
 - GoodCloud relay verification: pending
 
 GoodCloud must be tested through an authenticated remote-admin URL to prove
