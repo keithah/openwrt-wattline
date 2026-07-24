@@ -1,6 +1,7 @@
 name: Release
 
 # Tag a release to trigger: git tag v0.1.5 && git push origin v0.1.5
+# The current Wattline release line is v0.1.5.
 on:
   push:
     tags: ['v*']
