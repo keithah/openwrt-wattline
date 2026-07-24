@@ -29,3 +29,9 @@ Added focused fault-injection cases to Wattline, Starwatch, and publisher recove
 ## Concern
 
 Wattline `release-inventory_test.sh package/out 0.1.5` reports the packaged helper differs from source because `package/out` is stale/not rebuilt in this worktree; no generated package artifacts were modified.
+
+## Residual rollback fix
+
+Follow-up fault injection failed during staging of the second backup before the fix; the first destination backup was left unrestored. Rollback is now armed before the first backup move, and cleanup independently restores only backups that actually exist while preserving an untouched second destination. Focused second-backup tests and the prior second-replacement tests pass for all three products.
+
+Attempted `make -j2 package/out` before rerunning Wattline inventory; the inventory still reports the pre-existing packaged-helper mismatch, so generated artifacts remain untouched.
