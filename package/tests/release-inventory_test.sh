@@ -26,19 +26,25 @@ trap 'rm -rf "$tmp"' 0 HUP INT TERM
 wattlined_ipk="$OUT/wattlined_${VERSION}_aarch64_cortex-a53.ipk"
 tar -xzf "$wattlined_ipk" -C "$tmp" ./data.tar.gz
 mkdir "$tmp/data"
-(umask 022 && tar -xzf "$tmp/data.tar.gz" -C "$tmp/data")
+tar -xzf "$tmp/data.tar.gz" -C "$tmp/data"
 
 cmp -s "$tmp/data/usr/libexec/wattline-feed-migrate" "$(dirname "$0")/../wattline-feed-migrate.sh" || {
 	echo 'packaged Wattline feed migration helper differs from source' >&2
 	exit 1
 }
-[ "$(stat -c %A "$tmp/data/usr/libexec/wattline-feed-migrate")" = -rwxr-xr-x ] || {
+helper_mode="$(LC_ALL=C tar -tzvf "$tmp/data.tar.gz" |
+	awk '$NF == "./usr/libexec/wattline-feed-migrate" { print $1; found = 1 } END { exit !found }')"
+[ "$helper_mode" = -rwxr-xr-x ] || {
 	echo 'packaged Wattline feed migration helper is not mode 0755' >&2
 	exit 1
 }
 if tar -tzf "$tmp/data.tar.gz" | grep -Fx './usr/libexec/keithah-feed-migrate' >/dev/null; then
 	echo 'wattlined package still owns the legacy feed migration helper' >&2
 	exit 1
+fi
+
+if [ "${RELEASE_INVENTORY_SKIP_MODE_REGRESSION:-0}" != 1 ]; then
+	sh "$(dirname "$0")/release-inventory-mode_test.sh" "$OUT" "$VERSION"
 fi
 
 echo 'Release inventory tests passed'
