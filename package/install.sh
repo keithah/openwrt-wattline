@@ -45,7 +45,15 @@ retire_rtl8761b() {
 	fi
 
 	# Stop the boot-time force-load however the restore went.
-	[ -x "$driverctl" ] && [ -x "$boot_init" ] && ROOT_PREFIX="$prefix" "$driverctl" disable-boot || true
+	# disable-boot clears the procd enable link and the hotplug marker; when
+	# driverctl is gone, do the same teardown directly so the warning below
+	# does not misreport that boot activation was turned off.
+	if [ -x "$driverctl" ] && [ -x "$boot_init" ]; then
+		ROOT_PREFIX="$prefix" "$driverctl" disable-boot || true
+	elif [ ! -x "$driverctl" ]; then
+		[ -x "$boot_init" ] && "$boot_init" disable >/dev/null 2>&1 || true
+		rm -f "$prefix/etc/wattline/rtl8761b.hotplug-enabled"
+	fi
 	[ -x "$boot_init" ] && "$boot_init" stop >/dev/null 2>&1 || true
 
 	if [ "$restored" = no ] && [ -f "$stock_backup" ]; then

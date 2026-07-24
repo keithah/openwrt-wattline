@@ -132,11 +132,15 @@ assert_called never_activated 'opkg remove wattline-rtl8761b'
 assert_absent never_activated etc/init.d/wattline-rtl8761b
 
 # driverctl deleted by hand while the modules are still swapped: nothing can
-# restore them, so keep the package and say so.
+# restore them, so keep the package and say so — but still disable boot the
+# same way driverctl disable-boot would have (procd link + hotplug marker).
 setup_case driverctl_gone activated nodriverctl
 run_case driverctl_gone
 assert_not_called driverctl_gone 'opkg remove wattline-rtl8761b'
 assert_present driverctl_gone etc/init.d/wattline-rtl8761b
+assert_called driverctl_gone 'init disable'
+assert_called driverctl_gone 'init stop'
+assert_absent driverctl_gone etc/wattline/rtl8761b.hotplug-enabled
 grep -Fq 'driverctl is missing' "$TMP/driverctl_gone/out" || fail 'driverctl_gone: missing warning'
 
 # driverctl absent and nothing was ever swapped: remove the leftovers.
