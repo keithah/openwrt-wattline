@@ -475,7 +475,7 @@ Record released versions, workflow URLs, relevant package status, helper ownersh
 
 ### Publication-gate follow-up approved after Task 5 verification
 
-Task 5 found that the original plan's assumption of manual two-tag ordering was not enforceable: the hourly Pages workflow independently fetched each product's latest release. The following two focused tasks are required before Task 6.
+Task 5 found that the hourly Pages workflow independently fetched each product's latest release. The following two focused tasks keep apps independently releasable while ensuring the migration cannot publish a pre-fix version during a staggered rollout.
 
 ### Task 5A: Synchronize candidate versions in product tests and documentation
 
@@ -500,7 +500,7 @@ Task 5 found that the original plan's assumption of manual two-tag ordering was 
 - [ ] Add a strict `minimum_tag` manifest field for all four products: `v0.1.4` Starwatch, `v0.1.5` Wattline, `v1.2.0` CLI Speedtest, and `v1.2.0` Web Speedtest.
 - [ ] Validate tags as semver and reject any stable latest release below its product floor before downloading or assembling artifacts.
 - [ ] Add tests proving a lower Starwatch or Wattline tag fails closed and all current fixture tags pass.
-- [ ] Document that Pages will not deploy a mixed-generation feed; the floors are raised with each coordinated product rollout.
+- [ ] Document that Pages rejects any product below its independent migration floor; app versions remain independently releasable and may differ above their floors.
 - [ ] Run the full publisher Python/shell/syntax suites and assemble the local four-product candidate.
 - [ ] Do not require GitHub's optional `immutable` boolean for the current Ookla releases; the existing tag, asset allowlist, canonical installer, hash, signature, and inventory checks remain the integrity boundary.
 - [ ] Commit the publisher gate independently and re-run Task 5 verification before release publication.
