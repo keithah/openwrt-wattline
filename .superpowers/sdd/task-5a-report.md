@@ -62,9 +62,13 @@ Both worktrees were clean after their independent commits; no unintended files r
 
 ## Commits
 
-- Wattline: `421118bd8a1699fcbc85c481d52ab7df8a7cb119` — `test: synchronize Wattline 0.1.5 candidate`
+- Wattline: `d4da5fd775e2dc4ca1d0d84a959c4922fe446af7` — `test: synchronize Wattline 0.1.5 candidate`
 - Starwatch: `613db2d7a4f7f9ca24cc92398a42c7d5bca91c40` — `docs: synchronize Starwatch 0.1.4 candidate`
 
 ## Concerns
 
 None. The only remaining `0.1.3` README reference is the explicitly historical frozen migration bridge.
+
+## Correction
+
+The Wattline SHA above is the actual branch commit. The report is already included in `d4da5fd775e2dc4ca1d0d84a959c4922fe446af7`; the sibling report-only commit is not the product commit.
