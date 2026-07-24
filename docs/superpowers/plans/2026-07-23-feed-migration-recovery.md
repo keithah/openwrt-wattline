@@ -470,3 +470,37 @@ Rerun the Ookla web installer, then run `opkg update && opkg upgrade`. Expected:
 - [ ] **Step 7: Capture recovery evidence**
 
 Record released versions, workflow URLs, relevant package status, helper ownership, and pass/fail results in the Wattline verification documentation. Redact router credentials, bearer tokens, and pairing PINs from committed logs.
+
+---
+
+### Publication-gate follow-up approved after Task 5 verification
+
+Task 5 found that the original plan's assumption of manual two-tag ordering was not enforceable: the hourly Pages workflow independently fetched each product's latest release. The following two focused tasks are required before Task 6.
+
+### Task 5A: Synchronize candidate versions in product tests and documentation
+
+**Files:**
+- Modify: Wattline `package/tests/rtl8761b-lifecycle_test.sh`
+- Modify: Wattline `README.md`
+- Modify: Starwatch `README.md`
+
+- [ ] Change the Wattline lifecycle fixture expectation and all candidate examples from 0.1.4 to 0.1.5.
+- [ ] Change Starwatch public-feed, upgrade, package, build, and release examples from 0.1.3 to 0.1.4.
+- [ ] Run each product's exact release workflow test sequence and package inventory.
+- [ ] Commit product changes independently with version-specific subjects.
+
+### Task 5B: Add a fail-closed publisher release floor
+
+**Files:**
+- Modify: publisher `sources.json`
+- Modify: publisher `scripts/assemble_feed.py` or `scripts/fetch_releases.py`
+- Modify: publisher `tests/test_fetch_releases.py` and/or `tests/test_assemble_feed.py`
+- Modify: publisher `README.md`
+
+- [ ] Add a strict `minimum_tag` manifest field for all four products: `v0.1.4` Starwatch, `v0.1.5` Wattline, `v1.2.0` CLI Speedtest, and `v1.2.0` Web Speedtest.
+- [ ] Validate tags as semver and reject any stable latest release below its product floor before downloading or assembling artifacts.
+- [ ] Add tests proving a lower Starwatch or Wattline tag fails closed and all current fixture tags pass.
+- [ ] Document that Pages will not deploy a mixed-generation feed; the floors are raised with each coordinated product rollout.
+- [ ] Run the full publisher Python/shell/syntax suites and assemble the local four-product candidate.
+- [ ] Do not require GitHub's optional `immutable` boolean for the current Ookla releases; the existing tag, asset allowlist, canonical installer, hash, signature, and inventory checks remain the integrity boundary.
+- [ ] Commit the publisher gate independently and re-run Task 5 verification before release publication.
