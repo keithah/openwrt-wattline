@@ -47,7 +47,7 @@ make -C package clean all
 package/check-ipk-metadata.sh package/out/*.ipk
 ```
 
-The default version is `0.1.4`. Override it consistently with, for example,
+The default version is `0.1.5`. Override it consistently with, for example,
 `make -C package VERSION=1.0.0 all`. A build produces:
 
 - `wattlined_VERSION_aarch64_cortex-a53.ipk`: daemon, procd service,
@@ -72,7 +72,7 @@ builds the five product packages and publishes a GitHub release. The dedicated
 supplies the package version after stripping `v`:
 
 ```sh
-git tag v0.1.4 && git push origin v0.1.4
+git tag v0.1.5 && git push origin v0.1.5
 ```
 
 ### `.ipk` format (verified on-target)
@@ -132,7 +132,7 @@ router upgrades with `opkg upgrade` (or the GL **Plug-ins** page).
 # Build all ipks + the feed index. BUMP THE VERSION each release so opkg
 # detects an upgrade (the Version: field, filename, and index must all match —
 # the Makefile injects VERSION into all three).
-make -C package VERSION=0.1.4 feed
+make -C package VERSION=0.1.5 feed
 # → package/out/{*.ipk, Packages, Packages.gz}
 ```
 
