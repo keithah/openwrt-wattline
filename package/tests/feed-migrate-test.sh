@@ -2,7 +2,7 @@
 set -eu
 
 package_root="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
-script="$package_root/keithah-feed-migrate.sh"
+script="$package_root/wattline-feed-migrate.sh"
 postinst="$package_root/wattlined/CONTROL/postinst"
 makefile="$package_root/Makefile"
 installer="$package_root/install.sh"
@@ -18,22 +18,13 @@ make_case() {
 	case_dir="$tmp/$1"
 	mkdir -p "$case_dir/bin" "$case_dir/root/etc/opkg/keys"
 	: >"$case_dir/root/etc/opkg/customfeeds.conf"
-	cat >"$case_dir/bin/opkg" <<'EOF'
-#!/bin/sh
-[ "$1" = print-architecture ] || exit 1
-printf '%s\n' "${MOCK_ARCHES:-arch all 1}"
-[ "${MOCK_ARCH_FAIL:-0}" = 1 ] && exit 1
-exit 0
-EOF
-	chmod +x "$case_dir/bin/opkg"
 }
 
 run_case() {
 	case_dir="$tmp/$1"
 	shift
 	env -i PATH="$case_dir/bin:$PATH" KEITHAH_ROOT="$case_dir/root" \
-		MOCK_ARCHES='arch aarch64_cortex-a53 10' MOCK_ARCH_FAIL=0 "$@" \
-		/bin/sh "$script"
+		/bin/sh "$script" "${1:-aarch64_cortex-a53}"
 }
 
 expect_fail() {
@@ -42,13 +33,24 @@ expect_fail() {
 	fi
 }
 
-# Reject an unsupported target before either managed path is created or changed.
+# Reject a missing target before either managed path is created or changed.
+make_case missing
+printf 'src/gz core https://downloads.example/core' >"$tmp/missing/root/etc/opkg/customfeeds.conf"
+printf 'old key without newline' >"$tmp/missing/root/etc/opkg/keys/f6c72c675c844b91"
+cp -p "$tmp/missing/root/etc/opkg/customfeeds.conf" "$tmp/missing/feeds.before"
+cp -p "$tmp/missing/root/etc/opkg/keys/f6c72c675c844b91" "$tmp/missing/key.before"
+expect_fail env -i PATH="$tmp/missing/bin:$PATH" KEITHAH_ROOT="$tmp/missing/root" /bin/sh "$script"
+cmp -s "$tmp/missing/feeds.before" "$tmp/missing/root/etc/opkg/customfeeds.conf" || fail 'missing architecture changed feeds'
+cmp -s "$tmp/missing/key.before" "$tmp/missing/root/etc/opkg/keys/f6c72c675c844b91" || fail 'missing architecture changed key'
+
+# Reject the architecture-independent package marker before either managed path
+# is created or changed.
 make_case unsupported
 printf 'src/gz core https://downloads.example/core' >"$tmp/unsupported/root/etc/opkg/customfeeds.conf"
 printf 'old key without newline' >"$tmp/unsupported/root/etc/opkg/keys/f6c72c675c844b91"
 cp -p "$tmp/unsupported/root/etc/opkg/customfeeds.conf" "$tmp/unsupported/feeds.before"
 cp -p "$tmp/unsupported/root/etc/opkg/keys/f6c72c675c844b91" "$tmp/unsupported/key.before"
-expect_fail run_case unsupported MOCK_ARCHES='arch all 1'
+expect_fail run_case unsupported all
 cmp -s "$tmp/unsupported/feeds.before" "$tmp/unsupported/root/etc/opkg/customfeeds.conf" || fail 'unsupported architecture changed feeds'
 cmp -s "$tmp/unsupported/key.before" "$tmp/unsupported/root/etc/opkg/keys/f6c72c675c844b91" || fail 'unsupported architecture changed key'
 
@@ -89,12 +91,14 @@ printf 'src/gz keithah https://keithah.github.io/openwrt-packages\nsrc/gz core h
 cmp -s "$tmp/managed_eof/expected-feeds" "$tmp/managed_eof/root/etc/opkg/customfeeds.conf" || fail 'managed EOF damaged retained newline'
 
 # Packaging, bootstrap, and postinst all honor the publisher-neutral contract.
-grep -F 'cp keithah-feed-migrate.sh $(OUT)/stage/usr/libexec/keithah-feed-migrate' "$makefile" >/dev/null || fail 'Makefile does not stage migration helper'
-grep -F 'chmod 0755 $(OUT)/stage/usr/libexec/keithah-feed-migrate' "$makefile" >/dev/null || fail 'Makefile does not make helper executable'
+grep -F 'wattline-feed-migrate.sh $(OUT)/stage/usr/libexec/wattline-feed-migrate' "$makefile" >/dev/null || fail 'Makefile does not stage product-owned migration helper'
+grep -F 'chmod 0755 $(OUT)/stage/usr/libexec/wattline-feed-migrate' "$makefile" >/dev/null || fail 'Makefile does not make helper executable'
 grep -F 'feed_url="${WATTLINE_FEED_URL:-https://keithah.github.io/openwrt-packages}"' "$installer" >/dev/null || fail 'installer does not default to dedicated feed'
+grep -F '/usr/libexec/wattline-feed-migrate aarch64_cortex-a53' "$postinst" >/dev/null || fail 'postinst does not pass the package architecture to migration'
+! grep -F '/usr/libexec/keithah-feed-migrate' "$postinst" >/dev/null || fail 'postinst still invokes the legacy migration helper'
 awk '
 	/IPKG_INSTROOT.*exit 0/ { guard = NR }
-	/\/usr\/libexec\/keithah-feed-migrate/ { migrate = NR }
+	/\/usr\/libexec\/wattline-feed-migrate aarch64_cortex-a53/ { migrate = NR }
 	/\/etc\/uci-defaults\/99-wattline/ { initialize = NR }
 	END { exit !(guard && migrate > guard && initialize > migrate) }
 ' "$postinst" || fail 'postinst migration contract is missing or out of order'
@@ -114,7 +118,7 @@ exit 0
 EOF
 chmod +x "$tmp/postinst-bin/migrate" "$tmp/postinst-bin/uci-defaults"
 sed \
-	-e "s|/usr/libexec/keithah-feed-migrate|$tmp/postinst-bin/migrate|" \
+	-e "s|/usr/libexec/wattline-feed-migrate aarch64_cortex-a53|$tmp/postinst-bin/migrate|" \
 	-e "s|/etc/uci-defaults/99-wattline|$tmp/postinst-bin/uci-defaults|" \
 	"$postinst" >"$tmp/postinst"
 : >"$tmp/postinst.log"

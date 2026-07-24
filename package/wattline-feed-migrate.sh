@@ -15,14 +15,8 @@ fail() {
 	exit 1
 }
 
-command -v opkg >/dev/null 2>&1 || fail 'opkg is required'
-if ! architectures=$(opkg print-architecture); then
-	fail 'could not determine package architectures'
-fi
-if ! printf '%s\n' "$architectures" |
-	awk '$2 == "aarch64_cortex-a53" { found = 1 } END { exit !found }'; then
-	fail 'this feed supports aarch64_cortex-a53 only'
-fi
+[ "$#" -eq 1 ] || fail 'expected package architecture argument'
+[ "$1" = aarch64_cortex-a53 ] || fail 'this feed supports aarch64_cortex-a53 only'
 
 # Unsupported architectures have exited before any managed path is changed.
 [ -d "$target_root/etc/opkg" ] || fail "missing $target_root/etc/opkg"

@@ -3,7 +3,7 @@ set -e
 
 [ -n "${IPKG_INSTROOT:-}" ] && exit 0
 
-/usr/libexec/keithah-feed-migrate
+/usr/libexec/wattline-feed-migrate aarch64_cortex-a53
 mkdir -p /etc/wattline/tls
 chmod 0700 /etc/wattline /etc/wattline/tls
 /etc/uci-defaults/99-wattline

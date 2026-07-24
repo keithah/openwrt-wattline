@@ -67,8 +67,8 @@ ipk-wattlined: bin
 	rm -rf $(OUT)/stage
 	mkdir -p $(OUT)/stage/usr/bin $(OUT)/stage/usr/libexec
 	cp $(BIN) $(OUT)/stage/usr/bin/wattlined
-	cp keithah-feed-migrate.sh $(OUT)/stage/usr/libexec/keithah-feed-migrate
-	chmod 0755 $(OUT)/stage/usr/libexec/keithah-feed-migrate
+	cp wattline-feed-migrate.sh $(OUT)/stage/usr/libexec/wattline-feed-migrate
+	chmod 0755 $(OUT)/stage/usr/libexec/wattline-feed-migrate
 	cp -r wattlined/etc $(OUT)/stage/
 	cp -r wattlined/usr $(OUT)/stage/
 	cp -r wattlined/CONTROL $(OUT)/stage/
