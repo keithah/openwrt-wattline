@@ -12,7 +12,7 @@ Wattline 0.1.4 and Starwatch 0.1.3 both ship `/usr/libexec/keithah-feed-migrate`
 
 The shared helper also runs `opkg print-architecture`. When a package `postinst` invokes it, the outer `opkg install`, `opkg upgrade`, or `opkg configure` transaction already owns `/var/lock/opkg.lock`. The nested `opkg` command fails, leaving packages unpacked or partially configured.
 
-The reported GL-XE3000 installation was a new Wattline installation, but it encountered both defects because Starwatch was already installed and was processed during the same package transaction.
+The reported GL-XE3000 installation was a new Wattline installation, but it encountered both defects because Starwatch was already installed and was processed during the same package transaction. A subsequent Ookla Speedtest installation reproduced the recursive-lock failure: `opkg` retries every package left in an unconfigured state during its configure pass, even when the requested package is unrelated. One broken Keith package can therefore make every later package operation report an error until that package is repaired.
 
 ## Considered Approaches
 
@@ -55,19 +55,21 @@ On upgrade, removal of the old product version removes its legacy `/usr/libexec/
 
 ## Installer and Recovery Flow
 
-The one-line installers remain the primary bootstrap and repair interface. Before invoking `opkg install`, an installer:
+The one-line installers remain the primary bootstrap and repair interface. The shared feed publisher owns a tested installer preamble that is embedded into every published Keith-feed installer, including products that do not otherwise depend on Wattline or Starwatch. Product repositories may retain their product-specific package selection and verification logic, but must not maintain divergent copies of the recovery algorithm.
+
+Before invoking the requested product's `opkg install`, every published installer:
 
 1. determines and validates router architecture while no package transaction is active;
 2. installs the shared key and feed configuration atomically;
 3. runs `opkg update`;
 4. detects already-installed Keith daemon packages;
-5. upgrades only those already-installed daemons to feed versions containing the safe migration scripts;
+5. upgrades only those already-installed Keith daemons to feed versions containing the safe migration scripts;
 6. installs or upgrades the requested product packages;
 7. lets the product's existing service verification and diagnostics run.
 
-Step 5 does not install Starwatch merely because Wattline is requested, or Wattline merely because Starwatch is requested. It only repairs a Keith product already present on the router. This is needed for routers left with an old daemon in an unpacked or failed-configuration state: replacing that daemon first removes its recursive `postinst` and legacy shared-file ownership.
+Step 5 does not install Starwatch merely because Wattline, Ookla Speedtest, or another product is requested, and it does not install Wattline merely because another product is requested. It only repairs a Keith daemon already present on the router. This is needed for routers left with an old daemon in an unpacked or failed-configuration state: replacing that daemon first removes its recursive `postinst` and legacy shared-file ownership before the ordinary `opkg` configure pass can retry it.
 
-The recovery operations are idempotent. Rerunning `install-wattline.sh` after the reported failure is therefore supported and should finish the Wattline installation while repairing the already-present Starwatch package. A routine `opkg update && opkg upgrade` also works without requiring an installer rerun once the fixed releases are in the feed.
+The recovery operations are idempotent. After coordinated fixed releases are published, rerunning any current Keith-feed installer repairs the already-present Starwatch package before installing its requested product. Rerunning `install-wattline.sh` also finishes the interrupted Wattline installation. A routine `opkg update && opkg upgrade` works without requiring an installer rerun once the fixed releases are in the feed.
 
 ## Failure Handling
 
@@ -90,7 +92,7 @@ The implementation spans:
 
 - `openwrt-wattline`: product-specific helper, lifecycle wiring, installer recovery, and tests;
 - `openwrt-starwatch`: the corresponding helper, lifecycle wiring, installer recovery, version bump, and tests;
-- `openwrt-packages`: a publisher validation that rejects duplicate non-directory payload paths across published packages.
+- `openwrt-packages`: the shared installer recovery preamble, generated/published product installers, and a publisher validation that rejects duplicate non-directory payload paths across published packages.
 
 The publisher validation is the durable guard against another cross-product ownership collision. Intentional shared directories are ignored; regular files and symbolic links must have exactly one owning package unless an explicit, reviewed exception is added.
 
@@ -108,13 +110,13 @@ Both product repositories will test:
 - installer failure propagation and phase-specific diagnostics;
 - generated IPK format and metadata requirements, including gzip-compressed ustar members.
 
-The shared publisher will unpack fixture IPKs and fail when two packages own the same non-directory path. A fixture covering the original `/usr/libexec/keithah-feed-migrate` collision will prove the guard detects this regression.
+The shared publisher will test the common recovery preamble against configured, failed-configuration, and absent peer products. Every generated installer will be checked for the current preamble version. The publisher will also unpack fixture IPKs and fail when two packages own the same non-directory path. A fixture covering the original `/usr/libexec/keithah-feed-migrate` collision will prove the guard detects this regression.
 
 Before release, build both product package sets, assemble the shared feed, and run their complete shell and application test suites. On a GL.iNet router, verify a fresh Wattline install with Starwatch already present, an ordinary `opkg upgrade`, an interrupted-install recovery by rerunning the installer, daemon startup, and preservation of both applications.
 
 ## Release and Router Recovery
 
-Fixed Wattline and Starwatch releases must be published to the shared feed together before advising users to recover. The shared feed index must expose the fixed versions before either new installer is published.
+The fixed Starwatch release must be present in the shared feed before any installer containing the recovery preamble is published. The fixed Wattline release and regenerated installers should be deployed in the same coordinated publisher run. This ordering prevents an installer from attempting recovery while the feed still offers only the broken Starwatch package.
 
 For the currently affected GL-XE3000, the supported recovery is to rerun the published Wattline installer after the coordinated release. The installer upgrades the already-installed Starwatch daemon first, then completes Wattline. Manual deletion of package database records, forced overwrites, and rebooting during package configuration are explicitly avoided.
 
@@ -125,4 +127,5 @@ For the currently affected GL-XE3000, the supported recovery is to rerun the pub
 - `opkg update && opkg upgrade` performs feed migration and completes successfully.
 - A fresh Wattline install succeeds when Starwatch is already installed.
 - Rerunning the Wattline installer repairs the observed partial installation.
+- Running an unrelated Keith-feed installer repairs a previously failed Keith daemon before installing its own product.
 - The publisher rejects future cross-package file collisions before deployment.
