@@ -2,7 +2,7 @@
 # Install the Wattline packages from the project-maintained opkg feed.
 set -eu
 
-feed_url="${WATTLINE_FEED_URL:-https://keithah.github.io/openwrt-starwatch}"
+feed_url="${WATTLINE_FEED_URL:-https://keithah.github.io/openwrt-packages}"
 package_dir="${WATTLINE_PACKAGE_DIR:-}"
 target_root="${WATTLINE_ROOT:-/}"
 feeds_file="$target_root/etc/opkg/customfeeds.conf"
