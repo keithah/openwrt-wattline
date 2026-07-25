@@ -29,8 +29,12 @@ retire_rtl8761b() {
 	prefix="${target_root%/}"
 	driverctl="$prefix/usr/lib/wattline/rtl8761b/driverctl"
 	boot_init="$prefix/etc/init.d/wattline-rtl8761b"
+	stock_complete="$prefix/etc/wattline/rtl8761b-stock/complete"
 
-	if [ -x "$driverctl" ] && ! ROOT_PREFIX="$prefix" "$driverctl" restore; then
+	# File-only installs never ran activate, so there is no stock backup and
+	# restore would fail even though the modules on disk are still stock.
+	# Only block removal when a backup proves the packaged modules were swapped.
+	if [ -x "$driverctl" ] && [ -f "$stock_complete" ] && ! ROOT_PREFIX="$prefix" "$driverctl" restore; then
 		# Without a successful restore the packaged modules are still the ones
 		# on disk, so keep driverctl available rather than deleting the only
 		# way back. Stop the boot-time force-load either way.
