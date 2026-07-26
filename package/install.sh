@@ -16,6 +16,45 @@ fail() {
 	exit 1
 }
 
+warn() {
+	printf '%s\n' "wattline installer: $*" >&2
+}
+
+# 0.1.0 shipped an optional wattline-rtl8761b package that overwrote the stock
+# btusb/btrtl/btintel modules and /etc/modules.d/bluetooth, keeping the
+# originals only in /etc/wattline/rtl8761b-stock. That package is gone from the
+# feed and its prerm was inert, so its own driverctl is the only thing that can
+# undo the swap. Retire it here, while it is still on the router.
+retire_rtl8761b() {
+	prefix="${target_root%/}"
+	driverctl="$prefix/usr/lib/wattline/rtl8761b/driverctl"
+	boot_init="$prefix/etc/init.d/wattline-rtl8761b"
+
+	if [ -x "$driverctl" ] && ! ROOT_PREFIX="$prefix" "$driverctl" restore; then
+		# Without a successful restore the packaged modules are still the ones
+		# on disk, so keep driverctl available rather than deleting the only
+		# way back. Stop the boot-time force-load either way.
+		[ -x "$boot_init" ] && ROOT_PREFIX="$prefix" "$driverctl" disable-boot || true
+		[ -x "$boot_init" ] && "$boot_init" stop >/dev/null 2>&1 || true
+		warn 'could not restore the stock Bluetooth modules; wattline-rtl8761b was left installed with boot activation disabled'
+		warn 'recover manually: /usr/lib/wattline/rtl8761b/driverctl restore && opkg remove wattline-rtl8761b'
+		return 0
+	fi
+
+	[ -x "$driverctl" ] && [ -x "$boot_init" ] && ROOT_PREFIX="$prefix" "$driverctl" disable-boot || true
+	[ -x "$boot_init" ] && "$boot_init" stop >/dev/null 2>&1 || true
+
+	if opkg list-installed 2>/dev/null | grep -q '^wattline-rtl8761b '; then
+		opkg remove wattline-rtl8761b || fail 'could not remove wattline-rtl8761b'
+	fi
+
+	rm -f "$prefix/etc/init.d/wattline-rtl8761b" \
+		"$prefix/etc/hotplug.d/usb/20-wattline-rtl8761b" \
+		"$prefix/etc/wattline/rtl8761b.health" \
+		"$prefix/etc/wattline/rtl8761b.hotplug-enabled" \
+		"$prefix/etc/wattline/rtl8761b.rollback"
+}
+
 [ "$(id -u)" = 0 ] || fail 'must be run as root'
 command -v opkg >/dev/null 2>&1 || fail 'opkg is required'
 command -v wget >/dev/null 2>&1 || fail 'wget is required'
@@ -67,6 +106,8 @@ fi
 mv "$tmp_file" "$feeds_file"
 trap - 0 HUP INT TERM
 
+retire_rtl8761b
+
 if [ -n "$package_dir" ]; then
 	# Development/release validation mode. Globs are resolved on the router and
 	# must identify exactly one build of each required package.
@@ -82,30 +123,5 @@ fi
 /etc/init.d/wattlined enable
 /etc/init.d/wattlined start
 /etc/init.d/wattlined health || fail 'wattlined failed its startup health check'
-
-# The RTL8761B package is optional. Install it only when a supported USB
-# adapter is physically present; never stage kernel modules on unrelated
-# routers.
-rtl_pkg='wattline-rtl8761b'
-rtl_detected=no
-for dev in "$target_root"/sys/bus/usb/devices/*; do
-	[ -r "$dev/idVendor" ] && [ -r "$dev/idProduct" ] || continue
-	case "$(cat "$dev/idVendor"):$(cat "$dev/idProduct")" in
-		0bda:8771|2357:0604) rtl_detected=yes; break ;;
-	esac
-done
-if [ "$rtl_detected" = yes ]; then
-	if [ -n "$package_dir" ]; then
-		opkg install "$package_dir"/wattline-rtl8761b_*.ipk
-	else
-		opkg install "$rtl_pkg"
-	fi
-	driverctl=/usr/lib/wattline/rtl8761b/driverctl
-	"$driverctl" activate --require-device || fail 'RTL8761B activation failed; stock driver was restored'
-	"$driverctl" enable-boot || fail 'RTL8761B passed activation but boot enablement failed'
-	printf '%s\n' 'Detected RTL8761B adapter; driver installed, verified, and enabled for boot.'
-else
-	printf '%s\n' 'No RTL8761B adapter detected; optional driver package not installed.'
-fi
 
 printf 'Installed Wattline with %s. Dashboard: %s\n' "$ui_package" "$dashboard_url"

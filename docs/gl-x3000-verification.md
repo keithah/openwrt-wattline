@@ -11,39 +11,26 @@ to PASS or FAIL.
 
 ## Install, reboot, and credentials
 
-Run the hosted installer first. It installs the optional RTL package only when
-USB sysfs reports a supported ID. The driver package is inert when installed.
-Reboot and check router health and dongle presence, then explicitly activate with
-`driverctl activate --require-device`; repeat the health check and reboot-test
-before running `driverctl enable-boot`. Boot enablement requires
-`/etc/wattline/rtl8761b.health` and no `rtl8761b.rollback` marker. Use
-`driverctl disable-boot` to disable only the init hook (it does not alter loaded
-modules). Use `driverctl restore` to return to stock files; investigate any
-remaining rollback marker before retrying activation.
+Run the hosted installer first. Wattline supports CSR8510-class adapters only,
+which the stock in-kernel `btusb.ko` from `kmod-bluetooth` drives; no
+out-of-tree driver package is installed. Reboot and check router health and
+dongle presence before continuing.
 
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Run the installer, inspect
-  the feed/IPK metadata, then install the base daemon/UI packages. The installer inspects USB sysfs and installs
-  `wattline-rtl8761b` only for `2357:0604` or `0bda:8771`. Expected: opkg accepts
-  the gzip ustar archives and reports matching package versions/architectures.
-- [ ] **NOT RUN — requires GL-X3000/real BLE** — Stage the optional driver:
-  install the package inert, reboot, and verify system health and the supported
-  dongle. Run `driverctl activate --require-device`, repeat the health check,
-  and reboot-test. Only then run `driverctl enable-boot` (it requires the
-  `rtl8761b.health` marker and no `rtl8761b.rollback` marker). Expected:
-  `driverctl status` is `packaged`, vermagic is exact, firmware uploads, and
-  `hci0` is UP without memory errors.
-- [ ] **NOT RUN — requires GL-X3000/real BLE** — Remove and reinstall
-  `wattline-rtl8761b`. Expected: removal restores the recorded stock files and
-  autoload list, reinstall preserves the first backup and reactivates cleanly.
+  the feed/IPK metadata, then install the daemon/UI packages. Expected: opkg
+  accepts the gzip ustar archives and reports matching package versions and
+  architectures.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — With a CSR8510 adapter
+  attached, confirm the stock driver binds it. Expected: `btusb` is loaded from
+  the router's own `kmod-bluetooth`, and `hci0` is UP without memory errors.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Run
   `stat -c '%a %n' /etc/wattline /etc/wattline/tls /etc/wattline/tokens.json /etc/wattline/tls/server.key`
   and `uci -q get wattline.main.token`. Expected: directories are `700`, secret
   files are `600`, and a nonempty bootstrap token exists without appearing in
   daemon logs.
-- [ ] **NOT RUN — requires GL-X3000/real BLE** — Reboot with the RTL8761B
-  package installed, then inspect init links, module hashes/order, firmware log,
-  `hci0`, and wattlined. Expected: the driver service runs at S15 before
-  wattlined at S95, the packaged hashes persist, and BLE scanning still works.
+- [ ] **NOT RUN — requires GL-X3000/real BLE** — Reboot with the CSR8510
+  adapter attached, then inspect init links, `hci0`, and wattlined. Expected:
+  the adapter comes up from the stock driver and BLE scanning still works.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Run
   `/etc/init.d/wattlined enable; reboot`, reconnect, then inspect
   `/etc/init.d/wattlined status` and `logread -e wattline`. Expected: the init script starts

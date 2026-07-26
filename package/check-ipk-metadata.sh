@@ -40,8 +40,11 @@ for ipk in "$@"; do
 		fi
 	done
 
+	# rtl8761b-stock is a subdirectory of /etc/wattline on routers that ran the
+	# retired driver package. wattlined ships ./etc/wattline/, so a stray copy
+	# of a real router's directory would otherwise publish its kernel modules.
 	if "$TAR" -tzf "$tmp/data.tar.gz" | grep -E '(^|/)(server\.key|tokens\.json|rtl8761b-stock)(/|$)' >/dev/null; then
-		echo "$ipk: private key, token store, or driver backup must not be shipped" >&2
+		echo "$ipk: private key, token store, or stock driver backup must not be shipped" >&2
 		failed=1
 	fi
 
@@ -83,44 +86,6 @@ for ipk in "$@"; do
 				echo "$ipk: private key or token store must not be shipped" >&2
 				failed=1
 			fi
-			;;
-		wattline-rtl8761b_*.ipk)
-			control_listing="$tmp/control.tar.gz.list"
-			data_listing="$tmp/data.tar.gz.list"
-			for path in ./preinst ./postinst ./prerm; do
-				if ! awk -v path="$path" '$1 == "-rwxr-xr-x" && $6 == path { found = 1 } END { exit !found }' "$control_listing"; then
-					echo "$ipk: CONTROL/${path#./} is missing or not mode 0755" >&2
-					failed=1
-				fi
-			done
-			for path in \
-				./usr/lib/wattline/rtl8761b/driverctl \
-				./etc/init.d/wattline-rtl8761b \
-				./etc/hotplug.d/usb/20-wattline-rtl8761b; do
-				if ! awk -v path="$path" '$1 == "-rwxr-xr-x" && $6 == path { found = 1 } END { exit !found }' "$data_listing"; then
-					echo "$ipk: $path is missing or not mode 0755" >&2
-					failed=1
-				fi
-			done
-			for path in \
-				./usr/lib/wattline/rtl8761b/modules/5.4.211/btintel.ko \
-				./usr/lib/wattline/rtl8761b/modules/5.4.211/btrtl.ko \
-				./usr/lib/wattline/rtl8761b/modules/5.4.211/btusb.ko \
-				./lib/firmware/rtl_bt/rtl8761bu_fw.bin \
-				./lib/firmware/rtl_bt/rtl8761bu_config.bin; do
-				if ! awk -v path="$path" '$1 == "-rw-r--r--" && $6 == path { found = 1 } END { exit !found }' "$data_listing"; then
-					echo "$ipk: $path is missing or not mode 0644" >&2
-					failed=1
-				fi
-			done
-			for name in SHA256SUMS PROVENANCE.md COPYING WHENCE LICENCE.rtlwifi_firmware.txt \
-				linux-5.4.211-rtl8761b-gl-abi.patch router-4.8.3.config; do
-				path="./usr/share/wattline-rtl8761b/$name"
-				if ! awk -v path="$path" '$1 == "-rw-r--r--" && $6 == path { found = 1 } END { exit !found }' "$data_listing"; then
-					echo "$ipk: required provenance $path is missing or not mode 0644" >&2
-					failed=1
-				fi
-			done
 			;;
 	esac
 done

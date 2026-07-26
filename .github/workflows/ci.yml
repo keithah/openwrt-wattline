@@ -29,9 +29,7 @@ jobs:
             package/tests/luci_contract_test.sh \
             package/tests/gl_contract_test.sh \
             package/tests/gl_nginx_proxy_test.sh \
-            package/tests/rtl8761b-artifacts_test.sh \
-            package/tests/rtl8761b-driver_test.sh \
-            package/tests/rtl8761b-lifecycle_test.sh; do
+            package/tests/bluetooth-security-recovery_test.sh; do
             sh "$test"
           done
           node package/tests/luci_behavior_test.js
@@ -39,4 +37,9 @@ jobs:
       - name: Build packages (ipks + metadata check)
         run: make -C package feed
       - name: Release inventory
-        run: sh package/tests/release-inventory_test.sh package/out 0.1.2
+        run: |
+          set -eu
+          # The build above uses the Makefile default, so read it rather than
+          # pinning a version here that silently drifts on every bump.
+          version=$(sed -n 's/^VERSION := //p' package/Makefile)
+          sh package/tests/release-inventory_test.sh package/out "$version"

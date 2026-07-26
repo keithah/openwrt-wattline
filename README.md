@@ -8,9 +8,9 @@ dependency.
 
 The project targets the GL.iNet Spitz AX (GL-X3000) and other
 `aarch64_cortex-a53` OpenWrt routers. Most routers require a USB Bluetooth
-adapter. CSR8510 adapters work with the stock driver; RTL8761B adapters need the
-optional `wattline-rtl8761b` package described in
-[`dongle-rtl8761b/`](dongle-rtl8761b/).
+adapter, and only CSR8510-class adapters (for example the TP-Link UB400) are
+supported. They work with the stock in-kernel driver, so no out-of-tree driver
+package is needed.
 
 The authoritative client contract is [`docs/api.md`](docs/api.md). The separate
 [`docs/API.md`](docs/API.md) is the read-only Link-Power BLE protocol reference;
@@ -47,15 +47,12 @@ make -C package clean all
 package/check-ipk-metadata.sh package/out/*.ipk
 ```
 
-The default version is `0.1.2`. Override it consistently with, for example,
+The default version is `0.1.5`. Override it consistently with, for example,
 `make -C package VERSION=1.0.0 all`. A build produces:
 
 - `wattlined_VERSION_aarch64_cortex-a53.ipk`: daemon, procd service,
   first-boot initialization, firewall reconciliation, and interface hotplug;
 - `wattline-bt_VERSION_all.ipk`: BlueZ and kernel Bluetooth dependencies;
-- `wattline-rtl8761b_VERSION_aarch64_cortex-a53.ipk`: optional, pinned
-  GL-X3000 Linux 5.4.211 driver and firmware for USB IDs `2357:0604` and
-  `0bda:8771`;
 - `luci-app-wattline_VERSION_all.ipk`: LuCI panel; and
 - `gl-app-wattline_VERSION_all.ipk`: native GL.iNet panel.
 
@@ -67,7 +64,7 @@ packaging for a different OpenWrt target.
 ### Releasing
 
 GitHub Actions tests and builds every push and pull request. Pushing a `v*` tag
-builds the five packages and feed index, publishes a GitHub release, and updates
+builds the four packages and feed index, publishes a GitHub release, and updates
 the `gh-pages` feed. The tag supplies the package version after stripping `v`:
 
 ```sh
@@ -91,33 +88,33 @@ wget -qO- https://keithah.github.io/openwrt-starwatch/install-wattline.sh | sh
 
 The installer verifies `aarch64_cortex-a53`, preserves existing opkg feeds,
 selects the GL.iNet or LuCI panel, and installs the daemon and Bluetooth
-dependencies. It scans `/sys/bus/usb/devices` for RTL8761B IDs `2357:0604` or
-`0bda:8771`; only when one is present does it install
-`wattline-rtl8761b`. No RTL package is staged on routers without that adapter.
+dependencies. It ships no out-of-tree Bluetooth driver: a CSR8510 adapter is
+driven by the stock `btusb.ko` from `kmod-bluetooth`.
 The installer migrates legacy `starwatch` and `wattline` feed entries to one
 `keithah` entry without changing unrelated feeds.
 
-RTL installation is file-only and inert. Runtime activation remains explicit:
+Routers that installed the retired `wattline-rtl8761b` package are returned to
+the stock driver automatically: the installer runs its `driverctl restore` and
+`disable-boot`, removes the package, and clears its boot and hotplug hooks. If
+the restore fails (for example after a kernel-changing firmware upgrade), the
+package is left in place with boot activation disabled so `driverctl` is still
+available; recover with:
 
 ```sh
-/usr/lib/wattline/rtl8761b/driverctl activate --require-device
-# after health and reboot verification only:
-/usr/lib/wattline/rtl8761b/driverctl enable-boot
+/usr/lib/wattline/rtl8761b/driverctl restore && opkg remove wattline-rtl8761b
 ```
 
-The driver controller validates the exact kernel, USB identity, module hashes,
-and firmware, creates a rollback marker before mutation, and restores stock
-modules on failure. Use `driverctl restore` for recovery; it preserves the
-stock backup. `disable-boot` removes only the opt-in boot marker.
+Never `opkg remove wattline-rtl8761b` before restoring — its `prerm` is inert,
+so removal without a restore deletes the only tool that can put the stock
+`btusb.ko`, `btrtl.ko`, and `btintel.ko` back.
 
 The Wattline init script uses the normal OpenWrt service interface and a direct
 PID-file fallback for GL-X3000 images whose `procd/ubus` supervisor is
 unresponsive. This keeps start/stop/health behavior working without changing
 router firmware.
 
-For development or a pinned release, download the five IPKs from GitHub and
-install only the base packages first. Use the same USB-ID check before installing
-the optional RTL package.
+For development or a pinned release, download the four IPKs from GitHub and
+install them directly.
 
 ### Updating without a manual reinstall (opkg feed)
 
@@ -349,6 +346,6 @@ On a supported GL.iNet/OpenWrt router, run the project-maintained installer:
 wget -qO- https://keithah.github.io/openwrt-starwatch/install-wattline.sh | sh
 ```
 
-The installer verifies the architecture, preserves existing opkg feeds, selects the GL or LuCI UI, and installs the optional RTL8761B package only when a supported USB adapter is detected. Driver activation is always a separate explicit transaction.
+The installer verifies the architecture, preserves existing opkg feeds, selects the GL or LuCI UI, and installs the daemon and Bluetooth dependencies. Bring a CSR8510-class USB adapter; it needs no additional driver.
 
 Wattline is licensed under the GNU Affero General Public License, version 3 (AGPL-3.0-or-later); see [LICENSE](LICENSE).

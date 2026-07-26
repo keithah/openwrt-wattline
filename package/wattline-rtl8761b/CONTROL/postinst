@@ -1,5 +1,0 @@
-#!/bin/sh
-set -eu
-
-# Installation is intentionally file-only. Runtime activation is explicit.
-exit 0
