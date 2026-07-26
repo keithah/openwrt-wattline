@@ -29,20 +29,36 @@ retire_rtl8761b() {
 	prefix="${target_root%/}"
 	driverctl="$prefix/usr/lib/wattline/rtl8761b/driverctl"
 	boot_init="$prefix/etc/init.d/wattline-rtl8761b"
+	# driverctl swapped the stock modules only after committing a complete
+	# backup, so this marker — not the exit status of restore — is what says
+	# whether the router is still running the out-of-tree drivers. A package
+	# that was installed but never activated has no backup and nothing to undo,
+	# and restore fails on it ("no complete stock backup"); that must not be
+	# mistaken for a router stranded on the packaged modules.
+	stock_backup="$prefix/etc/wattline/rtl8761b-stock/complete"
 
-	if [ -x "$driverctl" ] && ! ROOT_PREFIX="$prefix" "$driverctl" restore; then
-		# Without a successful restore the packaged modules are still the ones
-		# on disk, so keep driverctl available rather than deleting the only
-		# way back. Stop the boot-time force-load either way.
-		[ -x "$boot_init" ] && ROOT_PREFIX="$prefix" "$driverctl" disable-boot || true
-		[ -x "$boot_init" ] && "$boot_init" stop >/dev/null 2>&1 || true
-		warn 'could not restore the stock Bluetooth modules; wattline-rtl8761b was left installed with boot activation disabled'
-		warn 'recover manually: /usr/lib/wattline/rtl8761b/driverctl restore && opkg remove wattline-rtl8761b'
-		return 0
+	restored=yes
+	if [ -x "$driverctl" ]; then
+		ROOT_PREFIX="$prefix" "$driverctl" restore || restored=no
+	elif [ -f "$stock_backup" ]; then
+		restored=no
 	fi
 
+	# Stop the boot-time force-load however the restore went.
 	[ -x "$driverctl" ] && [ -x "$boot_init" ] && ROOT_PREFIX="$prefix" "$driverctl" disable-boot || true
 	[ -x "$boot_init" ] && "$boot_init" stop >/dev/null 2>&1 || true
+
+	if [ "$restored" = no ] && [ -f "$stock_backup" ]; then
+		# The packaged modules are still the ones on disk. Keep whatever is
+		# left of the package rather than deleting the only way back.
+		warn 'the stock Bluetooth modules are still replaced by wattline-rtl8761b; boot activation has been disabled but the package was left installed'
+		if [ -x "$driverctl" ]; then
+			warn 'recover manually: /usr/lib/wattline/rtl8761b/driverctl restore && opkg remove wattline-rtl8761b'
+		else
+			warn "driverctl is missing; restore the originals from ${stock_backup%/complete} by hand, then: opkg remove wattline-rtl8761b"
+		fi
+		return 0
+	fi
 
 	if opkg list-installed 2>/dev/null | grep -q '^wattline-rtl8761b '; then
 		opkg remove wattline-rtl8761b || fail 'could not remove wattline-rtl8761b'
