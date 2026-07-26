@@ -20,23 +20,30 @@ expected="$(printf '%s\n' "$expected" | sort)"
 	exit 1
 }
 
-[ -s "$OUT/Packages" ] || {
-	echo 'missing Packages feed index' >&2
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' 0 HUP INT TERM
+wattlined_ipk="$OUT/wattlined_${VERSION}_aarch64_cortex-a53.ipk"
+tar -xzf "$wattlined_ipk" -C "$tmp" ./data.tar.gz
+mkdir "$tmp/data"
+tar -xzf "$tmp/data.tar.gz" -C "$tmp/data"
+
+cmp -s "$tmp/data/usr/libexec/wattline-feed-migrate" "$(dirname "$0")/../wattline-feed-migrate.sh" || {
+	echo 'packaged Wattline feed migration helper differs from source' >&2
 	exit 1
 }
-[ -s "$OUT/Packages.gz" ] || {
-	echo 'missing Packages.gz feed index' >&2
+helper_mode="$(LC_ALL=C tar -tzvf "$tmp/data.tar.gz" |
+	awk '$NF == "./usr/libexec/wattline-feed-migrate" { print $1; found = 1 } END { exit !found }')"
+[ "$helper_mode" = -rwxr-xr-x ] || {
+	echo 'packaged Wattline feed migration helper is not mode 0755' >&2
 	exit 1
 }
-[ "$(grep -c '^Package:' "$OUT/Packages")" -eq 4 ] || {
-	echo 'feed index does not contain exactly four packages' >&2
+if tar -tzf "$tmp/data.tar.gz" | grep -Fx './usr/libexec/keithah-feed-migrate' >/dev/null; then
+	echo 'wattlined package still owns the legacy feed migration helper' >&2
 	exit 1
-}
-for package in wattlined wattline-bt luci-app-wattline gl-app-wattline; do
-	[ "$(grep -c "^Package: $package$" "$OUT/Packages")" -eq 1 ] || {
-		echo "feed index is missing or duplicates $package" >&2
-		exit 1
-	}
-done
+fi
+
+if [ "${RELEASE_INVENTORY_SKIP_MODE_REGRESSION:-0}" != 1 ]; then
+	sh "$(dirname "$0")/release-inventory-mode_test.sh" "$OUT" "$VERSION"
+fi
 
 echo 'Release inventory tests passed'

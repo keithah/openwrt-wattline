@@ -63,7 +63,8 @@ done
 chmod +x "$TMP/bin/"*
 
 [ -x "$HELPER" ] || fail 'packaged helper is missing or not executable'
-grep -Fq 'VERSION := 0.1.5' "$ROOT/package/Makefile" || fail 'package version is not 0.1.5'
+# The package version is pinned once, in release-readiness_test.sh. Repeating
+# it here only produced drift while this test was outside the CI loop.
 grep -Fq '$(OUT)/stage/usr/lib/wattline/restart-bluetooth-security' "$ROOT/package/Makefile" ||
 	fail 'package does not mark the helper executable'
 

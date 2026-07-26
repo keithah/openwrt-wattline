@@ -47,7 +47,7 @@ make -C package clean all
 package/check-ipk-metadata.sh package/out/*.ipk
 ```
 
-The default version is `0.1.5`. Override it consistently with, for example,
+The default version is `0.1.6`. Override it consistently with, for example,
 `make -C package VERSION=1.0.0 all`. A build produces:
 
 - `wattlined_VERSION_aarch64_cortex-a53.ipk`: daemon, procd service,
@@ -56,7 +56,7 @@ The default version is `0.1.5`. Override it consistently with, for example,
 - `luci-app-wattline_VERSION_all.ipk`: LuCI panel; and
 - `gl-app-wattline_VERSION_all.ipk`: native GL.iNet panel.
 
-Prebuilt `.ipk`s and an opkg feed index are attached to each
+Prebuilt `.ipk`s are attached to each
 [GitHub release](https://github.com/keithah/openwrt-wattline/releases).
 `ARCH` in `package/Makefile` targets `aarch64_cortex-a53`; adjust it when
 packaging for a different OpenWrt target.
@@ -64,11 +64,12 @@ packaging for a different OpenWrt target.
 ### Releasing
 
 GitHub Actions tests and builds every push and pull request. Pushing a `v*` tag
-builds the four packages and feed index, publishes a GitHub release, and updates
-the `gh-pages` feed. The tag supplies the package version after stripping `v`:
+builds the four product packages and publishes a GitHub release. The dedicated
+`openwrt-packages` repository assembles and signs the shared feed. The tag
+supplies the package version after stripping `v`:
 
 ```sh
-git tag v0.1.2 && git push origin v0.1.2
+git tag v0.1.6 && git push origin v0.1.6
 ```
 
 ### `.ipk` format (verified on-target)
@@ -83,15 +84,16 @@ opkg version rejects pax headers and has crashed on ar-form packages.
 Use the product installer from Keith's shared, signed OpenWrt feed:
 
 ```sh
-wget -qO- https://keithah.github.io/openwrt-starwatch/install-wattline.sh | sh
+wget -qO- https://keithah.github.io/openwrt-packages/install-wattline.sh | sh
 ```
 
 The installer verifies `aarch64_cortex-a53`, preserves existing opkg feeds,
 selects the GL.iNet or LuCI panel, and installs the daemon and Bluetooth
 dependencies. It ships no out-of-tree Bluetooth driver: a CSR8510 adapter is
 driven by the stock `btusb.ko` from `kmod-bluetooth`.
-The installer migrates legacy `starwatch` and `wattline` feed entries to one
-`keithah` entry without changing unrelated feeds.
+Installing or upgrading `wattlined` automatically migrates legacy `starwatch`
+and `wattline` feed entries to one `keithah` entry without changing unrelated
+feeds. The installer performs the same migration.
 
 Routers that installed the retired `wattline-rtl8761b` package are returned to
 the stock driver automatically: the installer runs its `driverctl restore` and
@@ -127,7 +129,7 @@ router upgrades with `opkg upgrade` (or the GL **Plug-ins** page).
 # Build all ipks + the feed index. BUMP THE VERSION each release so opkg
 # detects an upgrade (the Version: field, filename, and index must all match —
 # the Makefile injects VERSION into all three).
-make -C package VERSION=0.1.2 feed
+make -C package VERSION=0.1.6 feed
 # → package/out/{*.ipk, Packages, Packages.gz}
 ```
 
@@ -343,7 +345,7 @@ verified merely because unit tests pass.
 On a supported GL.iNet/OpenWrt router, run the project-maintained installer:
 
 ```sh
-wget -qO- https://keithah.github.io/openwrt-starwatch/install-wattline.sh | sh
+wget -qO- https://keithah.github.io/openwrt-packages/install-wattline.sh | sh
 ```
 
 The installer verifies the architecture, preserves existing opkg feeds, selects the GL or LuCI UI, and installs the daemon and Bluetooth dependencies. Bring a CSR8510-class USB adapter; it needs no additional driver.
