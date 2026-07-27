@@ -21,7 +21,8 @@ sed -n '/^warn()/,/^}/p;/^# 0.1.0 shipped/,/^}$/p' "$INSTALLER" >"$TMP/retire.sh
 grep -q 'retire_rtl8761b()' "$TMP/retire.sh" || fail 'could not extract retire_rtl8761b from install.sh'
 
 # $1 = case name, $2 = "activated" to stage a complete stock backup,
-# $3 = "nodriverctl" to omit driverctl, $4 = "restorefails" to make it fail.
+# $3 = "nodriverctl" to omit driverctl or "noinit" to omit the init hook,
+# $4 = "restorefails" to make restore fail.
 setup_case() {
 	case_dir="$TMP/$1"
 	rm -rf "$case_dir"
@@ -43,11 +44,13 @@ EOF
 		chmod +x "$case_dir/root/usr/lib/wattline/rtl8761b/driverctl"
 	fi
 
-	cat >"$case_dir/root/etc/init.d/wattline-rtl8761b" <<EOF
+	if [ "${3:-}" != noinit ]; then
+		cat >"$case_dir/root/etc/init.d/wattline-rtl8761b" <<EOF
 #!/bin/sh
 printf 'init %s\n' "\$1" >>"$CALLS"
 EOF
-	chmod +x "$case_dir/root/etc/init.d/wattline-rtl8761b"
+		chmod +x "$case_dir/root/etc/init.d/wattline-rtl8761b"
+	fi
 	touch "$case_dir/root/etc/hotplug.d/usb/20-wattline-rtl8761b" \
 		"$case_dir/root/etc/wattline/rtl8761b.health" \
 		"$case_dir/root/etc/wattline/rtl8761b.hotplug-enabled"
@@ -114,13 +117,17 @@ assert_absent activated etc/wattline/rtl8761b.health
 assert_absent activated etc/wattline/rtl8761b.hotplug-enabled
 
 # A failed restore on an activated router keeps the package: driverctl is the
-# only way back to the stock modules.
+# only way back to the stock modules. Boot and hotplug activation must be
+# genuinely torn down, because the warning says so.
 setup_case restore_failed activated '' restorefails
 run_case restore_failed
 assert_called restore_failed 'driverctl restore'
 assert_called restore_failed 'driverctl disable-boot'
 assert_not_called restore_failed 'opkg remove wattline-rtl8761b'
 assert_present restore_failed usr/lib/wattline/rtl8761b/driverctl
+assert_present restore_failed etc/init.d/wattline-rtl8761b
+assert_absent restore_failed etc/wattline/rtl8761b.health
+assert_absent restore_failed etc/wattline/rtl8761b.hotplug-enabled
 grep -Fq 'still replaced' "$TMP/restore_failed/out" || fail 'restore_failed: missing warning'
 
 # Installed but never activated: there is no stock backup, so restore fails
@@ -137,7 +144,20 @@ setup_case driverctl_gone activated nodriverctl
 run_case driverctl_gone
 assert_not_called driverctl_gone 'opkg remove wattline-rtl8761b'
 assert_present driverctl_gone etc/init.d/wattline-rtl8761b
+# driverctl cannot do the teardown here, so the installer must do it itself.
+assert_called driverctl_gone 'init disable'
+assert_absent driverctl_gone etc/wattline/rtl8761b.health
+assert_absent driverctl_gone etc/wattline/rtl8761b.hotplug-enabled
 grep -Fq 'driverctl is missing' "$TMP/driverctl_gone/out" || fail 'driverctl_gone: missing warning'
+
+# driverctl present but the init hook already gone: disable-boot would die on
+# the missing hook, so the markers still have to be cleared directly.
+setup_case init_gone activated noinit restorefails
+run_case init_gone
+assert_not_called init_gone 'driverctl disable-boot'
+assert_absent init_gone etc/wattline/rtl8761b.health
+assert_absent init_gone etc/wattline/rtl8761b.hotplug-enabled
+assert_present init_gone usr/lib/wattline/rtl8761b/driverctl
 
 # driverctl absent and nothing was ever swapped: remove the leftovers.
 setup_case driverctl_gone_stock '' nodriverctl

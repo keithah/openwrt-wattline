@@ -44,9 +44,22 @@ retire_rtl8761b() {
 		restored=no
 	fi
 
-	# Stop the boot-time force-load however the restore went.
-	[ -x "$driverctl" ] && [ -x "$boot_init" ] && ROOT_PREFIX="$prefix" "$driverctl" disable-boot || true
-	[ -x "$boot_init" ] && "$boot_init" stop >/dev/null 2>&1 || true
+	# Tear down boot and hotplug activation however the restore went, because
+	# the warning below promises they are off. Do not rely on driverctl or the
+	# init hook being present: the init hook's start() is a no-op without the
+	# health marker and the USB hook exits early without its own marker, so
+	# clearing both markers stops the force-load even when the S15 link or the
+	# hook itself survives.
+	if [ -x "$boot_init" ]; then
+		if [ -x "$driverctl" ]; then
+			ROOT_PREFIX="$prefix" "$driverctl" disable-boot || true
+		else
+			"$boot_init" disable >/dev/null 2>&1 || true
+		fi
+		"$boot_init" stop >/dev/null 2>&1 || true
+	fi
+	rm -f "$prefix/etc/wattline/rtl8761b.health" \
+		"$prefix/etc/wattline/rtl8761b.hotplug-enabled"
 
 	if [ "$restored" = no ] && [ -f "$stock_backup" ]; then
 		# The packaged modules are still the ones on disk. Keep whatever is
