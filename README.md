@@ -8,9 +8,39 @@ dependency.
 
 The project targets the GL.iNet Spitz AX (GL-X3000) and other
 `aarch64_cortex-a53` OpenWrt routers. Most routers require a USB Bluetooth
-adapter, and only CSR8510-class adapters (for example the TP-Link UB400) are
-supported. They work with the stock in-kernel driver, so no out-of-tree driver
-package is needed.
+adapter, and the supported part is a **genuine CSR8510 A10** — the chip in the
+original TP-Link UB400. It is self-contained: no firmware blob and no
+out-of-tree driver, just the stock in-kernel `btusb.ko` from `kmod-bluetooth`.
+
+**Read this before buying an adapter.** Two traps, both verified on a
+GL-X3000 running kernel 5.4.211:
+
+- **Counterfeit CSR8510 dongles are common and do not work.** They enumerate as
+  `0a12:0001`, register `hci0`, and then fail to initialize — `hciconfig hci0 up`
+  reports `Can't init device hci0: No error information (56)` because the chip
+  does not implement `Set Event Filter`, mandatory since Bluetooth 1.1. Linux
+  detects this clone family and works around it only from 5.8 onward, so on
+  GL's 5.4 kernel they are inert. Check before trusting one:
+
+  ```sh
+  cat /sys/bus/usb/devices/*/bcdDevice     # 8891 → counterfeit
+  hciconfig -a hci0 | grep 'HCI Version'   # must be 6 (Bluetooth 4.0)
+  ```
+
+  A genuine CSR8510 A10 is a Bluetooth 4.0 part. Anything reporting a higher
+  HCI version on `0a12:0001` is lying about what it is.
+
+- **The TP-Link UB500 is not a UB400.** TP-Link switched from the CSR8510 to
+  the Realtek RTL8761BU, and ordering a "UB400" today may deliver a UB500.
+  RTL8761BU is **not supported** from 0.1.6 onward: GL's `kmod-bluetooth` ships
+  no `btrtl.ko`, their `btusb.ko` is built without `CONFIG_BT_HCIBTUSB_RTL`, and
+  no `rtl_bt` firmware exists in their feeds. Supporting it would mean replacing
+  the stock kernel modules, which is what the removed `wattline-rtl8761b`
+  package did and why it was withdrawn. That support belongs to a GL firmware
+  with a newer kernel, where the driver and firmware are in-tree.
+
+See [issue #5](https://github.com/keithah/openwrt-wattline/issues/5) for the
+full HCI traces and the adapter support matrix.
 
 The authoritative client contract is [`docs/api.md`](docs/api.md). The separate
 [`docs/API.md`](docs/API.md) is the read-only Link-Power BLE protocol reference;
@@ -89,8 +119,10 @@ wget -qO- https://keithah.github.io/openwrt-packages/install-wattline.sh | sh
 
 The installer verifies `aarch64_cortex-a53`, preserves existing opkg feeds,
 selects the GL.iNet or LuCI panel, and installs the daemon and Bluetooth
-dependencies. It ships no out-of-tree Bluetooth driver: a CSR8510 adapter is
-driven by the stock `btusb.ko` from `kmod-bluetooth`.
+dependencies. It ships no out-of-tree Bluetooth driver: a genuine CSR8510 A10
+adapter is driven by the stock `btusb.ko` from `kmod-bluetooth`. Counterfeit
+CSR dongles and the RTL8761BU-based TP-Link UB500 do not work on GL's 5.4
+kernel — see the adapter warning above.
 Installing or upgrading `wattlined` automatically migrates legacy `starwatch`
 and `wattline` feed entries to one `keithah` entry without changing unrelated
 feeds. The installer performs the same migration.
@@ -348,6 +380,6 @@ On a supported GL.iNet/OpenWrt router, run the project-maintained installer:
 wget -qO- https://keithah.github.io/openwrt-packages/install-wattline.sh | sh
 ```
 
-The installer verifies the architecture, preserves existing opkg feeds, selects the GL or LuCI UI, and installs the daemon and Bluetooth dependencies. Bring a CSR8510-class USB adapter; it needs no additional driver.
+The installer verifies the architecture, preserves existing opkg feeds, selects the GL or LuCI UI, and installs the daemon and Bluetooth dependencies. Bring a genuine CSR8510 A10 USB adapter; it needs no additional driver. Counterfeit CSR dongles (`bcdDevice 8891`) and the RTL8761BU-based UB500 are not supported — see the adapter warning at the top of this README.
 
 Wattline is licensed under the GNU Affero General Public License, version 3 (AGPL-3.0-or-later); see [LICENSE](LICENSE).

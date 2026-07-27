@@ -8,7 +8,7 @@ versions built from `package/Makefile`.
 - Dropped RTL8761B support. Removed the `wattline-rtl8761b` package, its
   bundled modules/firmware and provenance, the `driverctl` activation
   lifecycle, the `dongle-rtl8761b/` firmware fetcher, and the installer's USB
-  ID detection. CSR8510-class adapters are now the only supported dongles;
+  ID detection. Genuine CSR8510 A10 adapters are now the only supported dongles;
   they need no out-of-tree driver, so the release inventory is four packages.
 - The installer now retires an already-activated `wattline-rtl8761b` before it
   disappears from the feed: it runs `driverctl restore` and `disable-boot`,

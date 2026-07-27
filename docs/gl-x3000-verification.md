@@ -11,25 +11,57 @@ to PASS or FAIL.
 
 ## Install, reboot, and credentials
 
-Run the hosted installer first. Wattline supports CSR8510-class adapters only,
-which the stock in-kernel `btusb.ko` from `kmod-bluetooth` drives; no
+Run the hosted installer first. Wattline supports genuine CSR8510 A10 adapters
+only, which the stock in-kernel `btusb.ko` from `kmod-bluetooth` drives; no
 out-of-tree driver package is installed. Reboot and check router health and
 dongle presence before continuing.
+
+### Recorded adapter results (2026-07-27)
+
+Run on a GL-X3000, OpenWrt `21.02-SNAPSHOT`, kernel `5.4.211`, aarch64. These
+are environment findings, not checklist items — they constrain which adapter
+the remaining checks can be run with.
+
+- **PASS — stock Bluetooth stack installs and loads.** `kmod-bluetooth
+  5.4.211-1`, `bluez-daemon 5.64-1`, and `bluez-utils 5.64-1` install from GL's
+  own feed (`fw.gl-inet.com`). `btusb` loads, binds the adapter, registers
+  `hci0`, and `bluetoothd` runs. No out-of-tree driver involved.
+- **FAIL — counterfeit CSR8510 cannot initialize.** A dongle advertising
+  `CSR8510 A10` (`0a12:0001`, `bcdDevice 8891`, product string `BT DONGLE10`,
+  HCI/LMP version `0x0c`) registers `hci0` but fails `hciconfig hci0 up` with
+  `Can't init device hci0: No error information (56)`. `btmon` shows
+  initialization dying at `Set Event Filter (0x03|0x0005)` →
+  `Status: Unknown HCI Command (0x01)`, which the kernel maps to `EBADRQC` (56).
+  Linux only detects and works around this clone family from 5.8 onward, so
+  there is no fix on this kernel. `bluetoothd` reports "No default controller
+  available".
+- **BLOCKED — no RTL8761BU path.** GL's `kmod-bluetooth` ships no `btrtl.ko`;
+  their `btusb.ko` is built without `CONFIG_BT_HCIBTUSB_RTL` (no `btrtl_*`
+  symbols, no `rtl_bt/` firmware strings, `depends: btintel` only); there is no
+  `/lib/firmware/rtl_bt/` and no RTL Bluetooth package in any GL feed. The
+  TP-Link UB500 therefore cannot work on this firmware.
+
+Consequence: **the BLE checks below still cannot be run.** They need a genuine
+CSR8510 A10 (HCI version `0x06`). No CSR-based pairing has been demonstrated on
+this project — the working pairing recorded in `continue.md` used an RTL8761B
+with the since-removed driver package. See issue #5.
 
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Run the installer, inspect
   the feed/IPK metadata, then install the daemon/UI packages. Expected: opkg
   accepts the gzip ustar archives and reports matching package versions and
   architectures.
-- [ ] **NOT RUN — requires GL-X3000/real BLE** — With a CSR8510 adapter
+- [ ] **NOT RUN — requires a genuine CSR8510 A10** — With the adapter
   attached, confirm the stock driver binds it. Expected: `btusb` is loaded from
-  the router's own `kmod-bluetooth`, and `hci0` is UP without memory errors.
+  the router's own `kmod-bluetooth`, `hciconfig -a` reports HCI version `6`, and
+  `hci0` is UP RUNNING without memory errors. A `bcdDevice` of `8891` or any
+  other HCI version means the dongle is counterfeit and will fail here.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Run
   `stat -c '%a %n' /etc/wattline /etc/wattline/tls /etc/wattline/tokens.json /etc/wattline/tls/server.key`
   and `uci -q get wattline.main.token`. Expected: directories are `700`, secret
   files are `600`, and a nonempty bootstrap token exists without appearing in
   daemon logs.
-- [ ] **NOT RUN — requires GL-X3000/real BLE** — Reboot with the CSR8510
-  adapter attached, then inspect init links, `hci0`, and wattlined. Expected:
+- [ ] **NOT RUN — requires a genuine CSR8510 A10** — Reboot with the adapter
+  attached, then inspect init links, `hci0`, and wattlined. Expected:
   the adapter comes up from the stock driver and BLE scanning still works.
 - [ ] **NOT RUN — requires GL-X3000/real BLE** — Run
   `/etc/init.d/wattlined enable; reboot`, reconnect, then inspect
