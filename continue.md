@@ -47,5 +47,6 @@ correctly. A `bluetoothctl remove` does not always delete the flash copy —
   (`/api/v1/pairing/scan` then `/pairing/pair`).
 - The device accepts one BLE central at a time — forget it on any phone/laptop
   before router pairing (macOS re-bonds whenever the PWA connects).
-- Do not factory-reset the device or change the 5.4.211 kernel / RTL8761B
-  modules without explicit approval.
+- Do not factory-reset the device without explicit approval.
+- Only CSR8510-class adapters are supported; they use the stock in-kernel
+  `btusb.ko`. RTL8761B support was removed.

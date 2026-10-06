@@ -5,6 +5,19 @@ versions built from `package/Makefile`.
 
 ## Unreleased
 
+- Dropped RTL8761B support. Removed the `wattline-rtl8761b` package, its
+  bundled modules/firmware and provenance, the `driverctl` activation
+  lifecycle, the `dongle-rtl8761b/` firmware fetcher, and the installer's USB
+  ID detection. Genuine CSR8510 A10 adapters are now the only supported dongles;
+  they need no out-of-tree driver, so the release inventory is four packages.
+- The installer now retires an already-activated `wattline-rtl8761b` before it
+  disappears from the feed: it runs `driverctl restore` and `disable-boot`,
+  removes the package, and clears its init and hotplug hooks. A failed restore
+  leaves the package installed with boot activation off so `driverctl` remains
+  on the router; recover with `/usr/lib/wattline/rtl8761b/driverctl restore &&
+  opkg remove wattline-rtl8761b`. Removing the package without restoring first
+  strands the router on the out-of-tree modules — the old `prerm` was inert.
+
 ## 0.1.0
 
 - Added the optional `wattline-rtl8761b` package for GL-X3000 Linux 5.4.211.

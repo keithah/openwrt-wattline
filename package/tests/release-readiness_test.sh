@@ -23,14 +23,13 @@ assert_contains() {
 	}
 }
 
-assert_fixed 'VERSION := 0.1.5' "$ROOT/package/Makefile"
+assert_fixed 'VERSION := 0.1.6' "$ROOT/package/Makefile"
 for control in \
 	package/gl-app-wattline/CONTROL/control \
 	package/luci-app-wattline/CONTROL/control \
 	package/wattline-bt/CONTROL/control \
-	package/wattline-rtl8761b/CONTROL/control \
 	package/wattlined/CONTROL/control; do
-	assert_fixed 'Version: 0.1.5' "$ROOT/$control"
+	assert_fixed 'Version: 0.1.6' "$ROOT/$control"
 done
 
 for workflow in "$CI_WORKFLOW" "$WORKFLOW"; do

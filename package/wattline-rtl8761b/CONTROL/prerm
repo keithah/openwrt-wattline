@@ -1,5 +1,0 @@
-#!/bin/sh
-set -eu
-
-# Removal is intentionally inert; runtime state is managed explicitly.
-exit 0

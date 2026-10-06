@@ -1,8 +1,8 @@
 Package: wattline-bt
-Version: 0.1.5
+Version: 0.1.6
 Architecture: all
 Maintainer: Keith <keith@kodi.tv>
 Section: utils
 Priority: optional
 Depends: bluez-daemon, dbus, kmod-bluetooth
-Description: Bluetooth stack dependencies for wattlined (USB BLE dongle). kmod-bluetooth ships btusb.ko for CSR8510-class dongles; note the GL-X3000 kernel lacks the RTL/BCM/MTK btusb sub-drivers, so prefer a generic CSR8510 adapter.
+Description: Bluetooth stack dependencies for wattlined (USB BLE dongle). Requires a CSR8510-class adapter, which kmod-bluetooth drives with the stock btusb.ko. Other chipsets are unsupported; the GL-X3000 kernel lacks the RTL/BCM/MTK btusb sub-drivers.

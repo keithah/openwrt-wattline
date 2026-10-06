@@ -1,7 +1,7 @@
 name: Release
 
-# Tag a release to trigger: git tag v0.1.5 && git push origin v0.1.5
-# The current Wattline release line is v0.1.5.
+# Tag a release to trigger: git tag v0.1.6 && git push origin v0.1.6
+# The current Wattline release line is v0.1.6.
 on:
   push:
     tags: ['v*']
@@ -45,11 +45,10 @@ jobs:
             package/tests/luci_contract_test.sh \
             package/tests/gl_contract_test.sh \
             package/tests/gl_nginx_proxy_test.sh \
+            package/tests/bluetooth-security-recovery_test.sh \
+            package/tests/rtl8761b-retire_test.sh \
             package/tests/feed-migrate-test.sh \
-            package/tests/release-readiness_test.sh \
-            package/tests/rtl8761b-artifacts_test.sh \
-            package/tests/rtl8761b-driver_test.sh \
-            package/tests/rtl8761b-lifecycle_test.sh; do
+            package/tests/release-readiness_test.sh; do
             sh "$test"
           done
           node package/tests/luci_behavior_test.js
@@ -96,7 +95,6 @@ jobs:
             "gl-app-wattline_${VERSION}_all.ipk" \
             "luci-app-wattline_${VERSION}_all.ipk" \
             "wattline-bt_${VERSION}_all.ipk" \
-            "wattline-rtl8761b_${VERSION}_aarch64_cortex-a53.ipk" \
             "wattlined_${VERSION}_aarch64_cortex-a53.ipk" | sort)
 
           if gh release view "$tag" >/dev/null 2>&1; then
